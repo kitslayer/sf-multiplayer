@@ -509,12 +509,17 @@ namespace SFHeadlessHost
                 // so SF's loop is a no-op. We do the actual delivery here.
                 // SF's MsgType enum byte values match our v25 protocol's Pkt*
                 // constants 1:1 for the first 38 entries.
-                if ((object)Instance != null && data != null)
+                //
+                // Phase 6.7 filter: if the oracle's own mirror rig generates
+                // PlayerUpdate (10) or PlayerTalked (12) broadcasts, do NOT
+                // forward them. The client already receives a relay of the
+                // real player's PlayerUpdate via HandlePlayerUpdate, and an
+                // oracle-rig PlayerUpdate would appear as a phantom 2nd
+                // player on the client's screen.
+                if ((object)Instance != null && data != null
+                    && msgType != 10  // PktPlayerUpdate
+                    && msgType != 12) // PktPlayerTalked
                 {
-                    // Use channel 0 by default; SF picks per-MsgType channels
-                    // (see P2PPackageHandler.GetChannelForMsgType) but for
-                    // observation forwarding, channel doesn't matter — client
-                    // dispatches on msgType.
                     Instance.ForwardBroadcastToV25Clients(msgType, data, ignoreUID);
                 }
             }
@@ -674,40 +679,80 @@ namespace SFHeadlessHost
                     Log.LogInfo("[P6.5 NSO] Forced static NetworkSyncableObject.mHasControl = true.");
                 }
 
-                // Fix 2: manually invoke MultiplayerManager.InitSyncedObjects()
-                // to flip mIsListening on every NSO. SF normally calls this
-                // from PrepareMapForTravel coroutine; that path seems to have
-                // bailed early on the oracle.
+                // Fix 2: directly populate per-NSO state instead of calling
+                // SF's InitSyncedObjects (which throws because each NSO's
+                // mNetworkManager is null — NSO.Awake bailed out early when
+                // IsNetworkMatch was momentarily false during scene load).
+                // We retroactively:
+                //   - set NSO.mNetworkManager from GameManager.Instance.mMultiplayerManager
+                //   - set NSO.mPacketHandler from GameManager.Instance.P2PPackageHandler
+                //   - flip NSO.mIsListening = true
                 if (total > 0 && listening == 0)
                 {
-                    var mmType = AccessTools.TypeByName("MultiplayerManager");
-                    if ((object)mmType != null)
+                    var gmType = AccessTools.TypeByName("GameManager");
+                    object gmInst = null;
+                    if ((object)gmType != null)
                     {
-                        var mmInst = UnityEngine.Object.FindObjectOfType(mmType);
-                        if ((object)mmInst != null)
+                        var instGetter = AccessTools.PropertyGetter(gmType, "Instance");
+                        if ((object)instGetter != null) gmInst = instGetter.Invoke(null, null);
+                    }
+                    object mmFromGm = null;
+                    object ppFromGm = null;
+                    if ((object)gmInst != null)
+                    {
+                        var mmField = AccessTools.Field(gmType, "mMultiplayerManager");
+                        if ((object)mmField != null) mmFromGm = mmField.GetValue(gmInst);
+                        var ppProp = AccessTools.PropertyGetter(gmType, "P2PPackageHandler");
+                        if ((object)ppProp != null) ppFromGm = ppProp.Invoke(gmInst, null);
+                    }
+                    var nmField = AccessTools.Field(nsoType, "mNetworkManager");
+                    var phField = AccessTools.Field(nsoType, "mPacketHandler");
+                    var otsField = AccessTools.Field(nsoType, "mObjectToSync");
+                    var updIdxField = AccessTools.Field(nsoType, "mUpdateIndex");
+                    var sendRateField = AccessTools.Field(nsoType, "mSendRate");
+                    var sendRatePerSecField = AccessTools.Field(nsoType, "mSendRatePerSecond");
+                    int patched = 0, listenSet = 0, otsSet = 0;
+                    foreach (var o in nsos)
+                    {
+                        try
                         {
-                            var initMethod = AccessTools.Method(mmType, "InitSyncedObjects");
-                            if ((object)initMethod != null)
+                            var oComp = o as Component;
+                            if ((object)nmField != null && (object)mmFromGm != null)
                             {
-                                try
+                                var cur = nmField.GetValue(o);
+                                if ((object)cur == null) { nmField.SetValue(o, mmFromGm); patched++; }
+                            }
+                            if ((object)phField != null && (object)ppFromGm != null)
+                            {
+                                var cur = phField.GetValue(o);
+                                if ((object)cur == null) phField.SetValue(o, ppFromGm);
+                            }
+                            // mObjectToSync = base.transform if null (the source of the LateUpdate NullRef).
+                            if ((object)otsField != null && (object)oComp != null)
+                            {
+                                var cur = otsField.GetValue(o) as Transform;
+                                if ((object)cur == null) { otsField.SetValue(o, oComp.transform); otsSet++; }
+                            }
+                            // mSendRate = 1/mSendRatePerSecond if uninitialized (default would be 1/0 = inf).
+                            if ((object)sendRateField != null && (object)sendRatePerSecField != null)
+                            {
+                                float sr = (float)sendRateField.GetValue(o);
+                                if (sr <= 0f || float.IsInfinity(sr))
                                 {
-                                    initMethod.Invoke(mmInst, null);
-                                    Log.LogInfo("[P6.5 NSO] Forced MultiplayerManager.InitSyncedObjects() invocation.");
-                                    // Re-count listening NSOs after init.
-                                    int relisten = 0;
-                                    foreach (var o in nsos)
-                                    {
-                                        if ((object)mIsListeningF != null && (bool)mIsListeningF.GetValue(o)) relisten++;
-                                    }
-                                    Log.LogInfo($"[P6.5 NSO] After InitSyncedObjects: {relisten}/{total} listening.");
-                                }
-                                catch (Exception e)
-                                {
-                                    Log.LogError($"[P6.5 NSO] InitSyncedObjects invocation threw: {e.Message}");
+                                    float srPerSec = (float)sendRatePerSecField.GetValue(o);
+                                    if (srPerSec <= 0f) srPerSec = 5f;
+                                    sendRateField.SetValue(o, 1f / srPerSec);
                                 }
                             }
+                            if ((object)mIsListeningF != null)
+                            {
+                                mIsListeningF.SetValue(o, true);
+                                listenSet++;
+                            }
                         }
+                        catch (Exception e) { Log.LogWarning($"[P6.5 NSO] patch one NSO threw: {e.Message}"); }
                     }
+                    Log.LogInfo($"[P6.5 NSO] Patched {patched} NSOs (mNetworkManager was null), set mObjectToSync on {otsSet}, mIsListening=true on {listenSet}/{total}.");
                 }
             }
             catch (Exception e)
@@ -1143,6 +1188,16 @@ namespace SFHeadlessHost
                     {
                         _nsoInventoryAt = -1f;
                         RunNetworkSyncableObjectInventory();
+                        // Schedule mirror-rig spawn after NSO state is fixed.
+                        _mirrorRigSpawnAt = Time.realtimeSinceStartup + 1.0f;
+                    }
+                    // Phase 6.7 — spawn mirror rigs per connected client so they
+                    // collide with NetworkSyncableObjects (boxes/barrels/etc).
+                    if (_mirrorRigSpawnAt > 0f && Time.realtimeSinceStartup >= _mirrorRigSpawnAt && !_mirrorRigSpawnDone)
+                    {
+                        _mirrorRigSpawnAt = -1f;
+                        _mirrorRigSpawnDone = true;
+                        SpawnMirrorRigsForAllClients();
                     }
                     // Round advance: kill detected → fire MapChange after delay.
                     if (_pendingRoundAdvanceAt > 0f && Time.realtimeSinceStartup >= _pendingRoundAdvanceAt)
@@ -1566,14 +1621,34 @@ namespace SFHeadlessHost
         private float _pendingStartMatchAt = -1f;
         private int _roundCounter;
 
-        // Cycle through a small set of Landfall maps when the round advances.
-        // Deliberately conservative — these are stable simple maps.
-        private static readonly int[] _mapCycle = new[] { 6, 8, 10, 12, 14, 16 };
+        // All 123 dumped Landfall map scene indices from /home/miles/sf-multiplayer/maps/.
+        // Range 1-124 minus 102 (the stats / non-MP scene). Some early scenes
+        // (1-5) may be menu / lobby — they're left in; user can re-die if one
+        // doesn't load. SF's stock GetNextLevel uses MapSelectionHandler UI
+        // which isn't initialized on the oracle, so we can't call it directly.
+        private static readonly int[] _allLandfallMaps;
+        private static readonly System.Random _mapRng = new System.Random();
+        static Plugin()
+        {
+            var list = new List<int>();
+            // Skip 1-5 (likely menu/lobby) and 102 (stats). Range 6-124.
+            for (int i = 6; i <= 124; i++) { if (i != 102) list.Add(i); }
+            _allLandfallMaps = list.ToArray();
+        }
+        // Recently-played history so we don't revisit the same map back-to-back
+        // (or within the last few rounds).
+        private static readonly Queue<int> _recentMaps = new Queue<int>();
+        private const int _recentMapsAvoidWindow = 6;
 
         private void AdvanceRound()
         {
             _roundCounter++;
-            int nextScene = _mapCycle[_roundCounter % _mapCycle.Length];
+            // Pick a random scene we haven't visited in the last few rounds.
+            int nextScene = _allLandfallMaps[_mapRng.Next(_allLandfallMaps.Length)];
+            for (int attempt = 0; attempt < 8 && _recentMaps.Contains(nextScene); attempt++)
+                nextScene = _allLandfallMaps[_mapRng.Next(_allLandfallMaps.Length)];
+            _recentMaps.Enqueue(nextScene);
+            while (_recentMaps.Count > _recentMapsAvoidWindow) _recentMaps.Dequeue();
             _currentSceneIndex = nextScene;
             Log.LogInfo($"[SF] Round advance #{_roundCounter}: MapChange → scene {nextScene}");
             // ChangeMap body: [byte winnerIndex=255 (no winner)][byte mapType=0 (Landfall)][int32 sceneIndex LE]
@@ -1846,7 +1921,8 @@ namespace SFHeadlessHost
             Log.LogInfo("[SF] Broadcast StartMatch");
         }
 
-        // PlayerUpdate from client → broadcast to all OTHER clients.
+        // PlayerUpdate from client → broadcast to all OTHER clients + drive
+        // our mirror rig if one exists for this client.
         private void HandlePlayerUpdate(SfClient cli, byte[] data, int off, int len)
         {
             byte[] body = new byte[len];
@@ -1857,6 +1933,110 @@ namespace SFHeadlessHost
                 if (!kv.Value.Spawned) continue;
                 SendSfPacket(kv.Value.Addr, PktPlayerUpdate, body, cli.SteamID, 0);
             }
+
+            // Phase 6.7 — drive the mirror rig's hip to the reported position
+            // so it collides with boxes/barrels on the oracle side. Body
+            // format (from NetworkPlayer SyncClientState): first 4 bytes are
+            // posY + posZ as int16/100.
+            if (len < 4) return;
+            short rawY = (short)(body[0] | (body[1] << 8));
+            short rawZ = (short)(body[2] | (body[3] << 8));
+            float py = rawY / 100f;
+            float pz = rawZ / 100f;
+            UpdateMirrorRigPosition(cli.Slot, new Vector3(0f, py, pz));
+        }
+
+        // === Phase 6.7 mirror rigs ===
+        // Spawn a kinematic player rig per connected client so the oracle has
+        // a collider that can push NetworkSyncableObjects (boxes/barrels) when
+        // the client's position pushes through them.
+        private float _mirrorRigSpawnAt = -1f;
+        private bool _mirrorRigSpawnDone;
+
+        private void SpawnMirrorRigsForAllClients()
+        {
+            Log.LogInfo($"[P6.7] SpawnMirrorRigs: iterating {_sfClients.Count} clients.");
+            int considered = 0, spawned = 0, skipped = 0;
+            foreach (var kv in _sfClients)
+            {
+                var cli = kv.Value;
+                considered++;
+                if (!cli.Initialized)
+                {
+                    Log.LogInfo($"[P6.7] Skip {kv.Key}: not Initialized.");
+                    skipped++;
+                    continue;
+                }
+                if (SlotToRig.ContainsKey(cli.Slot))
+                {
+                    Log.LogInfo($"[P6.7] Skip {kv.Key}: rig already exists for slot {cli.Slot}.");
+                    skipped++;
+                    continue;
+                }
+                Vector3 startPos = new Vector3(0f, 8f, 0f);
+                bool ok = TrySpawnPlayer(cli.Slot, startPos, out string err);
+                if (ok)
+                {
+                    Log.LogInfo($"[P6.7] Spawned mirror rig for client slot={cli.Slot} steamID={cli.SteamID}.");
+                    MakeRigKinematicMirror(cli.Slot);
+                    spawned++;
+                }
+                else
+                {
+                    Log.LogError($"[P6.7] Failed to spawn mirror rig for slot {cli.Slot}: {err}");
+                }
+            }
+            Log.LogInfo($"[P6.7] SpawnMirrorRigs done: considered={considered} spawned={spawned} skipped={skipped}");
+        }
+
+        // Make all body part rigidbodies kinematic so we can MovePosition
+        // them and they'll push other dynamic rigidbodies (boxes) correctly
+        // via Unity's kinematic-sweep resolution.
+        private void MakeRigKinematicMirror(int slot)
+        {
+            if (!SlotToRig.TryGetValue(slot, out var rig) || (object)rig == null) return;
+            var rbs = rig.GetComponentsInChildren<Rigidbody>();
+            int kinSet = 0;
+            foreach (var rb in rbs)
+            {
+                if ((object)rb == null) continue;
+                rb.isKinematic = true;
+                kinSet++;
+            }
+            Log.LogInfo($"[P6.7] Slot {slot}: set {kinSet} rigidbodies to kinematic for mirror behavior.");
+        }
+
+        // Move all body parts of the mirror rig toward the target position.
+        // Use Rigidbody.MovePosition for kinematic bodies so Unity sweeps
+        // collisions and pushes dynamic rigidbodies (boxes) along the way.
+        private static int _mirrorMoveLogCount;
+        private void UpdateMirrorRigPosition(int slot, Vector3 target)
+        {
+            if (!SlotToRig.TryGetValue(slot, out var rig) || (object)rig == null) return;
+            // Translate the entire rig so each body part keeps its relative pose.
+            var rootPos = rig.transform.position;
+            var delta = target - rootPos;
+            // Skip tiny deltas to avoid jitter; the position write is cheap
+            // but MovePosition every PlayerUpdate accumulates.
+            if (delta.sqrMagnitude < 0.0001f) return;
+            rig.transform.position = target;
+            var rbs = rig.GetComponentsInChildren<Rigidbody>();
+            foreach (var rb in rbs)
+            {
+                if ((object)rb == null) continue;
+                if (rb.isKinematic)
+                {
+                    rb.MovePosition(rb.position + delta);
+                }
+                else
+                {
+                    rb.position = rb.position + delta;
+                    rb.velocity = Vector3.zero;
+                }
+            }
+            if (_mirrorMoveLogCount < 5 || _mirrorMoveLogCount % 120 == 0)
+                Log.LogInfo($"[P6.7] Mirror rig slot={slot} moved to {target} (delta={delta.magnitude:0.00})");
+            _mirrorMoveLogCount++;
         }
 
         // === helpers ===
