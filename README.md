@@ -89,7 +89,7 @@ Roadmap, current bugs, and design docs live in [`notes/`](notes/). Most useful e
 
 - [`notes/README.md`](notes/README.md) — index
 - [`notes/SUMMARY.md`](notes/SUMMARY.md) — latest one-paragraph status
-- [`notes/NEXT_SESSION_HANDOFF.md`](notes/NEXT_SESSION_HANDOFF.md) — pick-up-here doc for contributors
+- [`NEXT_STEPS.md`](NEXT_STEPS.md) — current state + roadmap toward client-prediction / server-reconciliation
 - [`notes/phase6/`](notes/phase6/) — current architecture work (host-side gameplay, physics, pickup forwarding)
 
 Issues and PRs welcome.
