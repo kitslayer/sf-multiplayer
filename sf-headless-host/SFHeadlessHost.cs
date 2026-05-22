@@ -197,6 +197,11 @@ namespace SFHeadlessHost
                 case BootState.Running:
                     // Drain any incoming bridge commands.
                     DrainBridgeCommands();
+                    // Push the latest per-slot inputs into each spawned rig's
+                    // CharacterActions. Done every frame even if no new input
+                    // arrived — analog sticks need their last value held so
+                    // the rig keeps moving between input packets.
+                    WriteInputsToRigs();
                     // Emit a state snapshot at 30 Hz if anyone has pinged us.
                     if (_bridgePeer != null && Time.realtimeSinceStartup - _lastStateEmit >= (1.0f / 30.0f))
                     {
@@ -230,6 +235,22 @@ namespace SFHeadlessHost
         private IPEndPoint _bridgePeer; // last sender; we reply to whoever pinged us last
         private float _lastStateEmit;
         private long _bridgeTick;
+
+        // Slot → spawned Player rig GameObject (populated by TrySpawnPlayer).
+        // Used by the input-injection path to find which rig to drive.
+        private static readonly Dictionary<int, GameObject> SlotToRig = new Dictionary<int, GameObject>();
+
+        // Per-slot input frame the bridge has most recently received. Drained by
+        // the per-frame input-write hook so values are written every Update
+        // regardless of whether new inputs arrived (analog sticks need to keep
+        // their last value across frames; otherwise the rig stops moving when
+        // the input rate dips).
+        private struct InputFrame
+        {
+            public float StickX, StickY, AimX, AimY;
+            public int Buttons; // bit0=jump, bit1=fire, bit2=block, bit3=throw
+        }
+        private static readonly Dictionary<int, InputFrame> SlotInputs = new Dictionary<int, InputFrame>();
 
         private void StartBridge()
         {
@@ -319,6 +340,33 @@ namespace SFHeadlessHost
                     SendBridgeJson(from, $"{{\"reply\":\"ack\",\"cmd\":\"spawnPlayer\",\"ok\":false,\"err\":\"{err}\"}}");
                 }
             }
+            else if (cmd == "inspect")
+            {
+                int slot = ExtractIntField(body, "slot", 0);
+                string info = InspectRig(slot);
+                SendBridgeJson(from, $"{{\"reply\":\"inspect\",\"slot\":{slot},\"info\":\"{info.Replace("\\","\\\\").Replace("\"","\\\"")}\"}}");
+            }
+            else if (cmd == "applyInput")
+            {
+                int slot = ExtractIntField(body, "slot", -1);
+                if (slot < 0)
+                {
+                    SendBridgeJson(from, "{\"reply\":\"ack\",\"cmd\":\"applyInput\",\"ok\":false,\"err\":\"bad slot\"}");
+                }
+                else
+                {
+                    SlotInputs[slot] = new InputFrame
+                    {
+                        StickX  = ExtractFloatField(body, "stickX"),
+                        StickY  = ExtractFloatField(body, "stickY"),
+                        AimX    = ExtractFloatField(body, "aimX"),
+                        AimY    = ExtractFloatField(body, "aimY"),
+                        Buttons = ExtractIntField(body, "buttons", 0),
+                    };
+                    // No reply for applyInput — comes 60 times/sec from Go,
+                    // we don't want to flood the network with acks.
+                }
+            }
             else
             {
                 SendBridgeJson(from, $"{{\"reply\":\"ack\",\"cmd\":\"{cmd}\",\"ok\":false,\"err\":\"unknown cmd\"}}");
@@ -360,29 +408,30 @@ namespace SFHeadlessHost
                 _sb.Append(",\"scene\":\"").Append(SceneManager.GetActiveScene().name).Append("\"");
                 _sb.Append(",\"ents\":[");
 
-                // For v0 we extract Controller-managed player rigs only.
-                // Controller is the Stick Fight player controller MonoBehaviour
-                // (per decompile); its transform.position is the player's
-                // current world position.
-                var ctrlType = AccessTools.TypeByName("Controller");
-                if ((object)ctrlType != null)
+                // Report only the rigs we spawned — slot-keyed via SlotToRig.
+                // The root transform doesn't move under SF's physics model;
+                // the actual position is determined by the ragdoll skeleton's
+                // BodyPart Rigidbodies. Use the first BodyPart's position
+                // (typically the hip/pelvis) as the canonical position.
+                bool first = true;
+                var bodyPartType = AccessTools.TypeByName("BodyPart");
+                foreach (var kv in SlotToRig)
                 {
-                    var insts = UnityEngine.Object.FindObjectsOfType(ctrlType);
-                    bool first = true;
-                    for (int i = 0; i < insts.Length; i++)
+                    var rig = kv.Value;
+                    if ((object)rig == null) continue;
+                    Vector3 p = rig.transform.position;
+                    if ((object)bodyPartType != null)
                     {
-                        var comp = insts[i] as Component;
-                        if ((object)comp == null) continue;
-                        var t = comp.transform;
-                        var p = t.position;
-                        if (!first) _sb.Append(",");
-                        first = false;
-                        _sb.Append("{\"slot\":").Append(i);
-                        _sb.Append(",\"x\":").Append(p.x.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture));
-                        _sb.Append(",\"y\":").Append(p.y.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture));
-                        _sb.Append(",\"z\":").Append(p.z.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture));
-                        _sb.Append("}");
+                        var bp = rig.GetComponentInChildren(bodyPartType) as Component;
+                        if ((object)bp != null) p = bp.transform.position;
                     }
+                    if (!first) _sb.Append(",");
+                    first = false;
+                    _sb.Append("{\"slot\":").Append(kv.Key);
+                    _sb.Append(",\"x\":").Append(p.x.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture));
+                    _sb.Append(",\"y\":").Append(p.y.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture));
+                    _sb.Append(",\"z\":").Append(p.z.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture));
+                    _sb.Append("}");
                 }
                 _sb.Append("]}");
                 SendBridgeJson(to, _sb.ToString());
@@ -391,6 +440,52 @@ namespace SFHeadlessHost
             {
                 if (Verbose) Log.LogDebug($"EmitStateSnapshot: {e.Message}");
             }
+        }
+
+        // InspectRig dumps the slot's rig state — useful to diagnose why a
+        // freshly-spawned player isn't moving / falling / responding to input.
+        private string InspectRig(int slot)
+        {
+            try
+            {
+                if (!SlotToRig.TryGetValue(slot, out var rig) || (object)rig == null)
+                {
+                    return "no rig";
+                }
+                var sb = new StringBuilder(512);
+                sb.Append("active=").Append(rig.activeSelf).Append("/").Append(rig.activeInHierarchy);
+                sb.Append("; pos=").Append(rig.transform.position.ToString("0.00"));
+
+                var rb = rig.GetComponent<Rigidbody>();
+                if ((object)rb != null)
+                {
+                    sb.Append("; rb.kinematic=").Append(rb.isKinematic);
+                    sb.Append(" useGravity=").Append(rb.useGravity);
+                    sb.Append(" vel=").Append(rb.velocity.ToString("0.00"));
+                }
+                else sb.Append("; no Rigidbody");
+
+                var ctrl = rig.GetComponent(AccessTools.TypeByName("Controller"));
+                if ((object)ctrl != null)
+                {
+                    var hasControl = AccessTools.Field(ctrl.GetType(), "mHasControl");
+                    if ((object)hasControl != null) sb.Append("; hasControl=").Append(hasControl.GetValue(ctrl));
+                    var inactive = AccessTools.Field(ctrl.GetType(), "inactive");
+                    if ((object)inactive != null) sb.Append(" inactive=").Append(inactive.GetValue(ctrl));
+                }
+                else sb.Append("; no Controller");
+
+                var mov = rig.GetComponent(AccessTools.TypeByName("Movement"));
+                if ((object)mov != null) sb.Append("; Movement=").Append(((Behaviour)mov).enabled);
+                else sb.Append("; no Movement");
+
+                var standing = rig.GetComponent(AccessTools.TypeByName("Standing"));
+                if ((object)standing != null) sb.Append("; Standing=").Append(((Behaviour)standing).enabled);
+                else sb.Append("; no Standing");
+
+                return sb.ToString();
+            }
+            catch (Exception e) { return "exc: " + e.Message; }
         }
 
         // TrySpawnPlayer instantiates a Player rig in the active scene at the
@@ -417,6 +512,50 @@ namespace SFHeadlessHost
                 var go = UnityEngine.Object.Instantiate(prefab, spawnPos, Quaternion.identity) as GameObject;
                 if ((object)go == null) { err = "Instantiate returned null"; return false; }
                 go.name = $"OracleSpawn_Slot{slot}";
+
+                // Bind a fresh CharacterActions so the Controller has somewhere
+                // to read input from. Without this, mPlayerActions is null and
+                // the Controller.Update path early-returns / no movement.
+                //
+                // Stock ControllerHandler.CreatePlayer calls AssignNewDevice
+                // (which requires a real InputDevice we can't synthesize),
+                // but Controller also exposes TakeLocalControl(CharacterActions)
+                // which doesn't need a device — perfect for our bridge-driven
+                // input flow.
+                var ctrlType = AccessTools.TypeByName("Controller");
+                var caType = AccessTools.TypeByName("CharacterActions");
+                if ((object)ctrlType != null && (object)caType != null)
+                {
+                    var ctrl = go.GetComponent(ctrlType);
+                    if ((object)ctrl != null)
+                    {
+                        var createMethod = AccessTools.Method(caType, "CreateWithControllerBindings");
+                        if ((object)createMethod != null)
+                        {
+                            var actions = createMethod.Invoke(null, null);
+                            var takeMethod = AccessTools.Method(ctrlType, "TakeLocalControl");
+                            if ((object)actions != null && (object)takeMethod != null)
+                            {
+                                takeMethod.Invoke(ctrl, new object[] { actions });
+                                // Also assign a playerID so any code reading
+                                // controller.playerID gets a sensible slot.
+                                var pidField = AccessTools.Field(ctrlType, "playerID");
+                                if ((object)pidField != null) pidField.SetValue(ctrl, slot);
+                                Log.LogInfo($"Bound CharacterActions to slot {slot} via TakeLocalControl.");
+                            }
+                            else
+                            {
+                                Log.LogWarning("Could not bind CharacterActions: CreateWith* returned null or TakeLocalControl missing.");
+                            }
+                        }
+                    }
+                }
+
+                SlotToRig[slot] = go;
+                if (!SlotInputs.ContainsKey(slot))
+                {
+                    SlotInputs[slot] = new InputFrame();
+                }
                 Log.LogInfo($"Spawned oracle player rig for slot {slot} at {spawnPos} (GO: {go.name})");
                 return true;
             }
@@ -425,6 +564,88 @@ namespace SFHeadlessHost
                 err = e.Message;
                 return false;
             }
+        }
+
+        // WriteInputsToRigs pushes the most recent per-slot input frame into
+        // each spawned rig's CharacterActions via reflection. The Controller
+        // reads these every frame in Update — so by writing them right before
+        // Controller.Update runs (we're called from Plugin.Update which Unity
+        // schedules before MonoBehaviours by default), our values become the
+        // effective input for that frame.
+        //
+        // CharacterActions is an InControl PlayerActionSet. Its Movement /
+        // Aiming fields are TwoAxisInputControl with a settable RawValue.
+        // Buttons are PlayerAction with a settable RawValue / IsPressed.
+        private void WriteInputsToRigs()
+        {
+            if (SlotToRig.Count == 0) return;
+            try
+            {
+                foreach (var kv in SlotToRig)
+                {
+                    int slot = kv.Key;
+                    GameObject rig = kv.Value;
+                    if ((object)rig == null) continue;
+                    if (!SlotInputs.TryGetValue(slot, out var input)) continue;
+
+                    var ctrlType = AccessTools.TypeByName("Controller");
+                    if ((object)ctrlType == null) continue;
+                    var ctrl = rig.GetComponent(ctrlType);
+                    if ((object)ctrl == null) continue;
+                    var actionsField = AccessTools.Field(ctrlType, "mPlayerActions");
+                    if ((object)actionsField == null) continue;
+                    var actions = actionsField.GetValue(ctrl);
+                    if ((object)actions == null) continue;
+
+                    // Movement.RawValue = Vector2(stickX, stickY)
+                    SetTwoAxis(actions, "Movement", new Vector2(input.StickX, input.StickY));
+                    SetTwoAxis(actions, "Aiming",   new Vector2(input.AimX,   input.AimY));
+
+                    SetOneAxisOrButton(actions, "PunchOrFire", (input.Buttons & 0x02) != 0);
+                    SetOneAxisOrButton(actions, "Block",       (input.Buttons & 0x04) != 0);
+                    SetOneAxisOrButton(actions, "Throw",       (input.Buttons & 0x08) != 0);
+                    SetOneAxisOrButton(actions, "Jump",        (input.Buttons & 0x01) != 0);
+                }
+            }
+            catch (Exception e)
+            {
+                if (Verbose) Log.LogDebug($"WriteInputsToRigs: {e.Message}");
+            }
+        }
+
+        // SetTwoAxis writes (x, y) to the named TwoAxisInputControl on the
+        // CharacterActions instance by poking its private `thisValue` Vector2
+        // field directly. Stock InControl exposes Value as a getter only
+        // and no setter API for "fake" input — we have to bypass.
+        private static void SetTwoAxis(object actions, string fieldName, Vector2 v)
+        {
+            var f = AccessTools.Field(actions.GetType(), fieldName);
+            if ((object)f == null) return;
+            var ctrl = f.GetValue(actions);
+            if ((object)ctrl == null) return;
+            var t = ctrl.GetType();
+            var thisValueField = AccessTools.Field(t, "thisValue");
+            if ((object)thisValueField != null) thisValueField.SetValue(ctrl, v);
+            // X / Y are protected properties; their backing fields are auto-
+            // generated (<X>k__BackingField). Update them too so anything that
+            // reads .X / .Y sees the new value.
+            var xBacking = AccessTools.Field(t, "<X>k__BackingField");
+            var yBacking = AccessTools.Field(t, "<Y>k__BackingField");
+            if ((object)xBacking != null) xBacking.SetValue(ctrl, v.x);
+            if ((object)yBacking != null) yBacking.SetValue(ctrl, v.y);
+        }
+
+        // SetOneAxisOrButton writes a button-press state by setting the
+        // PlayerAction's private thisValue (float, 0.0 / 1.0).
+        private static void SetOneAxisOrButton(object actions, string fieldName, bool pressed)
+        {
+            var f = AccessTools.Field(actions.GetType(), fieldName);
+            if ((object)f == null) return;
+            var ctrl = f.GetValue(actions);
+            if ((object)ctrl == null) return;
+            var t = ctrl.GetType();
+            var thisValueField = AccessTools.Field(t, "thisValue");
+            if ((object)thisValueField != null) thisValueField.SetValue(ctrl, pressed ? 1.0f : 0.0f);
         }
 
         // === tiny JSON field extractors (avoid dragging in JSON.NET) ===
@@ -440,6 +661,22 @@ namespace SFHeadlessHost
             int q2 = json.IndexOf('"', q1 + 1);
             if (q2 < 0) return null;
             return json.Substring(q1 + 1, q2 - q1 - 1);
+        }
+
+        private static float ExtractFloatField(string json, string field)
+        {
+            int i = json.IndexOf("\"" + field + "\"");
+            if (i < 0) return 0f;
+            int colon = json.IndexOf(':', i);
+            if (colon < 0) return 0f;
+            int start = colon + 1;
+            while (start < json.Length && (json[start] == ' ' || json[start] == '\t')) start++;
+            int end = start;
+            while (end < json.Length && (char.IsDigit(json[end]) || json[end] == '-' || json[end] == '.' || json[end] == 'e' || json[end] == 'E' || json[end] == '+')) end++;
+            if (end == start) return 0f;
+            float f;
+            if (float.TryParse(json.Substring(start, end - start), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out f)) return f;
+            return 0f;
         }
 
         private static int ExtractIntField(string json, string field, int fallback)
