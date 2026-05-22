@@ -38,6 +38,7 @@ namespace SFHeadlessHost
         public const string PluginVersion = "0.1.0";
 
         internal static ManualLogSource Log;
+        internal static Plugin Instance;
         internal static int BindPort = 1340;     // Game-traffic port (Lidgren)
         internal static int BridgePort = 1341;   // State-bridge port (this plugin)
         internal static int InitialScene = 0; // 0 = lobby (boots ControllerHandler + GameManager DontDestroyOnLoad infrastructure)
@@ -46,6 +47,7 @@ namespace SFHeadlessHost
         private void Awake()
         {
             Log = Logger;
+            Instance = this;
 
             // Unity 5.6 doesn't have Application.isBatchMode — fall back to
             // checking the command-line for -batchmode.
@@ -135,6 +137,163 @@ namespace SFHeadlessHost
             catch (Exception e)
             {
                 Log.LogError($"Controller.Update prefix patch failed: {e}");
+            }
+
+            // Phase 6.5 Step 1 — observe-only host-side patches.
+            //   (a) Postfix MultiplayerManager.IsServer getter → true. Activates
+            //       SF's host-side branches (weapon spawning, killbox checks,
+            //       projectile auth, etc) inside the oracle's Unity instance.
+            //   (b) Prefix MultiplayerManager.SendMessageToAllClients — LOG only,
+            //       run original. Original loops mConnectedClients (empty on the
+            //       oracle) so it's a no-op; logging tells us which host
+            //       broadcasts fire when (a) flips IsServer on.
+            //   (c) Prefix P2PPackageHandler.SendP2PPacketToUser(CSteamID,...) —
+            //       LOG only. Catches direct host→client sends (ClientInit on
+            //       new join, KickPlayer, etc).
+            try
+            {
+                var harmony = new Harmony(PluginGuid + ".phase6-5-observe");
+
+                var mmType = AccessTools.TypeByName("MultiplayerManager");
+                if ((object)mmType != null)
+                {
+                    var isServerGetter = AccessTools.PropertyGetter(mmType, "IsServer");
+                    if ((object)isServerGetter != null)
+                    {
+                        harmony.Patch(isServerGetter, postfix: new HarmonyMethod(
+                            AccessTools.Method(typeof(Plugin), nameof(IsServerPostfix))));
+                        Log.LogInfo("[P6.5] Patched MultiplayerManager.IsServer → true.");
+                    }
+                    else
+                    {
+                        Log.LogWarning("[P6.5] Could not find MultiplayerManager.IsServer getter.");
+                    }
+
+                    var smtacMethod = AccessTools.Method(mmType, "SendMessageToAllClients");
+                    if ((object)smtacMethod != null)
+                    {
+                        harmony.Patch(smtacMethod, prefix: new HarmonyMethod(
+                            AccessTools.Method(typeof(Plugin), nameof(SendBroadcastPrefix))));
+                        Log.LogInfo("[P6.5] Patched MultiplayerManager.SendMessageToAllClients (log-only).");
+                    }
+                    else
+                    {
+                        Log.LogWarning("[P6.5] Could not find MultiplayerManager.SendMessageToAllClients.");
+                    }
+                }
+                else
+                {
+                    Log.LogWarning("[P6.5] Could not find type MultiplayerManager.");
+                }
+
+                // Phase 6.5 Step 2d — pin MatchmakingHandler.IsNetworkMatch=true.
+                // Controller.cs line 123 + NetworkPlayer.cs line 202 reset
+                // mIsNetworkMatch to MatchmakingHandler.Instance.IsInsideLobby
+                // every lifecycle tick. IsInsideLobby is false on the oracle
+                // because we never invoke SF's HostServer. Without this, the
+                // SetNetworkMatch(true) call gets clobbered → SpawnRandomWeapon
+                // takes the local Instantiate branch with null weaponObject.
+                var mhTypeP = AccessTools.TypeByName("MatchmakingHandler");
+                if ((object)mhTypeP != null)
+                {
+                    // Postfix on getter (in case it's not inlined).
+                    var isNetMatchGetter = AccessTools.PropertyGetter(mhTypeP, "IsNetworkMatch");
+                    if ((object)isNetMatchGetter != null)
+                    {
+                        harmony.Patch(isNetMatchGetter, postfix: new HarmonyMethod(
+                            AccessTools.Method(typeof(Plugin), nameof(IsNetworkMatchPostfix))));
+                        Log.LogInfo("[P6.5] Patched MatchmakingHandler.IsNetworkMatch getter → true.");
+                    }
+                    // Prefix on SetNetworkMatch — force the parameter to true.
+                    // Mono inlined IsNetworkMatch getter into SpawnRandomWeapon,
+                    // so the getter postfix doesn't catch inlined reads. The
+                    // backing field mIsNetworkMatch needs to stay true. Pin it
+                    // by intercepting every SetNetworkMatch call (Controller's
+                    // lifecycle reset, etc.) and forcing the arg.
+                    var setNetMatchMethod = AccessTools.Method(mhTypeP, "SetNetworkMatch");
+                    if ((object)setNetMatchMethod != null)
+                    {
+                        harmony.Patch(setNetMatchMethod, prefix: new HarmonyMethod(
+                            AccessTools.Method(typeof(Plugin), nameof(SetNetworkMatchPrefix))));
+                        Log.LogInfo("[P6.5] Patched MatchmakingHandler.SetNetworkMatch (force arg=true).");
+                    }
+                }
+
+                // Phase 6.5 Step 2c — bypass WeaponSelectionHandler.GetRandomWeaponIndex
+                // returning -1 (no active weapons because UI never initialized
+                // on batchmode). Force a valid index so SpawnRandomWeapon
+                // proceeds to call mNetworkManager.SpawnWeapon → our intercept.
+                var wsType = AccessTools.TypeByName("WeaponSelectionHandler");
+                if ((object)wsType != null)
+                {
+                    var grwiMethod = AccessTools.Method(wsType, "GetRandomWeaponIndex");
+                    if ((object)grwiMethod != null)
+                    {
+                        harmony.Patch(grwiMethod, prefix: new HarmonyMethod(
+                            AccessTools.Method(typeof(Plugin), nameof(GetRandomWeaponIndexPrefix))));
+                        Log.LogInfo("[P6.5] Patched WeaponSelectionHandler.GetRandomWeaponIndex (forced index 0).");
+                    }
+                    else
+                    {
+                        Log.LogWarning("[P6.5] WeaponSelectionHandler.GetRandomWeaponIndex method not found.");
+                    }
+                }
+                else
+                {
+                    Log.LogWarning("[P6.5] WeaponSelectionHandler type not found.");
+                }
+
+                // Phase 6.5 Step 2e — replace GameManager.SpawnRandomWeapon entirely.
+                // Mono inlined MatchmakingHandler.IsNetworkMatch getter into the
+                // method body, so neither the getter postfix nor SetNetworkMatch
+                // prefix can flip the inlined ldsfld read. The else branch fires
+                // with weaponObject=null → ArgumentException. Skip the original
+                // and call MultiplayerManager.SpawnWeapon directly.
+                var gmTypeP = AccessTools.TypeByName("GameManager");
+                if ((object)gmTypeP != null)
+                {
+                    var srwMethod = AccessTools.Method(gmTypeP, "SpawnRandomWeapon");
+                    if ((object)srwMethod != null)
+                    {
+                        harmony.Patch(srwMethod, prefix: new HarmonyMethod(
+                            AccessTools.Method(typeof(Plugin), nameof(SpawnRandomWeaponPrefix))));
+                        Log.LogInfo("[P6.5] Patched GameManager.SpawnRandomWeapon (replaced with network-only impl).");
+                    }
+                }
+
+                var ppType = AccessTools.TypeByName("P2PPackageHandler");
+                if ((object)ppType != null)
+                {
+                    MethodInfo csteamSend = null;
+                    foreach (var m in ppType.GetMethods(BindingFlags.Public | BindingFlags.Instance))
+                    {
+                        if (m.Name != "SendP2PPacketToUser") continue;
+                        var ps = m.GetParameters();
+                        if (ps.Length >= 1 && ps[0].ParameterType.Name == "CSteamID")
+                        {
+                            csteamSend = m;
+                            break;
+                        }
+                    }
+                    if ((object)csteamSend != null)
+                    {
+                        harmony.Patch(csteamSend, prefix: new HarmonyMethod(
+                            AccessTools.Method(typeof(Plugin), nameof(SendDirectPrefix))));
+                        Log.LogInfo("[P6.5] Patched P2PPackageHandler.SendP2PPacketToUser(CSteamID,...) (log-only).");
+                    }
+                    else
+                    {
+                        Log.LogWarning("[P6.5] Could not find P2PPackageHandler.SendP2PPacketToUser(CSteamID,...).");
+                    }
+                }
+                else
+                {
+                    Log.LogWarning("[P6.5] Could not find type P2PPackageHandler.");
+                }
+            }
+            catch (Exception e)
+            {
+                Log.LogError($"[P6.5] observe patch failed: {e}");
             }
 
             _bootStartedAt = Time.realtimeSinceStartup;
@@ -284,6 +443,398 @@ namespace SFHeadlessHost
                 catch { }
             }
         }
+
+        // Phase 6.5 Step 1 — IsServer=true. Static property getter so no __instance.
+        internal static void IsServerPostfix(ref bool __result)
+        {
+            __result = true;
+        }
+
+        // Phase 6.5 Step 2d — IsNetworkMatch=true. Pin against Controller's reset.
+        internal static void IsNetworkMatchPostfix(ref bool __result)
+        {
+            __result = true;
+        }
+
+        // Phase 6.5 Step 2d — force every SetNetworkMatch(v) call to use v=true.
+        // Defeats the inlined-getter problem because the backing field stays true.
+        private static int _setNetMatchInterceptCount;
+        internal static bool SetNetworkMatchPrefix(ref bool v)
+        {
+            _setNetMatchInterceptCount++;
+            if (!v && _setNetMatchInterceptCount <= 5)
+                Log.LogInfo($"[P6.5] SetNetworkMatch(false) intercepted #{_setNetMatchInterceptCount} → forcing true");
+            v = true;
+            return true; // run original with forced arg
+        }
+
+        // Phase 6.5 Step 2e — replace GameManager.SpawnRandomWeapon. Computes a
+        // spawn position matching the original method's logic, picks a weapon
+        // via the (already-patched) GetRandomWeaponIndex, and calls
+        // MultiplayerManager.SpawnWeapon directly. Returns false to skip
+        // original.
+        private static int _srwCallCount;
+        internal static bool SpawnRandomWeaponPrefix(object __instance)
+        {
+            try
+            {
+                _srwCallCount++;
+                // Reset randomWeaponCounter to a new value (mirrors original lines 252-264).
+                var gmType = __instance.GetType();
+                var rwcField = AccessTools.Field(gmType, "randomWeaponCounter");
+                var extraField = AccessTools.Field(gmType, "extraSpawnWeaponTime");
+                float extra = (object)extraField != null ? (float)extraField.GetValue(__instance) : 0f;
+                if ((object)rwcField != null)
+                {
+                    float newWait = UnityEngine.Random.Range(5f, 8f) + extra;
+                    rwcField.SetValue(__instance, newWait);
+                }
+
+                // Pick a weapon index (cycled via our other prefix).
+                int weaponIdx = _srwCallCount % 8;
+
+                // Spawn position mirroring original: Y=11*scale, Z=Random(-8,8).
+                float zOff = UnityEngine.Random.Range(0f, 8f);
+                if (_srwCallCount % 2 == 0) zOff *= -1f;
+                float scale = 1f;
+                var lastAppliedScaleF = AccessTools.Field(gmType, "LastAppliedScale");
+                if ((object)lastAppliedScaleF != null)
+                {
+                    var v = lastAppliedScaleF.GetValue(__instance);
+                    if (v is float f) scale = f;
+                }
+                Vector3 spawnPos = Vector3.up * (11f * scale) + Vector3.forward * zOff;
+
+                // Find MultiplayerManager.SpawnWeapon and invoke directly. SF
+                // host code's `mNetworkManager` field is private; we go via
+                // FindObjectOfType.
+                var mmType = AccessTools.TypeByName("MultiplayerManager");
+                if ((object)mmType == null) return false;
+                var mmInst = UnityEngine.Object.FindObjectOfType(mmType);
+                if ((object)mmInst == null)
+                {
+                    if (_srwCallCount <= 3)
+                        Log.LogWarning("[P6.5 SRW] MultiplayerManager instance is null; skipping.");
+                    return false;
+                }
+                var spawnWeapon = AccessTools.Method(mmType, "SpawnWeapon", new[] { typeof(int), typeof(Vector3), typeof(bool) });
+                if ((object)spawnWeapon == null)
+                {
+                    if (_srwCallCount <= 3)
+                        Log.LogWarning("[P6.5 SRW] SpawnWeapon method not found.");
+                    return false;
+                }
+                if (_srwCallCount <= 5 || _srwCallCount % 10 == 0)
+                    Log.LogInfo($"[P6.5 SRW] call#{_srwCallCount} → SpawnWeapon(id={weaponIdx}, pos={spawnPos}, present=false)");
+                spawnWeapon.Invoke(mmInst, new object[] { weaponIdx, spawnPos, false });
+            }
+            catch (Exception e)
+            {
+                Log.LogWarning($"[P6.5 SRW] threw: {e.Message}");
+            }
+            return false; // skip original SpawnRandomWeapon
+        }
+
+        // Phase 6.5 Step 2c — force GetRandomWeaponIndex to return a valid index.
+        // Stock SF returns -1 if m_WeaponRaritiesArray is empty (UI never set up).
+        // Network branch in SpawnRandomWeapon only uses the int index; weaponObject
+        // is consumed only by the local-spawn path which we don't take.
+        private static int _grwiCallCount;
+        internal static bool GetRandomWeaponIndexPrefix(bool mustBeActive, ref GameObject weaponObject, ref int __result)
+        {
+            _grwiCallCount++;
+            weaponObject = null;
+            // Cycle through a few weapon IDs for variety. 0..7 are stock SF weapons.
+            __result = _grwiCallCount % 8;
+            if (_grwiCallCount <= 3 || _grwiCallCount % 5 == 0)
+                Log.LogInfo($"[P6.5] GetRandomWeaponIndexPrefix call#{_grwiCallCount} → returning {__result}");
+            return false; // skip original
+        }
+
+        // Phase 6.5 Step 1 — log host broadcasts. Observe-only: return true so the
+        // original method runs (it's a no-op on the oracle because mConnectedClients
+        // is empty; we just want to see which msgTypes SF host code wants to send).
+        // Use object[] __args to dodge needing typed refs to EP2PSend (Steamworks).
+        private static int _p65BroadcastCount;
+        private static readonly Dictionary<byte, int> _p65BroadcastByType = new Dictionary<byte, int>();
+        internal static bool SendBroadcastPrefix(object[] __args)
+        {
+            try
+            {
+                _p65BroadcastCount++;
+                var data = __args.Length > 0 ? __args[0] as byte[] : null;
+                byte msgType = (__args.Length > 1 && __args[1] != null) ? (byte)__args[1] : (byte)255;
+                bool ignoreServer = __args.Length > 2 && __args[2] is bool b && b;
+                ulong ignoreUID = __args.Length > 3 && __args[3] is ulong u ? u : 0uL;
+
+                int prev;
+                _p65BroadcastByType.TryGetValue(msgType, out prev);
+                _p65BroadcastByType[msgType] = prev + 1;
+
+                bool first = prev == 0;
+                bool sample = first || (_p65BroadcastByType[msgType] % 60 == 0);
+                if (sample)
+                {
+                    Log.LogInfo($"[P6.5] HostBroadcast#{_p65BroadcastCount} msgType={msgType}({MsgTypeName(msgType)}) bodyLen={data?.Length ?? 0} ignoreSrv={ignoreServer} ignoreUID={ignoreUID} count[{msgType}]={_p65BroadcastByType[msgType]}");
+                }
+
+                // Phase 6.5 Step 2 — forward the broadcast through our v25
+                // protocol so the real client actually receives it. SF's own
+                // SendMessageToAllClients loop iterates mConnectedClients which
+                // is empty on the oracle (we never registered the user there),
+                // so SF's loop is a no-op. We do the actual delivery here.
+                // SF's MsgType enum byte values match our v25 protocol's Pkt*
+                // constants 1:1 for the first 38 entries.
+                if ((object)Instance != null && data != null)
+                {
+                    // Use channel 0 by default; SF picks per-MsgType channels
+                    // (see P2PPackageHandler.GetChannelForMsgType) but for
+                    // observation forwarding, channel doesn't matter — client
+                    // dispatches on msgType.
+                    Instance.ForwardBroadcastToV25Clients(msgType, data, ignoreUID);
+                }
+            }
+            catch (Exception e)
+            {
+                Log.LogWarning($"[P6.5] broadcast prefix threw: {e.Message}");
+            }
+            return true; // run original (no-op on oracle because mConnectedClients is empty)
+        }
+
+        // Forward an intercepted host broadcast through our v25 UDP socket.
+        internal void ForwardBroadcastToV25Clients(byte msgType, byte[] body, ulong ignoreUID)
+        {
+            int sent = 0;
+            foreach (var kv in _sfClients)
+            {
+                var cli = kv.Value;
+                if (!cli.Initialized) continue;
+                if (ignoreUID != 0 && cli.SteamID == ignoreUID) continue;
+                SendSfPacket(cli.Addr, msgType, body, 0uL, 0);
+                sent++;
+            }
+            if (sent > 0 && _p65BroadcastCount <= 5)
+                Log.LogInfo($"[P6.5] Forwarded msgType={msgType}({MsgTypeName(msgType)}) bodyLen={body.Length} to {sent} v25 client(s).");
+        }
+
+        // Phase 6.5 Step 1 — log direct user-targeted sends (CSteamID overload).
+        private static int _p65DirectCount;
+        private static readonly Dictionary<byte, int> _p65DirectByType = new Dictionary<byte, int>();
+        internal static bool SendDirectPrefix(object[] __args)
+        {
+            try
+            {
+                _p65DirectCount++;
+                // args: [CSteamID clientID, byte[] data, MsgType type, EP2PSend, int channel]
+                ulong sid = 0uL;
+                if (__args.Length > 0 && __args[0] != null)
+                {
+                    var idObj = __args[0];
+                    var f = AccessTools.Field(idObj.GetType(), "m_SteamID");
+                    if ((object)f != null) sid = (ulong)f.GetValue(idObj);
+                }
+                var data = __args.Length > 1 ? __args[1] as byte[] : null;
+                byte msgType = (__args.Length > 2 && __args[2] != null) ? (byte)__args[2] : (byte)255;
+
+                int prev;
+                _p65DirectByType.TryGetValue(msgType, out prev);
+                _p65DirectByType[msgType] = prev + 1;
+
+                bool first = prev == 0;
+                bool sample = first || (_p65DirectByType[msgType] % 60 == 0);
+                if (sample)
+                {
+                    Log.LogInfo($"[P6.5] DirectSend#{_p65DirectCount} → sid={sid} msgType={msgType}({MsgTypeName(msgType)}) bodyLen={data?.Length ?? 0} count[{msgType}]={_p65DirectByType[msgType]}");
+                }
+            }
+            catch (Exception e)
+            {
+                Log.LogWarning($"[P6.5] direct prefix threw: {e.Message}");
+            }
+            return true;
+        }
+
+        // Phase 6.5 Step 2 — schedule + invoke GameManager.StartMatch on the oracle.
+        private static float _oracleStartMatchAt = -1f;
+        private static bool _oracleStartMatchFired;
+        private static float _oracleCountDownAt = -1f;
+        private static bool _oracleCountDownFired;
+        private static void InvokeOracleStartCountDown()
+        {
+            try
+            {
+                var gmType = AccessTools.TypeByName("GameManager");
+                if ((object)gmType == null) { Log.LogWarning("[P6.5] GameManager type not found (countdown)"); return; }
+                object gmInst = null;
+                var instanceGetter = AccessTools.PropertyGetter(gmType, "Instance");
+                if ((object)instanceGetter != null) gmInst = instanceGetter.Invoke(null, null);
+                if ((object)gmInst == null) gmInst = UnityEngine.Object.FindObjectOfType(gmType);
+                if ((object)gmInst == null) { Log.LogWarning("[P6.5] GameManager instance not found (countdown)"); return; }
+
+                // Brute-force: set GameManager.inFight = true directly. The
+                // CountDownCoroutine path depends on mCountDownHandler (UI
+                // element) and m_CustomMapInfoHandler which may be null in
+                // batchmode. Bypass them entirely.
+                var inFightField = AccessTools.Field(gmType, "inFight");
+                if ((object)inFightField != null)
+                {
+                    inFightField.SetValue(gmInst, true);
+                    Log.LogInfo("[P6.5] Forced GameManager.inFight = true (bypassing countdown UI).");
+                }
+                else
+                {
+                    Log.LogWarning("[P6.5] GameManager.inFight field not found");
+                }
+                // Also reset randomWeaponCounter so a weapon will spawn soon.
+                var rwcField = AccessTools.Field(gmType, "randomWeaponCounter");
+                if ((object)rwcField != null)
+                {
+                    rwcField.SetValue(gmInst, 2.0f);
+                    Log.LogInfo("[P6.5] randomWeaponCounter = 2.0 (first weapon spawn ~2s from now).");
+                }
+            }
+            catch (Exception e)
+            {
+                Log.LogError($"[P6.5] InvokeOracleStartCountDown threw: {e}");
+            }
+        }
+
+        // Periodic state probe — log GameManager.inFight + randomWeaponCounter
+        // so we can see whether the host-side game loop is actually running.
+        // NB: Mono 2.0.50727 lacks FieldInfo.op_Inequality — must cast to
+        // object before any reflection-type null comparison.
+        private static float _stateProbeLastAt;
+        private static void StateProbe()
+        {
+            try
+            {
+                if (Time.realtimeSinceStartup - _stateProbeLastAt < 2.0f) return;
+                _stateProbeLastAt = Time.realtimeSinceStartup;
+                var gmType = AccessTools.TypeByName("GameManager");
+                if ((object)gmType == null) return;
+                var instanceGetter = AccessTools.PropertyGetter(gmType, "Instance");
+                object gmInst = null;
+                if ((object)instanceGetter != null) gmInst = instanceGetter.Invoke(null, null);
+                if ((object)gmInst == null) return;
+                var inFightF = AccessTools.Field(gmType, "inFight");
+                var rwcF = AccessTools.Field(gmType, "randomWeaponCounter");
+                var matchTimeF = AccessTools.Field(gmType, "matchTime");
+                var stillInMenuF = AccessTools.Field(gmType, "stillInMenu");
+                bool inFight = (object)inFightF != null && (bool)inFightF.GetValue(gmInst);
+                float rwc = (object)rwcF != null ? (float)rwcF.GetValue(gmInst) : float.NaN;
+                float mt = (object)matchTimeF != null ? (float)matchTimeF.GetValue(gmInst) : float.NaN;
+                bool stillInMenu = (object)stillInMenuF != null && (bool)stillInMenuF.GetValue(gmInst);
+
+                var mhType = AccessTools.TypeByName("MatchmakingHandler");
+                bool isNetMatch = false;
+                if ((object)mhType != null)
+                {
+                    var inmField = AccessTools.Field(mhType, "mIsNetworkMatch");
+                    if ((object)inmField != null) isNetMatch = (bool)inmField.GetValue(null);
+                }
+                Log.LogInfo($"[P6.5 probe] inFight={inFight} rwc={rwc:0.00} matchTime={mt:0.00} stillInMenu={stillInMenu} IsNetMatch={isNetMatch}");
+            }
+            catch (Exception e)
+            {
+                Log.LogWarning($"[P6.5 probe] {e.Message}");
+            }
+        }
+        private static void InvokeOracleStartMatch()
+        {
+            try
+            {
+                var gmType = AccessTools.TypeByName("GameManager");
+                if ((object)gmType == null) { Log.LogWarning("[P6.5] GameManager type not found"); return; }
+                // Try the singleton accessor first — GameManager._instance is
+                // set in Awake on the MainScene boot; persists if marked
+                // DontDestroyOnLoad.
+                object gmInst = null;
+                var instanceGetter = AccessTools.PropertyGetter(gmType, "Instance");
+                if ((object)instanceGetter != null)
+                {
+                    gmInst = instanceGetter.Invoke(null, null);
+                }
+                if ((object)gmInst == null)
+                {
+                    gmInst = UnityEngine.Object.FindObjectOfType(gmType);
+                }
+                if ((object)gmInst == null)
+                {
+                    // Last resort: scan FindObjectsOfTypeAll (catches inactive + scene-less).
+                    var includeInactive = Resources.FindObjectsOfTypeAll(gmType);
+                    if (includeInactive != null && includeInactive.Length > 0)
+                    {
+                        gmInst = includeInactive[0];
+                        Log.LogInfo($"[P6.5] GameManager found via FindObjectsOfTypeAll (count={includeInactive.Length}).");
+                    }
+                }
+                if ((object)gmInst == null) { Log.LogWarning("[P6.5] GameManager instance not found (Instance/FindObjectOfType/FindObjectsOfTypeAll all null)"); return; }
+                var mwType = AccessTools.TypeByName("MapWrapper");
+                if ((object)mwType == null) { Log.LogWarning("[P6.5] MapWrapper type not found"); return; }
+
+                int sceneIdx = 6;
+                var mapWrapper = Activator.CreateInstance(mwType);
+                var mtField = AccessTools.Field(mwType, "MapType");
+                var mdField = AccessTools.Field(mwType, "MapData");
+                if ((object)mtField != null) mtField.SetValue(mapWrapper, (byte)0);
+                if ((object)mdField != null) mdField.SetValue(mapWrapper, BitConverter.GetBytes(sceneIdx));
+
+                var startMatchMethod = AccessTools.Method(gmType, "StartMatch", new[] { mwType, typeof(bool) });
+                if ((object)startMatchMethod == null) { Log.LogWarning("[P6.5] StartMatch(MapWrapper,bool) method not found"); return; }
+                Log.LogInfo($"[P6.5] Invoking GameManager.StartMatch(MapType=0, sceneIdx={sceneIdx}, MovePlayers=false).");
+                startMatchMethod.Invoke(gmInst, new object[] { mapWrapper, false });
+                Log.LogInfo("[P6.5] GameManager.StartMatch returned (no immediate exception).");
+            }
+            catch (Exception e)
+            {
+                Log.LogError($"[P6.5] InvokeOracleStartMatch threw: {e}");
+            }
+        }
+
+        // SF MsgType enum (P2PPackageHandler.MsgType byte values, from decompile).
+        private static string MsgTypeName(byte b) => b switch
+        {
+            0  => "Ping",
+            1  => "PingResponse",
+            2  => "ClientJoined",
+            3  => "ClientRequestingAccepting",
+            4  => "ClientAccepted",
+            5  => "ClientInit",
+            6  => "ClientRequestingIndex",
+            7  => "ClientRequestingToSpawn",
+            8  => "ClientSpawned",
+            9  => "ClientReadyUp",
+            10 => "PlayerUpdate",
+            11 => "PlayerTookDamage",
+            12 => "PlayerTalked",
+            13 => "PlayerForceAdded",
+            14 => "PlayerForceAddedAndBlock",
+            15 => "PlayerLavaForceAdded",
+            16 => "PlayerFallOut",
+            17 => "PlayerWonWithRicochet",
+            18 => "MapChange",
+            19 => "WeaponSpawned",
+            20 => "WeaponThrown",
+            21 => "RequestingWeaponThrow",
+            22 => "ClientRequestWeaponDrop",
+            23 => "WeaponDropped",
+            24 => "WeaponWasPickedUp",
+            25 => "ClientRequestingWeaponPickUp",
+            26 => "ObjectUpdate",
+            27 => "ObjectSpawned",
+            28 => "ObjectSimpleDestruction",
+            29 => "ObjectInvokeDestructionEvent",
+            30 => "ObjectDestructionCollision",
+            31 => "GroundWeaponsInit",
+            32 => "MapInfo",
+            33 => "MapInfoSync",
+            34 => "WorkshopMapsLoaded",
+            35 => "StartMatch",
+            36 => "ObjectHello",
+            37 => "OptionsChanged",
+            38 => "KickPlayer",
+            _  => "?"
+        };
 
         private static float ReadAxis(object actions, string fieldName, string axis)
         {
@@ -453,6 +1004,66 @@ namespace SFHeadlessHost
                         BroadcastMapChange(_currentSceneIndex);
                         BroadcastStartMatch();
                         _matchStarted = true;
+                        // Phase 6.5 Step 1.5a — also load the match scene on the
+                        // oracle so its host-side gameplay code (weapon spawn
+                        // timers, killboxes, projectile sim) actually runs. The
+                        // IsServer=true postfix is useless if no gameplay scene
+                        // is active to call SendMessageToAllClients.
+                        try
+                        {
+                            // Flip MatchmakingHandler.IsNetworkMatch=true so
+                            // GameManager.Update takes the SpawnWeapon network
+                            // branch (line 289-292 of decompile). Without this,
+                            // GameManager would Instantiate weapons locally and
+                            // never call our intercept point.
+                            var mhType = AccessTools.TypeByName("MatchmakingHandler");
+                            if ((object)mhType != null)
+                            {
+                                var setNetMatch = AccessTools.Method(mhType, "SetNetworkMatch");
+                                if ((object)setNetMatch != null)
+                                {
+                                    setNetMatch.Invoke(null, new object[] { true });
+                                    Log.LogInfo("[P6.5] MatchmakingHandler.SetNetworkMatch(true).");
+                                }
+                            }
+
+                            // No SceneManager.LoadScene here — GameManager.StartMatch
+                            // internally does LoadMapCourotine → SceneManager.LoadScene(
+                            // num, Additive). A Single-load destroys MainScene's
+                            // GameManager (no DontDestroyOnLoad in stock SF), causing
+                            // StartCoroutine NullRef on the dead instance.
+                            _oracleStartMatchAt = Time.realtimeSinceStartup + 0.5f;
+                            _oracleStartMatchFired = false;
+                            Log.LogInfo($"[P6.5] Scheduled oracle GameManager.StartMatch in 0.5s (will Additively load scene {_currentSceneIndex} internally).");
+                        }
+                        catch (Exception e)
+                        {
+                            Log.LogError($"[P6.5] StartMatch scheduling failed: {e}");
+                        }
+                    }
+                    // Phase 6.5 Step 2 — kick GameManager.StartMatch on the oracle
+                    // so the StartMapSequence coroutine runs (additively loads
+                    // the scene + sets up the map).
+                    if (_oracleStartMatchAt > 0f && Time.realtimeSinceStartup >= _oracleStartMatchAt && !_oracleStartMatchFired)
+                    {
+                        _oracleStartMatchAt = -1f;
+                        _oracleStartMatchFired = true;
+                        InvokeOracleStartMatch();
+                        // Schedule StartCountDown 3s later — after StartMapSequence
+                        // has had time to do its TimeHandler decay + LoadMap +
+                        // 1.1s WaitForSecondsRealtime. StartCountDown's own
+                        // coroutine yields 1s then flips inFight=true, which is
+                        // what makes the weapon-spawn counter actually tick.
+                        _oracleCountDownAt = Time.realtimeSinceStartup + 3.0f;
+                        _oracleCountDownFired = false;
+                        Log.LogInfo("[P6.5] Scheduled GameManager.StartCountDown in 3s (flips inFight=true).");
+                    }
+                    // Phase 6.5 Step 2b — kick StartCountDown so inFight goes true.
+                    if (_oracleCountDownAt > 0f && Time.realtimeSinceStartup >= _oracleCountDownAt && !_oracleCountDownFired)
+                    {
+                        _oracleCountDownAt = -1f;
+                        _oracleCountDownFired = true;
+                        InvokeOracleStartCountDown();
                     }
                     // Push the latest per-slot inputs into each spawned rig's
                     // CharacterActions. Done every frame even if no new input
@@ -472,6 +1083,8 @@ namespace SFHeadlessHost
                         _heartbeatTicks++;
                         Log.LogInfo($"heartbeat: scene={SceneManager.GetActiveScene().name} tick={_heartbeatTicks}");
                     }
+                    // Phase 6.5 — periodic state probe (only after match has started).
+                    if (_matchStarted) StateProbe();
                     return;
             }
         }
