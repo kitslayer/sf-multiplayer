@@ -1,0 +1,871 @@
+{
+  "sceneIndex": 52,
+  "name": "",
+  "staticColliders": [],
+  "playerSpawns": [
+    {
+      "pos": [
+        0.0,
+        -1.440000057220459,
+        -30.600000381469727
+      ]
+    },
+    {
+      "pos": [
+        0.0,
+        -1.3300000429153442,
+        -49.30000019073486
+      ]
+    },
+    {
+      "pos": [
+        0.0,
+        2.509999990463257,
+        -32.63000011444092
+      ]
+    },
+    {
+      "pos": [
+        0.0,
+        2.690000057220459,
+        -47.32000017166138
+      ]
+    }
+  ],
+  "weaponSpawns": [],
+  "killboxes": [],
+  "syncableObjects": [
+    {
+      "pos": [
+        0.0,
+        -2.7999999970197678,
+        -28.140000343322754
+      ],
+      "type": "DestructiblePiece:Cube.012"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.7999999970197678,
+        -28.140000343322754
+      ],
+      "type": "DestructiblePiece:Cube.011"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.7999999970197678,
+        -28.140000343322754
+      ],
+      "type": "DestructiblePiece:Cube.010"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.7999999970197678,
+        -28.140000343322754
+      ],
+      "type": "DestructiblePiece:Cube.009"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.7999999970197678,
+        -28.140000343322754
+      ],
+      "type": "DestructiblePiece:Cube.008"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.7999999970197678,
+        -28.140000343322754
+      ],
+      "type": "DestructiblePiece:Cube.007"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.7999999970197678,
+        -28.140000343322754
+      ],
+      "type": "DestructiblePiece:Cube.006"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.7999999970197678,
+        -28.140000343322754
+      ],
+      "type": "DestructiblePiece:Cube.005"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.7999999970197678,
+        -28.140000343322754
+      ],
+      "type": "DestructiblePiece:Cube.004"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.7999999970197678,
+        -28.140000343322754
+      ],
+      "type": "DestructiblePiece:Cube.003"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.7999999970197678,
+        -28.140000343322754
+      ],
+      "type": "DestructiblePiece:Cube.002"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.7999999970197678,
+        -28.140000343322754
+      ],
+      "type": "DestructiblePiece:Cube.001"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.7999999970197678,
+        -28.140000343322754
+      ],
+      "type": "DestructiblePiece:Cube"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -48.30000019073486
+      ],
+      "type": "DestructiblePiece:Cube.012"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -48.30000019073486
+      ],
+      "type": "DestructiblePiece:Cube.011"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -48.30000019073486
+      ],
+      "type": "DestructiblePiece:Cube.010"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -48.30000019073486
+      ],
+      "type": "DestructiblePiece:Cube.009"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -48.30000019073486
+      ],
+      "type": "DestructiblePiece:Cube.008"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -48.30000019073486
+      ],
+      "type": "DestructiblePiece:Cube.007"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -48.30000019073486
+      ],
+      "type": "DestructiblePiece:Cube.006"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -48.30000019073486
+      ],
+      "type": "DestructiblePiece:Cube.005"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -48.30000019073486
+      ],
+      "type": "DestructiblePiece:Cube.004"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -48.30000019073486
+      ],
+      "type": "DestructiblePiece:Cube.003"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -48.30000019073486
+      ],
+      "type": "DestructiblePiece:Cube.002"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -48.30000019073486
+      ],
+      "type": "DestructiblePiece:Cube.001"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -48.30000019073486
+      ],
+      "type": "DestructiblePiece:Cube"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.7999999970197678,
+        -51.859999656677246
+      ],
+      "type": "DestructiblePiece:Cube.012"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.7999999970197678,
+        -51.859999656677246
+      ],
+      "type": "DestructiblePiece:Cube.011"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.7999999970197678,
+        -51.859999656677246
+      ],
+      "type": "DestructiblePiece:Cube.010"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.7999999970197678,
+        -51.859999656677246
+      ],
+      "type": "DestructiblePiece:Cube.009"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.7999999970197678,
+        -51.859999656677246
+      ],
+      "type": "DestructiblePiece:Cube.008"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.7999999970197678,
+        -51.859999656677246
+      ],
+      "type": "DestructiblePiece:Cube.007"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.7999999970197678,
+        -51.859999656677246
+      ],
+      "type": "DestructiblePiece:Cube.006"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.7999999970197678,
+        -51.859999656677246
+      ],
+      "type": "DestructiblePiece:Cube.005"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.7999999970197678,
+        -51.859999656677246
+      ],
+      "type": "DestructiblePiece:Cube.004"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.7999999970197678,
+        -51.859999656677246
+      ],
+      "type": "DestructiblePiece:Cube.003"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.7999999970197678,
+        -51.859999656677246
+      ],
+      "type": "DestructiblePiece:Cube.002"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.7999999970197678,
+        -51.859999656677246
+      ],
+      "type": "DestructiblePiece:Cube.001"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.7999999970197678,
+        -51.859999656677246
+      ],
+      "type": "DestructiblePiece:Cube"
+    },
+    {
+      "pos": [
+        0.0,
+        1.0399999618530273,
+        -47.5
+      ],
+      "type": "DestructiblePiece:Cube.012"
+    },
+    {
+      "pos": [
+        0.0,
+        1.0399999618530273,
+        -47.5
+      ],
+      "type": "DestructiblePiece:Cube.011"
+    },
+    {
+      "pos": [
+        0.0,
+        1.0399999618530273,
+        -47.5
+      ],
+      "type": "DestructiblePiece:Cube.010"
+    },
+    {
+      "pos": [
+        0.0,
+        1.0399999618530273,
+        -47.5
+      ],
+      "type": "DestructiblePiece:Cube.009"
+    },
+    {
+      "pos": [
+        0.0,
+        1.0399999618530273,
+        -47.5
+      ],
+      "type": "DestructiblePiece:Cube.008"
+    },
+    {
+      "pos": [
+        0.0,
+        1.0399999618530273,
+        -47.5
+      ],
+      "type": "DestructiblePiece:Cube.007"
+    },
+    {
+      "pos": [
+        0.0,
+        1.0399999618530273,
+        -47.5
+      ],
+      "type": "DestructiblePiece:Cube.006"
+    },
+    {
+      "pos": [
+        0.0,
+        1.0399999618530273,
+        -47.5
+      ],
+      "type": "DestructiblePiece:Cube.005"
+    },
+    {
+      "pos": [
+        0.0,
+        1.0399999618530273,
+        -47.5
+      ],
+      "type": "DestructiblePiece:Cube.004"
+    },
+    {
+      "pos": [
+        0.0,
+        1.0399999618530273,
+        -47.5
+      ],
+      "type": "DestructiblePiece:Cube.003"
+    },
+    {
+      "pos": [
+        0.0,
+        1.0399999618530273,
+        -47.5
+      ],
+      "type": "DestructiblePiece:Cube.002"
+    },
+    {
+      "pos": [
+        0.0,
+        1.0399999618530273,
+        -47.5
+      ],
+      "type": "DestructiblePiece:Cube.001"
+    },
+    {
+      "pos": [
+        0.0,
+        1.0399999618530273,
+        -47.5
+      ],
+      "type": "DestructiblePiece:Cube"
+    },
+    {
+      "pos": [
+        0.0,
+        4.699999809265137,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube.012"
+    },
+    {
+      "pos": [
+        0.0,
+        4.699999809265137,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube.011"
+    },
+    {
+      "pos": [
+        0.0,
+        4.699999809265137,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube.010"
+    },
+    {
+      "pos": [
+        0.0,
+        4.699999809265137,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube.009"
+    },
+    {
+      "pos": [
+        0.0,
+        4.699999809265137,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube.008"
+    },
+    {
+      "pos": [
+        0.0,
+        4.699999809265137,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube.007"
+    },
+    {
+      "pos": [
+        0.0,
+        4.699999809265137,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube.006"
+    },
+    {
+      "pos": [
+        0.0,
+        4.699999809265137,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube.005"
+    },
+    {
+      "pos": [
+        0.0,
+        4.699999809265137,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube.004"
+    },
+    {
+      "pos": [
+        0.0,
+        4.699999809265137,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube.003"
+    },
+    {
+      "pos": [
+        0.0,
+        4.699999809265137,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube.002"
+    },
+    {
+      "pos": [
+        0.0,
+        4.699999809265137,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube.001"
+    },
+    {
+      "pos": [
+        0.0,
+        4.699999809265137,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -31.699999809265137
+      ],
+      "type": "DestructiblePiece:Cube.012"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -31.699999809265137
+      ],
+      "type": "DestructiblePiece:Cube.011"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -31.699999809265137
+      ],
+      "type": "DestructiblePiece:Cube.010"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -31.699999809265137
+      ],
+      "type": "DestructiblePiece:Cube.009"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -31.699999809265137
+      ],
+      "type": "DestructiblePiece:Cube.008"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -31.699999809265137
+      ],
+      "type": "DestructiblePiece:Cube.007"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -31.699999809265137
+      ],
+      "type": "DestructiblePiece:Cube.006"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -31.699999809265137
+      ],
+      "type": "DestructiblePiece:Cube.005"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -31.699999809265137
+      ],
+      "type": "DestructiblePiece:Cube.004"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -31.699999809265137
+      ],
+      "type": "DestructiblePiece:Cube.003"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -31.699999809265137
+      ],
+      "type": "DestructiblePiece:Cube.002"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -31.699999809265137
+      ],
+      "type": "DestructiblePiece:Cube.001"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -31.699999809265137
+      ],
+      "type": "DestructiblePiece:Cube"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube.012"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube.011"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube.010"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube.009"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube.008"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube.007"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube.006"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube.005"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube.004"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube.003"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube.002"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube.001"
+    },
+    {
+      "pos": [
+        0.0,
+        -6.180000066757202,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube"
+    },
+    {
+      "pos": [
+        0.0,
+        1.0399999618530273,
+        -32.5
+      ],
+      "type": "DestructiblePiece:Cube.012"
+    },
+    {
+      "pos": [
+        0.0,
+        1.0399999618530273,
+        -32.5
+      ],
+      "type": "DestructiblePiece:Cube.011"
+    },
+    {
+      "pos": [
+        0.0,
+        1.0399999618530273,
+        -32.5
+      ],
+      "type": "DestructiblePiece:Cube.010"
+    },
+    {
+      "pos": [
+        0.0,
+        1.0399999618530273,
+        -32.5
+      ],
+      "type": "DestructiblePiece:Cube.009"
+    },
+    {
+      "pos": [
+        0.0,
+        1.0399999618530273,
+        -32.5
+      ],
+      "type": "DestructiblePiece:Cube.008"
+    },
+    {
+      "pos": [
+        0.0,
+        1.0399999618530273,
+        -32.5
+      ],
+      "type": "DestructiblePiece:Cube.007"
+    },
+    {
+      "pos": [
+        0.0,
+        1.0399999618530273,
+        -32.5
+      ],
+      "type": "DestructiblePiece:Cube.006"
+    },
+    {
+      "pos": [
+        0.0,
+        1.0399999618530273,
+        -32.5
+      ],
+      "type": "DestructiblePiece:Cube.005"
+    },
+    {
+      "pos": [
+        0.0,
+        1.0399999618530273,
+        -32.5
+      ],
+      "type": "DestructiblePiece:Cube.004"
+    },
+    {
+      "pos": [
+        0.0,
+        1.0399999618530273,
+        -32.5
+      ],
+      "type": "DestructiblePiece:Cube.003"
+    },
+    {
+      "pos": [
+        0.0,
+        1.0399999618530273,
+        -32.5
+      ],
+      "type": "DestructiblePiece:Cube.002"
+    },
+    {
+      "pos": [
+        0.0,
+        1.0399999618530273,
+        -32.5
+      ],
+      "type": "DestructiblePiece:Cube.001"
+    },
+    {
+      "pos": [
+        0.0,
+        1.0399999618530273,
+        -32.5
+      ],
+      "type": "DestructiblePiece:Cube"
+    }
+  ]
+}

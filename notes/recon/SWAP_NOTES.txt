@@ -1,0 +1,25 @@
+sfdsrv.next — adds /lobbies HTTP endpoint
+=========================================
+
+Built from: /home/miles/sf-multiplayer/StickFightDedicatedSrv (HEAD as of 2026-05-21)
+Diff vs. /tmp/sfdsrv:
+  - server.go: added LobbyInfo, LobbyList types, gameModeName() helper,
+    Server.LobbyList() snapshot method.
+  - packets.go: added /lobbies case alongside the existing /status case in
+    NewPacketFromBytes (same TCP-on-UDP-port mechanism).
+
+Current live server is pid 15842 on 127.0.0.1:1337 — DO NOT killed by Claude.
+To swap when you're ready:
+
+    # bring the test session down first, then:
+    kill 15842            # or however you normally stop it
+    cp /tmp/sfdsrv.next /tmp/sfdsrv
+    /tmp/sfdsrv -address 127.0.0.1:1337 ... &   # same flags you were using
+
+Smoke test after swap:
+    curl -s http://127.0.0.1:1337/status
+    curl -s http://127.0.0.1:1337/lobbies | jq .
+
+Client tool:
+    /tmp/sf-lobby-browser              # talks to 127.0.0.1:1337 by default
+    /tmp/sf-lobby-browser.exe          # Windows build, ship to community

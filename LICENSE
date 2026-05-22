@@ -1,0 +1,39 @@
+MIT License
+
+Copyright (c) 2026 sf-multiplayer contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+This repository:
+
+1. Reuses code originally published in the public StickFightDev/StickFightDedicatedSrv
+   repository on GitHub by JoshuaDoes. That upstream repo carried no explicit
+   license at the time of forking ("For now, there is nothing. Feel free to
+   browse the code and use it locally for testing, but TBD."). Use is in good
+   faith; this notice is here to flag the unresolved status. If the upstream
+   author requests a different license, this project will relicense or remove
+   the affected portions.
+
+2. Excludes — does NOT include or redistribute — any reference assemblies,
+   decompiled Assembly-CSharp source, or other artifacts derived from Stick
+   Fight: The Game's shipped binaries. Those remain copyright Landfall Games.
+   You must obtain them from your own legitimately purchased copy of the game
+   to build the client plugins in this repo.

@@ -1,0 +1,351 @@
+{
+  "sceneIndex": 49,
+  "name": "",
+  "staticColliders": [],
+  "playerSpawns": [
+    {
+      "pos": [
+        0.0,
+        -5.696000099182129,
+        -32.04800033569336
+      ]
+    },
+    {
+      "pos": [
+        0.0,
+        -5.5360002517700195,
+        -48.007999420166016
+      ]
+    },
+    {
+      "pos": [
+        0.0,
+        0.30399999022483826,
+        -32.040000915527344
+      ]
+    },
+    {
+      "pos": [
+        0.0,
+        0.30399999022483826,
+        -48.03200149536133
+      ]
+    }
+  ],
+  "weaponSpawns": [],
+  "killboxes": [],
+  "syncableObjects": [
+    {
+      "pos": [
+        -0.17265623807907104,
+        -9.429999709129333,
+        -50.0
+      ],
+      "type": "DestructiblePiece:Cube.008"
+    },
+    {
+      "pos": [
+        -0.17265623807907104,
+        -9.429999709129333,
+        -50.0
+      ],
+      "type": "DestructiblePiece:Cube.007"
+    },
+    {
+      "pos": [
+        -0.17265623807907104,
+        -9.429999709129333,
+        -50.0
+      ],
+      "type": "DestructiblePiece:Cube.006"
+    },
+    {
+      "pos": [
+        -0.17265623807907104,
+        -9.429999709129333,
+        -50.0
+      ],
+      "type": "DestructiblePiece:Cube.005"
+    },
+    {
+      "pos": [
+        -0.17265623807907104,
+        -9.429999709129333,
+        -50.0
+      ],
+      "type": "DestructiblePiece:Cube.004"
+    },
+    {
+      "pos": [
+        -0.17265623807907104,
+        -9.429999709129333,
+        -50.0
+      ],
+      "type": "DestructiblePiece:Cube.003"
+    },
+    {
+      "pos": [
+        -0.17265623807907104,
+        -9.429999709129333,
+        -50.0
+      ],
+      "type": "DestructiblePiece:Cube.002"
+    },
+    {
+      "pos": [
+        -0.17265623807907104,
+        -9.429999709129333,
+        -50.0
+      ],
+      "type": "DestructiblePiece:Cube.001"
+    },
+    {
+      "pos": [
+        -0.17265623807907104,
+        -9.429999709129333,
+        -50.0
+      ],
+      "type": "DestructiblePiece:Cube"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.240000009536743,
+        -32.0
+      ],
+      "type": "DestructiblePiece:Cube.005"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.240000009536743,
+        -32.0
+      ],
+      "type": "DestructiblePiece:Cube.006"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.240000009536743,
+        -32.0
+      ],
+      "type": "DestructiblePiece:Cube.004"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.240000009536743,
+        -32.0
+      ],
+      "type": "DestructiblePiece:Cube.003"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.240000009536743,
+        -32.0
+      ],
+      "type": "DestructiblePiece:Cube.002"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.240000009536743,
+        -32.0
+      ],
+      "type": "DestructiblePiece:Cube"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.240000009536743,
+        -32.0
+      ],
+      "type": "DestructiblePiece:Cube.001"
+    },
+    {
+      "pos": [
+        0.0,
+        -4.640000343322754,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube.005"
+    },
+    {
+      "pos": [
+        0.0,
+        -4.640000343322754,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube.006"
+    },
+    {
+      "pos": [
+        0.0,
+        -4.640000343322754,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube.004"
+    },
+    {
+      "pos": [
+        0.0,
+        -4.640000343322754,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube.003"
+    },
+    {
+      "pos": [
+        0.0,
+        -4.640000343322754,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube.002"
+    },
+    {
+      "pos": [
+        0.0,
+        -4.640000343322754,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube"
+    },
+    {
+      "pos": [
+        0.0,
+        -4.640000343322754,
+        -40.0
+      ],
+      "type": "DestructiblePiece:Cube.001"
+    },
+    {
+      "pos": [
+        -0.17265623807907104,
+        -9.429999709129333,
+        -30.0
+      ],
+      "type": "DestructiblePiece:Cube.008"
+    },
+    {
+      "pos": [
+        -0.17265623807907104,
+        -9.429999709129333,
+        -30.0
+      ],
+      "type": "DestructiblePiece:Cube.007"
+    },
+    {
+      "pos": [
+        -0.17265623807907104,
+        -9.429999709129333,
+        -30.0
+      ],
+      "type": "DestructiblePiece:Cube.006"
+    },
+    {
+      "pos": [
+        -0.17265623807907104,
+        -9.429999709129333,
+        -30.0
+      ],
+      "type": "DestructiblePiece:Cube.005"
+    },
+    {
+      "pos": [
+        -0.17265623807907104,
+        -9.429999709129333,
+        -30.0
+      ],
+      "type": "DestructiblePiece:Cube.004"
+    },
+    {
+      "pos": [
+        -0.17265623807907104,
+        -9.429999709129333,
+        -30.0
+      ],
+      "type": "DestructiblePiece:Cube.003"
+    },
+    {
+      "pos": [
+        -0.17265623807907104,
+        -9.429999709129333,
+        -30.0
+      ],
+      "type": "DestructiblePiece:Cube.002"
+    },
+    {
+      "pos": [
+        -0.17265623807907104,
+        -9.429999709129333,
+        -30.0
+      ],
+      "type": "DestructiblePiece:Cube.001"
+    },
+    {
+      "pos": [
+        -0.17265623807907104,
+        -9.429999709129333,
+        -30.0
+      ],
+      "type": "DestructiblePiece:Cube"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.240000009536743,
+        -48.0
+      ],
+      "type": "DestructiblePiece:Cube.005"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.240000009536743,
+        -48.0
+      ],
+      "type": "DestructiblePiece:Cube.006"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.240000009536743,
+        -48.0
+      ],
+      "type": "DestructiblePiece:Cube.004"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.240000009536743,
+        -48.0
+      ],
+      "type": "DestructiblePiece:Cube.003"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.240000009536743,
+        -48.0
+      ],
+      "type": "DestructiblePiece:Cube.002"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.240000009536743,
+        -48.0
+      ],
+      "type": "DestructiblePiece:Cube"
+    },
+    {
+      "pos": [
+        0.0,
+        -2.240000009536743,
+        -48.0
+      ],
+      "type": "DestructiblePiece:Cube.001"
+    }
+  ]
+}

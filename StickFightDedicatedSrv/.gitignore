@@ -1,0 +1,22 @@
+# Output executables
+*.exe
+*.app
+*.old
+*.bak
+*StickFightDedicatedSrv*
+
+# Log files
+*.log
+
+# Supervise on Linux
+run
+supervise/
+
+# Windows
+run.bat
+
+# OS leftovers
+desktop.ini
+
+# Server maps
+maps/

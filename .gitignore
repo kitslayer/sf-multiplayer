@@ -1,0 +1,55 @@
+# ---- Decompiled / copyrighted-by-Landfall artifacts ----
+# refs/decompiled/ contains decompiled Assembly-CSharp source from Stick Fight:
+# The Game (© Landfall). Used locally as a read-only reference; redistribution
+# would be a copyright/DMCA risk. Each plugin's refs/ directory holds the
+# Unity + BepInEx + Assembly-CSharp DLLs the plugin builds against — those are
+# also copyrighted upstream. See README.md for how to obtain them locally.
+refs/
+*/refs/
+**/refs/
+
+# ---- Build output ----
+bin/
+obj/
+*.dll
+*.pdb
+*.exe
+# Go test/build artifacts
+*.test
+*.out
+
+# ---- Runtime ----
+*.log
+LogOutput.log
+output_log.txt
+*.sfreplay
+/tmp-*
+
+# ---- IDE ----
+.vs/
+.vscode/
+.idea/
+*.user
+
+# ---- macOS / Windows cruft ----
+.DS_Store
+Thumbs.db
+
+# ---- Plugin assets we redistribute via README instructions ----
+**/disabled-mods/
+disabled-mods/
+
+# ---- Notes copies that mirror source (de-duplicate against the live tree) ----
+notes/recon/StickFightDedicatedSrv/
+notes/recon/sf-netcodev2/
+notes/recon/prior-memory/
+notes/recon/sfdsrv*.log
+notes/recon/BepInEx_*.log
+notes/recon/baseline-lines.txt
+
+# ---- Goldberg / Steam shim secrets ----
+# (none currently, but pre-emptively guard against accidental commits)
+steam_appid.txt
+steam_settings/
+account_name.txt
+user_steam_id.txt
