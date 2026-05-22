@@ -117,6 +117,20 @@ namespace SFHeadlessHost
                         Log.LogInfo("Patched Controller.Update with input-injection prefix.");
                     }
                 }
+                // [INSTR3] Patch Movement.MoveRight / MoveLeft so we can see
+                // whether Controller.Update actually invokes them after our
+                // input injection.
+                var movType = AccessTools.TypeByName("Movement");
+                if ((object)movType != null)
+                {
+                    var mr = AccessTools.Method(movType, "MoveRight");
+                    if ((object)mr != null)
+                        harmony.Patch(mr, prefix: new HarmonyMethod(AccessTools.Method(typeof(Plugin), nameof(MoveRightPrefix))));
+                    var ml = AccessTools.Method(movType, "MoveLeft");
+                    if ((object)ml != null)
+                        harmony.Patch(ml, prefix: new HarmonyMethod(AccessTools.Method(typeof(Plugin), nameof(MoveLeftPrefix))));
+                    Log.LogInfo("[INSTR3] Patched Movement.MoveRight/MoveLeft entry-loggers.");
+                }
             }
             catch (Exception e)
             {
@@ -138,6 +152,9 @@ namespace SFHeadlessHost
         // controller's GameObject) — never touches real-player rigs.
         private static int _prefixCallCount;
         private static int _prefixOurRigCount;
+        private static int _applyInputCount;
+        private static int _moveRightCallCount;
+        private static int _moveLeftCallCount;
         internal static bool InjectInputPrefix(object __instance)
         {
             try
@@ -163,19 +180,62 @@ namespace SFHeadlessHost
 
                 if (!SlotInputs.TryGetValue(slot, out var input)) return true;
 
-                if (_prefixOurRigCount == 1 || _prefixOurRigCount % 120 == 0)
-                    Log.LogInfo($"InjectInputPrefix: our rig slot={slot} stick=({input.StickX},{input.StickY}) ourCallCount={_prefixOurRigCount}");
+                bool verbose = (_prefixOurRigCount == 1 || _prefixOurRigCount % 120 == 0);
+                if (verbose)
+                    Log.LogInfo($"[INSTR2a] Prefix entry: slot={slot} SlotInputs.stick=({input.StickX:0.00},{input.StickY:0.00}) ourCallCount={_prefixOurRigCount}");
 
                 var actionsField = AccessTools.Field(__instance.GetType(), "mPlayerActions");
                 if ((object)actionsField == null) return true;
                 var actions = actionsField.GetValue(__instance);
                 if ((object)actions == null) return true;
 
+                // Read CURRENT Movement.X/Y BEFORE our write — tells us whether
+                // InControl rebuilt it since our last write last frame.
+                if (verbose)
+                {
+                    var preX = ReadAxis(actions, "Movement", "X");
+                    var preY = ReadAxis(actions, "Movement", "Y");
+                    Log.LogInfo($"[INSTR2b] PRE-write Movement=({preX:0.00},{preY:0.00})");
+                }
+
                 // Stuff our values into Movement.X / .Y backing fields and
                 // Movement.thisValue. Read by the original Update body
                 // immediately after this prefix returns.
                 ForceTwoAxis(actions, "Movement", input.StickX, input.StickY);
                 ForceTwoAxis(actions, "Aiming",   input.AimX,   input.AimY);
+
+                // Read again AFTER write — confirms write took effect synchronously.
+                if (verbose)
+                {
+                    var postX = ReadAxis(actions, "Movement", "X");
+                    var postY = ReadAxis(actions, "Movement", "Y");
+                    // Probe Controller early-return gate variables.
+                    var ctrlT = __instance.GetType();
+                    var inactiveF = AccessTools.Field(ctrlT, "inactive");
+                    var infoF    = AccessTools.Field(ctrlT, "info");
+                    var hasCtrlF = AccessTools.Field(ctrlT, "mHasControl");
+                    bool inactive = (object)inactiveF != null && (bool)inactiveF.GetValue(__instance);
+                    bool hasCtrl  = (object)hasCtrlF != null && (bool)hasCtrlF.GetValue(__instance);
+                    bool isDead = false;
+                    if ((object)infoF != null) {
+                        var infoVal = infoF.GetValue(__instance);
+                        if ((object)infoVal != null) {
+                            var deadF = AccessTools.Field(infoVal.GetType(), "isDead");
+                            if ((object)deadF != null) isDead = (bool)deadF.GetValue(infoVal);
+                        }
+                    }
+                    // GameManager.inFight + stillInMenu — the prime suspects.
+                    var gmT = AccessTools.TypeByName("GameManager");
+                    bool inFight = false, stillInMenu = false;
+                    if ((object)gmT != null) {
+                        var fF = AccessTools.Field(gmT, "inFight");
+                        var mF = AccessTools.Field(gmT, "stillInMenu");
+                        if ((object)fF != null) inFight = (bool)fF.GetValue(null);
+                        if ((object)mF != null) stillInMenu = (bool)mF.GetValue(null);
+                    }
+                    bool willEarlyReturn = inactive || isDead || (!inFight && !stillInMenu);
+                    Log.LogInfo($"[INSTR2c] POST-write Movement=({postX:0.00},{postY:0.00}) inactive={inactive} hasControl={hasCtrl} isDead={isDead} inFight={inFight} stillInMenu={stillInMenu} willEarlyReturn={willEarlyReturn}");
+                }
 
                 // Button-action backing field updates. PlayerAction is a
                 // OneAxisInputControl with private InputControlState
@@ -193,6 +253,54 @@ namespace SFHeadlessHost
                 if (Verbose && Log != null) Log.LogDebug($"InjectInputPrefix: {e.Message}");
             }
             return true; // always let original Update run
+        }
+
+        internal static void MoveRightPrefix(object __instance)
+        {
+            _moveRightCallCount++;
+            if (_moveRightCallCount == 1 || _moveRightCallCount % 30 == 0)
+            {
+                try
+                {
+                    var c = __instance as Component;
+                    string name = (object)c != null ? c.gameObject.name : "?";
+                    Log.LogInfo($"[INSTR3] Movement.MoveRight#{_moveRightCallCount} on {name}");
+                }
+                catch { }
+            }
+        }
+
+        internal static void MoveLeftPrefix(object __instance)
+        {
+            _moveLeftCallCount++;
+            if (_moveLeftCallCount == 1 || _moveLeftCallCount % 30 == 0)
+            {
+                try
+                {
+                    var c = __instance as Component;
+                    string name = (object)c != null ? c.gameObject.name : "?";
+                    Log.LogInfo($"[INSTR3] Movement.MoveLeft#{_moveLeftCallCount} on {name}");
+                }
+                catch { }
+            }
+        }
+
+        private static float ReadAxis(object actions, string fieldName, string axis)
+        {
+            try
+            {
+                var f = AccessTools.Field(actions.GetType(), fieldName);
+                if ((object)f == null) return 0f;
+                var ctrl = f.GetValue(actions);
+                if ((object)ctrl == null) return 0f;
+                var t = ctrl.GetType();
+                var backing = AccessTools.Field(t, "<" + axis + ">k__BackingField");
+                if ((object)backing != null) return (float)backing.GetValue(ctrl);
+                var prop = AccessTools.Property(t, axis);
+                if ((object)prop != null) return (float)prop.GetValue(ctrl, null);
+            }
+            catch { }
+            return float.NaN;
         }
 
         // Force the named TwoAxisInputControl's X/Y to (x, y) by writing
@@ -323,14 +431,20 @@ namespace SFHeadlessHost
                 case BootState.HostStarting:
                     StartHost();
                     StartBridge();
+                    // Cache playerPrefab while ControllerHandler still exists
+                    // in MainScene — needed because subsequent loadMap(Single)
+                    // destroys it but we still want to spawn rigs in any scene.
+                    TryCachePlayerPrefab();
                     _bootState = BootState.Running;
                     _lastHeartbeat = Time.realtimeSinceStartup;
                     _lastStateEmit = Time.realtimeSinceStartup;
                     return;
 
                 case BootState.Running:
-                    // Drain any incoming bridge commands.
+                    // Drain any incoming bridge commands (debug bridge on 1341).
                     DrainBridgeCommands();
+                    // Drain raw v25 protocol packets from patched DLL clients.
+                    DrainSfServer();
                     // Push the latest per-slot inputs into each spawned rig's
                     // CharacterActions. Done every frame even if no new input
                     // arrived — analog sticks need their last value held so
@@ -367,12 +481,55 @@ namespace SFHeadlessHost
 
         private UdpClient _bridge;
         private IPEndPoint _bridgePeer; // last sender; we reply to whoever pinged us last
+
+        // Path A: oracle's own raw-UDP socket speaking the v25 protocol
+        // directly to patched DLL clients. Bound on BindPort (typically 1337).
+        private UdpClient _sfServer;
+        private long _sfPacketsRx;
+        private long _sfPacketsTx;
+
+        // V25 protocol packet types (mirror packets.go iota order).
+        private const byte PktPing                       = 0;
+        private const byte PktPingResponse               = 1;
+        private const byte PktClientJoined               = 2;
+        private const byte PktClientRequestingAccepting  = 3;
+        private const byte PktClientAccepted             = 4;
+        private const byte PktClientInit                 = 5;
+        private const byte PktClientRequestingIndex      = 6;
+        private const byte PktClientRequestingToSpawn    = 7;
+        private const byte PktClientSpawned              = 8;
+        private const byte PktClientReadyUp              = 9;
+        private const byte PktPlayerUpdate               = 10;
+        private const byte PktPlayerTookDamage           = 11;
+        private const byte PktPlayerTalked               = 12;
+        private const byte PktMapChange                  = 18;
+        private const byte PktWorkshopMapsLoaded         = 34;
+        private const byte PktOptionsChanged             = 37;
+
+        // Per-client connection state. Keyed by remote address:port string so
+        // the same SF instance keeps its slot/SteamID across packets.
+        private class SfClient
+        {
+            public IPEndPoint Addr;
+            public ulong SteamID;
+            public int Slot;
+            public float LastSeen;
+            public bool Accepted;
+            public bool Initialized;
+            public bool Spawned;
+        }
+        private readonly Dictionary<string, SfClient> _sfClients = new Dictionary<string, SfClient>();
         private float _lastStateEmit;
         private long _bridgeTick;
 
         // Slot → spawned Player rig GameObject (populated by TrySpawnPlayer).
         // Used by the input-injection path to find which rig to drive.
         private static readonly Dictionary<int, GameObject> SlotToRig = new Dictionary<int, GameObject>();
+
+        // Cached player prefab — captured the first time we find ControllerHandler
+        // in the active scene (MainScene). Survives subsequent scene changes so we
+        // can spawn rigs in Landfall scenes (which have no ControllerHandler).
+        private static GameObject _cachedPlayerPrefab;
 
         // Per-slot input frame the bridge has most recently received. Drained by
         // the per-frame input-write hook so values are written every Update
@@ -385,6 +542,357 @@ namespace SFHeadlessHost
             public int Buttons; // bit0=jump, bit1=fire, bit2=block, bit3=throw
         }
         private static readonly Dictionary<int, InputFrame> SlotInputs = new Dictionary<int, InputFrame>();
+
+        // Pending teleport target for the next sceneLoaded callback (set by
+        // the loadMap bridge command). Applied to every spawned rig once the
+        // new scene's geometry is in place.
+        private static Vector3 _pendingTeleport;
+        private static bool _pendingTeleportArmed;
+
+        private static void OnSceneLoadedTeleport(Scene scene, LoadSceneMode mode)
+        {
+            if (!_pendingTeleportArmed) return;
+            _pendingTeleportArmed = false;
+            SceneManager.sceneLoaded -= OnSceneLoadedTeleport;
+            Log.LogInfo($"OnSceneLoadedTeleport: scene={scene.name} target={_pendingTeleport}; teleporting {SlotToRig.Count} rigs.");
+            foreach (var kv in SlotToRig)
+            {
+                if ((object)kv.Value == null) continue;
+                TeleportRig(kv.Value, _pendingTeleport);
+            }
+        }
+
+        // TeleportRig moves the rig root + every BodyPart Rigidbody to the
+        // target position. The root transform alone doesn't move the visible
+        // rig (body parts have independent Rigidbody-driven positions); we
+        // have to relocate them all and zero their velocity so they don't
+        // immediately bounce back to the old location.
+        private static void TeleportRig(GameObject rig, Vector3 target)
+        {
+            try
+            {
+                var rootPos = rig.transform.position;
+                var delta = target - rootPos;
+                rig.transform.position = target;
+
+                var bpType = AccessTools.TypeByName("BodyPart");
+                if ((object)bpType == null) return;
+                var bps = rig.GetComponentsInChildren(bpType);
+                int moved = 0;
+                foreach (var bp in bps)
+                {
+                    var bpComp = bp as Component;
+                    if ((object)bpComp == null) continue;
+                    var rb = bpComp.GetComponent<Rigidbody>();
+                    if ((object)rb == null) continue;
+                    rb.position = rb.position + delta;
+                    rb.velocity = Vector3.zero;
+                    rb.angularVelocity = Vector3.zero;
+                    bpComp.transform.position = bpComp.transform.position + delta;
+                    moved++;
+                }
+                Log.LogInfo($"TeleportRig: moved {moved} body parts by delta={delta}");
+            }
+            catch (Exception e)
+            {
+                Log.LogError($"TeleportRig threw: {e.Message}");
+            }
+        }
+
+        // ==================================================================
+        // PATH A — sfdsrv-compatible raw UDP v25 protocol, server side
+        // ==================================================================
+        //
+        // Wire format (mirrors packets.go::AsBytes):
+        //   [u32 timestamp LE][u8 msgType][N body][u64 steamID LE][u8 channel]
+        //
+        // Minimum packet size: 14 bytes (5 SOPH header + 9 EOPH trailer).
+
+        private void DrainSfServer()
+        {
+            if ((object)_sfServer == null) return;
+            int processed = 0;
+            while (processed++ < 64) // cap per frame
+            {
+                try
+                {
+                    if (_sfServer.Available <= 0) return;
+                    IPEndPoint from = null;
+                    byte[] data = _sfServer.Receive(ref from);
+                    if (data == null || data.Length < 14) continue;
+                    _sfPacketsRx++;
+                    SfDispatch(data, from);
+                }
+                catch (Exception e)
+                {
+                    if (Verbose) Log.LogDebug($"SF server recv: {e.Message}");
+                    return;
+                }
+            }
+        }
+
+        // Parse the wrapper and route by msgType. Body bytes are forwarded
+        // to handlers without copying — they read from offset 5 to length-9.
+        private void SfDispatch(byte[] data, IPEndPoint from)
+        {
+            // SOPH: u32 timestamp + u8 msgType
+            byte msgType = data[4];
+            // EOPH: u64 steamID + u8 channel
+            int bodyOffset = 5;
+            int bodyLen = data.Length - 14;
+            ulong steamID = ReadU64LE(data, data.Length - 9);
+            byte channel = data[data.Length - 1];
+
+            // Verbose log every Nth packet so we can see what's happening.
+            if (_sfPacketsRx == 1 || _sfPacketsRx % 30 == 0)
+                Log.LogInfo($"[SF] rx#{_sfPacketsRx} type={msgType} bodyLen={bodyLen} ch={channel} from={from} steamID={steamID}");
+
+            // Track client.
+            string key = from.ToString();
+            if (!_sfClients.TryGetValue(key, out var cli))
+            {
+                cli = new SfClient { Addr = from, Slot = -1 };
+                _sfClients[key] = cli;
+                Log.LogInfo($"[SF] new client appeared: {from}");
+            }
+            cli.LastSeen = Time.realtimeSinceStartup;
+            if (steamID != 0) cli.SteamID = steamID;
+
+            switch (msgType)
+            {
+                case PktPing:
+                    HandlePing(cli, data, bodyOffset, bodyLen);
+                    break;
+                case PktClientRequestingAccepting:
+                    HandleClientRequestingAccepting(cli);
+                    break;
+                case PktClientRequestingIndex:
+                    HandleClientRequestingIndex(cli, data, bodyOffset, bodyLen);
+                    break;
+                case PktClientRequestingToSpawn:
+                    HandleClientRequestingToSpawn(cli, data, bodyOffset, bodyLen);
+                    break;
+                case PktPlayerUpdate:
+                    HandlePlayerUpdate(cli, data, bodyOffset, bodyLen);
+                    break;
+                default:
+                    if (Verbose) Log.LogDebug($"[SF] unhandled type={msgType} from={from}");
+                    break;
+            }
+        }
+
+        // === packet handlers ===
+
+        private void HandlePing(SfClient cli, byte[] data, int off, int len)
+        {
+            // Echo the body back as PingResponse.
+            byte[] body = new byte[len];
+            if (len > 0) System.Buffer.BlockCopy(data, off, body, 0, len);
+            SendSfPacket(cli.Addr, PktPingResponse, body, cli.SteamID, 0);
+        }
+
+        private void HandleClientRequestingAccepting(SfClient cli)
+        {
+            Log.LogInfo($"[SF] ClientRequestingAccepting from {cli.Addr}; sending ClientAccepted.");
+            SendSfPacket(cli.Addr, PktClientAccepted, new byte[0], cli.SteamID, 0);
+            cli.Accepted = true;
+        }
+
+        // ClientRequestingIndex → ClientInit. Per reference_patched_dll_protocol.md:
+        // Response body (50 bytes for solo Landfall-0):
+        //   byte accept (1)
+        //   byte playerIndex (assigned slot)
+        //   byte maxPlayers (4)
+        //   byte mapType (0 = Landfall)
+        //   i32 mapSize (4)
+        //   i32 sceneIndex
+        //   for slot 0..3: u64 slotSteamID + (stats if non-joiner non-empty)
+        //   u16 weaponCount (0)
+        //   4 bytes networkOptions (mapToggle, health, regen, weaponSpawnRate)
+        private void HandleClientRequestingIndex(SfClient cli, byte[] data, int off, int len)
+        {
+            // Body layout (per patched DLL's OnPlayerRequestingIndex):
+            //   u64 SteamID  +  u8 clientPlayerCount  (+ optional protocol-version byte)
+            // The SteamID here is the AUTHORITATIVE client identity — the
+            // wrapper-tail steamID is 0 on join. Without this, our ClientInit
+            // tells the client slot 0 has SteamID 0 → client doesn't match
+            // it against its local Steam ID → ControlledLocally stays false
+            // → no ClientRequestingToSpawn → stuck in lobby.
+            if (len >= 8) cli.SteamID = ReadU64LE(data, off);
+            byte playerCount = (len >= 9) ? data[off + 8] : (byte)1;
+
+            // Assign first free slot.
+            int slot = AllocSlot(cli);
+            cli.Slot = slot;
+            Log.LogInfo($"[SF] ClientRequestingIndex from {cli.Addr} steamID={cli.SteamID} players={playerCount}; assigning slot {slot}; building ClientInit.");
+
+            // The chosen Landfall scene to push (matches what oracle has loaded).
+            int sceneIndex = 0; // MainScene first; the lobby UI flows from there.
+
+            using (var ms = new System.IO.MemoryStream())
+            using (var bw = new System.IO.BinaryWriter(ms))
+            {
+                bw.Write((byte)1);            // accept
+                bw.Write((byte)slot);         // playerIndex
+                bw.Write((byte)4);            // maxPlayers — patched-only field
+                bw.Write((byte)0);            // mapType 0=Landfall
+                bw.Write((int)4);             // mapSize
+                bw.Write((int)sceneIndex);    // mapData (sceneIndex)
+
+                // 4-slot loop
+                for (int s = 0; s < 4; s++)
+                {
+                    if (s == slot)
+                    {
+                        bw.Write(cli.SteamID);          // u64 — joiner's own steamID
+                    }
+                    else
+                    {
+                        // Find any other connected client in slot s.
+                        SfClient other = null;
+                        foreach (var kv in _sfClients) if (kv.Value.Slot == s) { other = kv.Value; break; }
+                        if (other != null)
+                        {
+                            bw.Write(other.SteamID);
+                            // 13 × int32 stats (zeros for now)
+                            for (int i = 0; i < 13; i++) bw.Write((int)0);
+                            bw.Write((int)0); // colorCount (patched-only) — 0 = default
+                        }
+                        else
+                        {
+                            bw.Write((ulong)0);
+                        }
+                    }
+                }
+                bw.Write((ushort)0);          // weaponCount
+                bw.Write((byte)0);            // mapToggle
+                bw.Write((byte)100);          // health
+                bw.Write((byte)1);            // regen
+                bw.Write((byte)1);            // weaponSpawnRate
+
+                byte[] body = ms.ToArray();
+                SendSfPacket(cli.Addr, PktClientInit, body, cli.SteamID, 0);
+                cli.Initialized = true;
+            }
+
+            // Post-init bundle. Per sfdsrv comment: without these (specifically
+            // OptionsChanged) the client never sends ClientRequestingToSpawn
+            // and the user gets stuck at a black/lobby screen.
+            // WorkshopMapsLoaded: u16 count + count×u64 workshopIDs. We send 0 maps.
+            SendSfPacket(cli.Addr, PktWorkshopMapsLoaded, new byte[] { 0, 0 }, cli.SteamID, 1);
+            // OptionsChanged: 4 bytes [maps, health, regen, weaponSpawnRate].
+            // weaponSpawnRate=2 stops the client from requesting weapon spawns.
+            SendSfPacket(cli.Addr, PktOptionsChanged, new byte[] { 0, 100, 1, 2 }, cli.SteamID, 0);
+            Log.LogInfo($"[SF] Post-init bundle sent (WorkshopMapsLoaded + OptionsChanged).");
+        }
+
+        // ClientRequestingToSpawn → ClientSpawned broadcast.
+        // Incoming body: byte playerIndex + 6 × float32 (pos + euler) = 25 bytes
+        // Outgoing body: byte playerIndex + 6×f32 + bool spawnFlag + i32 colorCount = 30 bytes
+        private void HandleClientRequestingToSpawn(SfClient cli, byte[] data, int off, int len)
+        {
+            if (len < 25) { Log.LogWarning($"[SF] short spawn body len={len}"); return; }
+            byte pIdx  = data[off];
+            float px = ReadF32LE(data, off + 1);
+            float py = ReadF32LE(data, off + 5);
+            float pz = ReadF32LE(data, off + 9);
+            float rx = ReadF32LE(data, off + 13);
+            float ry = ReadF32LE(data, off + 17);
+            float rz = ReadF32LE(data, off + 21);
+            Log.LogInfo($"[SF] ClientRequestingToSpawn slot={pIdx} pos=({px:0.0},{py:0.0},{pz:0.0})");
+
+            using (var ms = new System.IO.MemoryStream())
+            using (var bw = new System.IO.BinaryWriter(ms))
+            {
+                bw.Write(pIdx);
+                bw.Write(px); bw.Write(py); bw.Write(pz);
+                bw.Write(rx); bw.Write(ry); bw.Write(rz);
+                bw.Write((byte)0);    // spawnFlag false = RevivePlayer at pos
+                bw.Write((int)0);     // colorCount (patched-only)
+                byte[] body = ms.ToArray();
+                // Echo to the asking client AND broadcast to others.
+                BroadcastSfPacket(PktClientSpawned, body, cli.SteamID, 0);
+            }
+            cli.Spawned = true;
+        }
+
+        // PlayerUpdate from client → broadcast to all OTHER clients.
+        private void HandlePlayerUpdate(SfClient cli, byte[] data, int off, int len)
+        {
+            byte[] body = new byte[len];
+            if (len > 0) System.Buffer.BlockCopy(data, off, body, 0, len);
+            foreach (var kv in _sfClients)
+            {
+                if (kv.Value == cli) continue;
+                if (!kv.Value.Spawned) continue;
+                SendSfPacket(kv.Value.Addr, PktPlayerUpdate, body, cli.SteamID, 0);
+            }
+        }
+
+        // === helpers ===
+
+        private int AllocSlot(SfClient cli)
+        {
+            if (cli.Slot >= 0) return cli.Slot;
+            for (int s = 0; s < 4; s++)
+            {
+                bool taken = false;
+                foreach (var kv in _sfClients) if (kv.Value.Slot == s) { taken = true; break; }
+                if (!taken) return s;
+            }
+            return 0; // overflow — should reject in real impl
+        }
+
+        // Serialize a packet with the 14-byte wrapper and send to one client.
+        private void SendSfPacket(IPEndPoint to, byte msgType, byte[] body, ulong steamID, byte channel)
+        {
+            if ((object)_sfServer == null) return;
+            int totalLen = 5 + (body?.Length ?? 0) + 9;
+            byte[] pkt = new byte[totalLen];
+            uint ts = (uint)(System.DateTime.UtcNow - new System.DateTime(1970, 1, 1)).TotalSeconds;
+            WriteU32LE(pkt, 0, ts);
+            pkt[4] = msgType;
+            if (body != null && body.Length > 0) System.Buffer.BlockCopy(body, 0, pkt, 5, body.Length);
+            int tailOff = 5 + (body?.Length ?? 0);
+            WriteU64LE(pkt, tailOff, steamID);
+            pkt[tailOff + 8] = channel;
+            try
+            {
+                _sfServer.Send(pkt, pkt.Length, to);
+                _sfPacketsTx++;
+            }
+            catch (Exception e) { if (Verbose) Log.LogDebug($"[SF] send: {e.Message}"); }
+        }
+
+        private void BroadcastSfPacket(byte msgType, byte[] body, ulong steamID, byte channel)
+        {
+            foreach (var kv in _sfClients)
+                SendSfPacket(kv.Value.Addr, msgType, body, steamID, channel);
+        }
+
+        // === codec primitives ===
+
+        private static void WriteU32LE(byte[] buf, int off, uint v)
+        {
+            buf[off    ] = (byte)(v       & 0xFF);
+            buf[off + 1] = (byte)(v >>  8 & 0xFF);
+            buf[off + 2] = (byte)(v >> 16 & 0xFF);
+            buf[off + 3] = (byte)(v >> 24 & 0xFF);
+        }
+        private static void WriteU64LE(byte[] buf, int off, ulong v)
+        {
+            for (int i = 0; i < 8; i++) buf[off + i] = (byte)((v >> (i * 8)) & 0xFF);
+        }
+        private static ulong ReadU64LE(byte[] buf, int off)
+        {
+            ulong v = 0;
+            for (int i = 0; i < 8; i++) v |= ((ulong)buf[off + i]) << (i * 8);
+            return v;
+        }
+        private static float ReadF32LE(byte[] buf, int off)
+        {
+            return System.BitConverter.ToSingle(buf, off);
+        }
 
         private void StartBridge()
         {
@@ -447,13 +955,47 @@ namespace SFHeadlessHost
                 int scene = ExtractIntField(body, "scene", -1);
                 if (scene >= 0)
                 {
-                    Log.LogInfo($"Bridge: loadMap({scene}) requested by {from}.");
+                    // Optional teleport-after-load coordinates. If x/y/z are
+                    // provided, after the scene loads we teleport every
+                    // spawned rig to (x, y, z) so they land in the new
+                    // scene's playable area rather than wherever they were
+                    // mid-air/below-killbox in the previous scene.
+                    float tx = ExtractFloatField(body, "x");
+                    float ty = ExtractFloatField(body, "y");
+                    float tz = ExtractFloatField(body, "z");
+                    bool hasTeleport = body.IndexOf("\"x\"") >= 0;
+                    Log.LogInfo($"Bridge: loadMap({scene}) requested; teleport=({tx},{ty},{tz}) hasTeleport={hasTeleport}");
+                    if (hasTeleport)
+                    {
+                        _pendingTeleport = new Vector3(tx, ty, tz);
+                        _pendingTeleportArmed = true;
+                        SceneManager.sceneLoaded -= OnSceneLoadedTeleport;
+                        SceneManager.sceneLoaded += OnSceneLoadedTeleport;
+                    }
                     SceneManager.LoadScene(scene, LoadSceneMode.Single);
                     SendBridgeJson(from, $"{{\"reply\":\"ack\",\"cmd\":\"loadMap\",\"ok\":true,\"scene\":{scene}}}");
                 }
                 else
                 {
                     SendBridgeJson(from, "{\"reply\":\"ack\",\"cmd\":\"loadMap\",\"ok\":false,\"err\":\"missing or invalid scene\"}");
+                }
+            }
+            else if (cmd == "teleport")
+            {
+                // Direct teleport command — no scene load. Useful when you
+                // want to re-park the rig (e.g. after it falls into a void).
+                int slot = ExtractIntField(body, "slot", -1);
+                float tx = ExtractFloatField(body, "x");
+                float ty = ExtractFloatField(body, "y");
+                float tz = ExtractFloatField(body, "z");
+                if (slot >= 0 && SlotToRig.TryGetValue(slot, out var rigGo) && (object)rigGo != null)
+                {
+                    TeleportRig(rigGo, new Vector3(tx, ty, tz));
+                    SendBridgeJson(from, $"{{\"reply\":\"ack\",\"cmd\":\"teleport\",\"ok\":true,\"slot\":{slot}}}");
+                }
+                else
+                {
+                    SendBridgeJson(from, "{\"reply\":\"ack\",\"cmd\":\"teleport\",\"ok\":false,\"err\":\"slot not found\"}");
                 }
             }
             else if (cmd == "sub")
@@ -464,7 +1006,13 @@ namespace SFHeadlessHost
             else if (cmd == "spawnPlayer")
             {
                 int slot = ExtractIntField(body, "slot", 0);
-                bool ok = TrySpawnPlayer(slot, out string err);
+                // Optional x/y/z to spawn directly at — useful when spawning
+                // into a Landfall scene where the default (0,8,0) is below the
+                // killbox and the rig dies before any teleport can save it.
+                bool hasPos = body.IndexOf("\"x\"") >= 0;
+                Vector3 pos = new Vector3(0f, 8f, 0f);
+                if (hasPos) pos = new Vector3(ExtractFloatField(body, "x"), ExtractFloatField(body, "y"), ExtractFloatField(body, "z"));
+                bool ok = TrySpawnPlayer(slot, pos, out string err);
                 if (ok)
                 {
                     SendBridgeJson(from, $"{{\"reply\":\"ack\",\"cmd\":\"spawnPlayer\",\"ok\":true,\"slot\":{slot}}}");
@@ -510,7 +1058,7 @@ namespace SFHeadlessHost
                 }
                 else
                 {
-                    SlotInputs[slot] = new InputFrame
+                    var frame = new InputFrame
                     {
                         StickX  = ExtractFloatField(body, "stickX"),
                         StickY  = ExtractFloatField(body, "stickY"),
@@ -518,6 +1066,10 @@ namespace SFHeadlessHost
                         AimY    = ExtractFloatField(body, "aimY"),
                         Buttons = ExtractIntField(body, "buttons", 0),
                     };
+                    SlotInputs[slot] = frame;
+                    _applyInputCount++;
+                    if (_applyInputCount == 1 || _applyInputCount % 60 == 0)
+                        Log.LogInfo($"[INSTR1] applyInput#{_applyInputCount}: slot={slot} stick=({frame.StickX:0.00},{frame.StickY:0.00}) buttons={frame.Buttons} SlotInputs.Count={SlotInputs.Count}");
                     // No reply for applyInput — comes 60 times/sec from Go,
                     // we don't want to flood the network with acks.
                 }
@@ -740,23 +1292,54 @@ namespace SFHeadlessHost
         // exist but won't move until we inject inputs.
         //
         // Returns (true, "") on success or (false, "reason") on failure.
-        private bool TrySpawnPlayer(int slot, out string err)
+        private void TryCachePlayerPrefab()
+        {
+            if ((object)_cachedPlayerPrefab != null) return;
+            try
+            {
+                var chType = AccessTools.TypeByName("ControllerHandler");
+                if ((object)chType == null) { Log.LogWarning("CachePrefab: ControllerHandler type missing"); return; }
+                var chInst = UnityEngine.Object.FindObjectOfType(chType);
+                if ((object)chInst == null) { Log.LogWarning("CachePrefab: no ControllerHandler instance in active scene"); return; }
+                var pf = AccessTools.Field(chType, "playerPrefab");
+                if ((object)pf == null) { Log.LogWarning("CachePrefab: playerPrefab field missing"); return; }
+                var go = pf.GetValue(chInst) as GameObject;
+                if ((object)go == null) { Log.LogWarning("CachePrefab: playerPrefab value is null"); return; }
+                _cachedPlayerPrefab = go;
+                Log.LogInfo($"CachePrefab: cached playerPrefab '{go.name}' for cross-scene spawns.");
+            }
+            catch (Exception e) { Log.LogError($"TryCachePlayerPrefab threw: {e.Message}"); }
+        }
+
+        private bool TrySpawnPlayer(int slot, Vector3 spawnPosOverride, out string err)
         {
             err = "";
             try
             {
-                var chType = AccessTools.TypeByName("ControllerHandler");
-                if ((object)chType == null) { err = "ControllerHandler type not found"; return false; }
-                var chInst = UnityEngine.Object.FindObjectOfType(chType);
-                if ((object)chInst == null) { err = "ControllerHandler instance not in scene"; return false; }
-                var prefabField = AccessTools.Field(chType, "playerPrefab");
-                if ((object)prefabField == null) { err = "playerPrefab field not found"; return false; }
-                var prefab = prefabField.GetValue(chInst) as GameObject;
-                if ((object)prefab == null) { err = "playerPrefab is null"; return false; }
-                var spawnPos = new Vector3(0f, 8f, 0f); // matches ControllerHandler.CreatePlayer's default
+                GameObject prefab = _cachedPlayerPrefab;
+                if ((object)prefab == null)
+                {
+                    var chType = AccessTools.TypeByName("ControllerHandler");
+                    if ((object)chType == null) { err = "ControllerHandler type not found"; return false; }
+                    var chInst = UnityEngine.Object.FindObjectOfType(chType);
+                    if ((object)chInst == null) { err = "ControllerHandler instance not in scene (and no cached prefab)"; return false; }
+                    var prefabField = AccessTools.Field(chType, "playerPrefab");
+                    if ((object)prefabField == null) { err = "playerPrefab field not found"; return false; }
+                    prefab = prefabField.GetValue(chInst) as GameObject;
+                    if ((object)prefab == null) { err = "playerPrefab is null"; return false; }
+                    _cachedPlayerPrefab = prefab;
+                    Log.LogInfo("Cached playerPrefab for cross-scene spawns.");
+                }
+                var spawnPos = spawnPosOverride; // caller-supplied; defaults to (0,8,0) in bridge handler
                 var go = UnityEngine.Object.Instantiate(prefab, spawnPos, Quaternion.identity) as GameObject;
                 if ((object)go == null) { err = "Instantiate returned null"; return false; }
                 go.name = $"OracleSpawn_Slot{slot}";
+                // Survive SceneManager.LoadScene switches. Without this, the
+                // rig is destroyed when we transition from MainScene (where
+                // ControllerHandler lives, needed to spawn the rig) to a
+                // Landfall scene (which has real platforms but no spawn
+                // infrastructure).
+                UnityEngine.Object.DontDestroyOnLoad(go);
 
                 // Bind a fresh CharacterActions so the Controller has somewhere
                 // to read input from. Without this, mPlayerActions is null and
@@ -1083,64 +1666,22 @@ namespace SFHeadlessHost
 
         private void StartHost()
         {
-            // Step 2: ensure MatchmakingHandler is in Sockets mode.
-            var mmType = AccessTools.TypeByName("MatchmakingHandler");
-            if ((object)mmType != null)
-            {
-                var runningOnSockets = AccessTools.Field(mmType, "mRunningOnSockets")
-                                       ?? AccessTools.Field(mmType, "m_RunningOnSockets");
-                var instance = UnityEngine.Object.FindObjectOfType(mmType);
-                if ((object)instance != null && (object)runningOnSockets != null)
-                {
-                    runningOnSockets.SetValue(instance, true); /* FieldInfo — no compat fix needed */
-                    Log.LogInfo("Set MatchmakingHandler.mRunningOnSockets = true.");
-                }
-                else
-                {
-                    Log.LogWarning("MatchmakingHandler instance or mRunningOnSockets field not found.");
-                }
-
-                var runningOnSocketsStatic = AccessTools.Property(mmType, "RunningOnSockets");
-                if ((object)runningOnSocketsStatic != null && runningOnSocketsStatic.CanWrite)
-                {
-                    runningOnSocketsStatic.SetValue(null, true, null);
-                }
-                else
-                {
-                    var backing = AccessTools.Field(mmType, "<RunningOnSockets>k__BackingField");
-                    if ((object)backing != null) backing.SetValue(null, true);
-                }
-            }
-
-            // Step 3: HostServer on MatchMakingHandlerSockets.
-            var hostType = AccessTools.TypeByName("MatchMakingHandlerSockets");
-            if ((object)hostType == null)
-            {
-                Log.LogError("MatchMakingHandlerSockets type not found.");
-                return;
-            }
-            var hostInstance = UnityEngine.Object.FindObjectOfType(hostType);
-            if ((object)hostInstance == null)
-            {
-                Log.LogWarning("No MatchMakingHandlerSockets instance in scene; creating one.");
-                var go = new GameObject("SFHeadlessHost_MMSockets");
-                UnityEngine.Object.DontDestroyOnLoad(go);
-                hostInstance = go.AddComponent(hostType);
-            }
-            var hostMethod = AccessTools.Method(hostType, "HostServer");
-            if ((object)hostMethod == null)
-            {
-                Log.LogError("MatchMakingHandlerSockets.HostServer method not found.");
-                return;
-            }
+            // Path A: oracle owns the patched DLL's wire protocol directly.
+            // No Lidgren MatchMakingHandlerSockets.HostServer — the patched
+            // DLL doesn't actually use Lidgren (its socket-mode receive is
+            // commented out; P2PPackageHandler.Init opens a RAW UDP socket
+            // via UDPClient(address, port)). We bind our OWN raw UDP socket
+            // on BindPort and parse the 14-byte-wrapped v25 protocol that
+            // sfdsrv speaks.
             try
             {
-                var result = hostMethod.Invoke(hostInstance, null);
-                Log.LogInfo($"HostServer() returned: {result}");
+                _sfServer = new UdpClient(BindPort);
+                _sfServer.Client.Blocking = false;
+                Log.LogInfo($"SF server: listening on UDP {BindPort} (raw v25 protocol).");
             }
             catch (Exception e)
             {
-                Log.LogError($"HostServer() threw: {e}");
+                Log.LogError($"SF server bind on {BindPort} threw: {e}");
                 return;
             }
             Log.LogInfo($"=== HEADLESS HOST READY on port {BindPort} ===");
