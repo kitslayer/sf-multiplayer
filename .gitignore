@@ -53,5 +53,5 @@ steam_appid.txt
 steam_settings/
 account_name.txt
 user_steam_id.txt
-StickFightDedicatedSrv/smoke-test
+legacy/StickFightDedicatedSrv/smoke-test
 smoke-test
