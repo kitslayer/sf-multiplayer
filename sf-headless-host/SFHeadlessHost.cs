@@ -340,6 +340,17 @@ namespace SFHeadlessHost
                     SendBridgeJson(from, $"{{\"reply\":\"ack\",\"cmd\":\"spawnPlayer\",\"ok\":false,\"err\":\"{err}\"}}");
                 }
             }
+            else if (cmd == "addForce")
+            {
+                // Most direct possible test: pick the first BodyPart child and
+                // AddForce on its Rigidbody manually. If the rig moves, we
+                // know physics is healthy and the issue is upstream.
+                int slot = ExtractIntField(body, "slot", 0);
+                float fz = ExtractFloatField(body, "fz");
+                string err;
+                bool ok = TryAddForce(slot, fz, out err);
+                SendBridgeJson(from, $"{{\"reply\":\"ack\",\"cmd\":\"addForce\",\"ok\":{(ok?"true":"false")},\"err\":\"{err}\"}}");
+            }
             else if (cmd == "forceMove")
             {
                 // Diagnostic: directly call Movement.MoveRight() for one tick.
@@ -452,6 +463,26 @@ namespace SFHeadlessHost
             }
         }
 
+        // TryAddForce directly AddForces on the rig's first BodyPart Rigidbody.
+        // If THIS doesn't move the rig, the Rigidbody is constrained somehow
+        // (joints, freezeAll, mass=infinity, etc.) — not a force-routing issue.
+        private bool TryAddForce(int slot, float fz, out string err)
+        {
+            err = "";
+            try
+            {
+                if (!SlotToRig.TryGetValue(slot, out var rig) || (object)rig == null) { err = "no rig"; return false; }
+                var bp = rig.GetComponentInChildren(AccessTools.TypeByName("BodyPart")) as Component;
+                if ((object)bp == null) { err = "no BodyPart"; return false; }
+                var rb = bp.GetComponent<Rigidbody>();
+                if ((object)rb == null) { err = "no Rigidbody on BodyPart"; return false; }
+                rb.AddForce(new Vector3(0f, 0f, fz), ForceMode.Impulse);
+                err = $"applied F=(0,0,{fz}) Imp to {bp.gameObject.name}; rb.mass={rb.mass} kinematic={rb.isKinematic} constraints={rb.constraints}";
+                return true;
+            }
+            catch (Exception e) { err = e.Message; return false; }
+        }
+
         // TryForceMove directly calls Movement.MoveRight/MoveLeft on the rig
         // for diagnostic purposes — bypassing Controller.Update's input read.
         private bool TryForceMove(int slot, string dir, out string err)
@@ -527,6 +558,32 @@ namespace SFHeadlessHost
                     if ((object)sf != null) sb.Append("; sinceFallen=").Append(sf.GetValue(info));
                     var dead = AccessTools.Field(info.GetType(), "isDead");
                     if ((object)dead != null) sb.Append(" isDead=").Append(dead.GetValue(info));
+                }
+
+                // Dump CharacterActions Movement.X / Y / Left / Right values
+                // so we can see whether our injection is taking effect.
+                var ctrl2 = rig.GetComponent(AccessTools.TypeByName("Controller"));
+                if ((object)ctrl2 != null)
+                {
+                    var pa = AccessTools.Field(ctrl2.GetType(), "mPlayerActions")?.GetValue(ctrl2);
+                    if ((object)pa != null)
+                    {
+                        var movement = AccessTools.Field(pa.GetType(), "Movement")?.GetValue(pa);
+                        if ((object)movement != null)
+                        {
+                            float mx = (float)AccessTools.Property(movement.GetType(), "X").GetValue(movement, null);
+                            float my = (float)AccessTools.Property(movement.GetType(), "Y").GetValue(movement, null);
+                            sb.Append("; Movement.X=").Append(mx.ToString("0.00")).Append(" .Y=").Append(my.ToString("0.00"));
+                        }
+                        var leftPa = AccessTools.Field(pa.GetType(), "Left")?.GetValue(pa);
+                        var rightPa = AccessTools.Field(pa.GetType(), "Right")?.GetValue(pa);
+                        if ((object)leftPa != null && (object)rightPa != null)
+                        {
+                            var leftVal = AccessTools.Property(leftPa.GetType(), "Value")?.GetValue(leftPa, null);
+                            var rightVal = AccessTools.Property(rightPa.GetType(), "Value")?.GetValue(rightPa, null);
+                            sb.Append("; Left.Value=").Append(leftVal).Append(" Right.Value=").Append(rightVal);
+                        }
+                    }
                 }
 
                 sb.Append("; Time.timeScale=").Append(Time.timeScale.ToString("0.000"));
@@ -610,6 +667,16 @@ namespace SFHeadlessHost
                 {
                     SlotInputs[slot] = new InputFrame();
                 }
+
+                // Clear regularBindings on every underlying PlayerAction in
+                // this CharacterActions instance. InControl's PlayerAction.
+                // UpdateBindings loops over regularBindings each frame and
+                // calls UpdateWithValue(bindingSource.GetValue(Device), ...),
+                // which writes 0 because we have no real device — that's what
+                // clobbers our manually-injected values. With no bindings,
+                // the loop is a no-op and our UpdateWithValue calls survive.
+                ClearAllPlayerActionBindings(go);
+
                 Log.LogInfo($"Spawned oracle player rig for slot {slot} at {spawnPos} (GO: {go.name})");
                 return true;
             }
@@ -617,6 +684,120 @@ namespace SFHeadlessHost
             {
                 err = e.Message;
                 return false;
+            }
+        }
+
+        // ClearAllPlayerActionBindings walks the rig's CharacterActions and
+        // clears each PlayerAction's regularBindings list. Required so our
+        // per-frame UpdateWithValue calls aren't immediately overwritten by
+        // InControl's UpdateBindings loop reading from null devices.
+        private static void ClearAllPlayerActionBindings(GameObject rig)
+        {
+            try
+            {
+                var ctrlType = AccessTools.TypeByName("Controller");
+                if ((object)ctrlType == null) return;
+                var ctrl = rig.GetComponent(ctrlType);
+                if ((object)ctrl == null) return;
+                var actionsField = AccessTools.Field(ctrlType, "mPlayerActions");
+                if ((object)actionsField == null) return;
+                var actions = actionsField.GetValue(ctrl);
+                if ((object)actions == null) return;
+
+                var paType = AccessTools.TypeByName("InControl.PlayerAction");
+                if ((object)paType == null) return;
+                var bindingsField = AccessTools.Field(paType, "regularBindings");
+                var visibleField  = AccessTools.Field(paType, "visibleBindings");
+                if ((object)bindingsField == null) return;
+
+                // Walk every field on the CharacterActions instance; any
+                // PlayerAction we find, clear its bindings.
+                int cleared = 0;
+                foreach (var f in actions.GetType().GetFields(
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+                {
+                    var v = f.GetValue(actions);
+                    if ((object)v == null) continue;
+                    if (!paType.IsInstanceOfType(v)) continue;
+                    var listObj = bindingsField.GetValue(v);
+                    var clearMethod = listObj?.GetType().GetMethod("Clear");
+                    clearMethod?.Invoke(listObj, null);
+                    if ((object)visibleField != null)
+                    {
+                        var visObj = visibleField.GetValue(v);
+                        visObj?.GetType().GetMethod("Clear")?.Invoke(visObj, null);
+                    }
+                    cleared++;
+                }
+                Log.LogInfo($"Cleared regularBindings on {cleared} PlayerActions.");
+            }
+            catch (Exception e)
+            {
+                Log.LogError($"ClearAllPlayerActionBindings: {e.Message}");
+            }
+        }
+
+        // Lookup cache for InControl.PlayerAction.UpdateWithValue MethodInfo.
+        private static MethodInfo _cachedUpdateWithValue;
+        private static bool _loggedUpdateWithValue;
+        private static MethodInfo GetUpdateWithValueMethod()
+        {
+            if (_cachedUpdateWithValue != null) return _cachedUpdateWithValue;
+            var paType = AccessTools.TypeByName("InControl.PlayerAction");
+            if ((object)paType == null)
+            {
+                if (!_loggedUpdateWithValue) { Log.LogWarning("UpdateWithValue: no InControl.PlayerAction type"); _loggedUpdateWithValue = true; }
+                return null;
+            }
+            _cachedUpdateWithValue = AccessTools.Method(paType, "UpdateWithValue",
+                new Type[] { typeof(float), typeof(ulong), typeof(float) });
+            if (_cachedUpdateWithValue == null && !_loggedUpdateWithValue)
+            {
+                Log.LogWarning("UpdateWithValue: method not found on PlayerAction. Trying without param-type filter…");
+                _cachedUpdateWithValue = AccessTools.Method(paType, "UpdateWithValue");
+                if (_cachedUpdateWithValue == null) Log.LogWarning("UpdateWithValue: not found even without filter");
+                else Log.LogInfo($"UpdateWithValue: found via fallback, signature: {_cachedUpdateWithValue}");
+                _loggedUpdateWithValue = true;
+            }
+            else if (!_loggedUpdateWithValue)
+            {
+                Log.LogInfo($"UpdateWithValue: found, signature: {_cachedUpdateWithValue}");
+                _loggedUpdateWithValue = true;
+            }
+            return _cachedUpdateWithValue;
+        }
+
+        private static bool _loggedPushPath;
+        // PushPlayerAction calls PlayerAction.UpdateWithValue(value, tick, dt)
+        // on the named PlayerAction field of the given CharacterActions.
+        private static void PushPlayerAction(object actions, string fieldName, float value)
+        {
+            var f = AccessTools.Field(actions.GetType(), fieldName);
+            if ((object)f == null)
+            {
+                if (!_loggedPushPath) { Log.LogWarning($"PushPlayerAction[{fieldName}]: field not found on type {actions.GetType()}"); _loggedPushPath = true; }
+                return;
+            }
+            var action = f.GetValue(actions);
+            if ((object)action == null)
+            {
+                if (!_loggedPushPath) { Log.LogWarning($"PushPlayerAction[{fieldName}]: field value is null"); _loggedPushPath = true; }
+                return;
+            }
+            var m = GetUpdateWithValueMethod();
+            if ((object)m == null)
+            {
+                if (!_loggedPushPath) { Log.LogWarning($"PushPlayerAction[{fieldName}]: UpdateWithValue method lookup failed; action type={action.GetType()}"); _loggedPushPath = true; }
+                return;
+            }
+            try
+            {
+                m.Invoke(action, new object[] { value, (ulong)0, Time.deltaTime });
+                if (!_loggedPushPath) { Log.LogInfo($"PushPlayerAction[{fieldName}]: invoke ok, value={value}"); _loggedPushPath = true; }
+            }
+            catch (Exception e)
+            {
+                if (!_loggedPushPath) { Log.LogError($"PushPlayerAction[{fieldName}] invoke threw: {e}"); _loggedPushPath = true; }
             }
         }
 
@@ -630,35 +811,52 @@ namespace SFHeadlessHost
         // CharacterActions is an InControl PlayerActionSet. Its Movement /
         // Aiming fields are TwoAxisInputControl with a settable RawValue.
         // Buttons are PlayerAction with a settable RawValue / IsPressed.
+        private static bool _loggedFirstWrite;
+        private static bool _loggedFirstWriteIter;
         private void WriteInputsToRigs()
         {
             if (SlotToRig.Count == 0) return;
+            if (!_loggedFirstWrite) { Log.LogInfo($"WriteInputsToRigs called for first time. SlotToRig.Count={SlotToRig.Count} SlotInputs.Count={SlotInputs.Count}"); _loggedFirstWrite = true; }
             try
             {
                 foreach (var kv in SlotToRig)
                 {
                     int slot = kv.Key;
                     GameObject rig = kv.Value;
-                    if ((object)rig == null) continue;
-                    if (!SlotInputs.TryGetValue(slot, out var input)) continue;
+                    if ((object)rig == null) { if (!_loggedFirstWriteIter) { Log.LogWarning($"WriteInputs iter: rig null"); _loggedFirstWriteIter = true; } continue; }
+                    if (!SlotInputs.TryGetValue(slot, out var input)) { if (!_loggedFirstWriteIter) { Log.LogWarning($"WriteInputs iter: SlotInputs miss"); _loggedFirstWriteIter = true; } continue; }
 
                     var ctrlType = AccessTools.TypeByName("Controller");
-                    if ((object)ctrlType == null) continue;
+                    if ((object)ctrlType == null) { if (!_loggedFirstWriteIter) { Log.LogWarning($"WriteInputs iter: no Controller type"); _loggedFirstWriteIter = true; } continue; }
                     var ctrl = rig.GetComponent(ctrlType);
-                    if ((object)ctrl == null) continue;
+                    if ((object)ctrl == null) { if (!_loggedFirstWriteIter) { Log.LogWarning($"WriteInputs iter: no Controller on rig"); _loggedFirstWriteIter = true; } continue; }
                     var actionsField = AccessTools.Field(ctrlType, "mPlayerActions");
-                    if ((object)actionsField == null) continue;
+                    if ((object)actionsField == null) { if (!_loggedFirstWriteIter) { Log.LogWarning($"WriteInputs iter: no mPlayerActions field"); _loggedFirstWriteIter = true; } continue; }
                     var actions = actionsField.GetValue(ctrl);
-                    if ((object)actions == null) continue;
+                    if ((object)actions == null) { if (!_loggedFirstWriteIter) { Log.LogWarning($"WriteInputs iter: mPlayerActions is null"); _loggedFirstWriteIter = true; } continue; }
 
-                    // Movement.RawValue = Vector2(stickX, stickY)
-                    SetTwoAxis(actions, "Movement", new Vector2(input.StickX, input.StickY));
-                    SetTwoAxis(actions, "Aiming",   new Vector2(input.AimX,   input.AimY));
+                    if (!_loggedFirstWriteIter) { Log.LogInfo($"WriteInputs iter: REACHED PushPlayerAction, actions type={actions.GetType().FullName}, stick=({input.StickX},{input.StickY})"); _loggedFirstWriteIter = true; }
 
-                    SetOneAxisOrButton(actions, "PunchOrFire", (input.Buttons & 0x02) != 0);
-                    SetOneAxisOrButton(actions, "Block",       (input.Buttons & 0x04) != 0);
-                    SetOneAxisOrButton(actions, "Throw",       (input.Buttons & 0x08) != 0);
-                    SetOneAxisOrButton(actions, "Jump",        (input.Buttons & 0x01) != 0);
+                    // Feed the underlying L/R/U/D PlayerActions — that's
+                    // what CharacterActions.Movement (a PlayerTwoAxisAction)
+                    // computes its X/Y from. Setting Movement.thisValue
+                    // directly gets overwritten next frame by
+                    // PlayerTwoAxisAction.Update reading L/R/U/D.
+                    PushPlayerAction(actions, "Left",  Mathf.Max(0f, -input.StickX));
+                    PushPlayerAction(actions, "Right", Mathf.Max(0f,  input.StickX));
+                    PushPlayerAction(actions, "Up",    Mathf.Max(0f,  input.StickY));
+                    PushPlayerAction(actions, "Down",  Mathf.Max(0f, -input.StickY));
+
+                    PushPlayerAction(actions, "AimLeft",  Mathf.Max(0f, -input.AimX));
+                    PushPlayerAction(actions, "AimRight", Mathf.Max(0f,  input.AimX));
+                    PushPlayerAction(actions, "AimUp",    Mathf.Max(0f,  input.AimY));
+                    PushPlayerAction(actions, "AimDown",  Mathf.Max(0f, -input.AimY));
+
+                    PushPlayerAction(actions, "Jump",         (input.Buttons & 0x01) != 0 ? 1f : 0f);
+                    PushPlayerAction(actions, "Jump2",        (input.Buttons & 0x01) != 0 ? 1f : 0f);
+                    PushPlayerAction(actions, "PunchOrFire",  (input.Buttons & 0x02) != 0 ? 1f : 0f);
+                    PushPlayerAction(actions, "Block",        (input.Buttons & 0x04) != 0 ? 1f : 0f);
+                    PushPlayerAction(actions, "Throw",        (input.Buttons & 0x08) != 0 ? 1f : 0f);
                 }
             }
             catch (Exception e)
