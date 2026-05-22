@@ -139,161 +139,79 @@ namespace SFHeadlessHost
                 Log.LogError($"Controller.Update prefix patch failed: {e}");
             }
 
-            // Phase 6.5 Step 1 — observe-only host-side patches.
-            //   (a) Postfix MultiplayerManager.IsServer getter → true. Activates
-            //       SF's host-side branches (weapon spawning, killbox checks,
-            //       projectile auth, etc) inside the oracle's Unity instance.
-            //   (b) Prefix MultiplayerManager.SendMessageToAllClients — LOG only,
-            //       run original. Original loops mConnectedClients (empty on the
-            //       oracle) so it's a no-op; logging tells us which host
-            //       broadcasts fire when (a) flips IsServer on.
-            //   (c) Prefix P2PPackageHandler.SendP2PPacketToUser(CSteamID,...) —
-            //       LOG only. Catches direct host→client sends (ClientInit on
-            //       new join, KickPlayer, etc).
-            try
+            // Phase 6.5 — host-side patches. Each runs in its own try/catch
+            // so one failure (signature drift, missing type) doesn't silently
+            // skip the rest. Failures accumulate in _p65MissingPatches and are
+            // surfaced as a loud warning after all installs.
             {
                 var harmony = new Harmony(PluginGuid + ".phase6-5-observe");
 
                 var mmType = AccessTools.TypeByName("MultiplayerManager");
-                if ((object)mmType != null)
-                {
-                    var isServerGetter = AccessTools.PropertyGetter(mmType, "IsServer");
-                    if ((object)isServerGetter != null)
-                    {
-                        harmony.Patch(isServerGetter, postfix: new HarmonyMethod(
-                            AccessTools.Method(typeof(Plugin), nameof(IsServerPostfix))));
-                        Log.LogInfo("[P6.5] Patched MultiplayerManager.IsServer → true.");
-                    }
-                    else
-                    {
-                        Log.LogWarning("[P6.5] Could not find MultiplayerManager.IsServer getter.");
-                    }
+                TryPatch(harmony, "MultiplayerManager.IsServer (postfix → true)",
+                    (object)mmType != null ? AccessTools.PropertyGetter(mmType, "IsServer") : null,
+                    postfix: nameof(IsServerPostfix));
+                TryPatch(harmony, "MultiplayerManager.SendMessageToAllClients (prefix log+forward)",
+                    (object)mmType != null ? AccessTools.Method(mmType, "SendMessageToAllClients") : null,
+                    prefix: nameof(SendBroadcastPrefix));
 
-                    var smtacMethod = AccessTools.Method(mmType, "SendMessageToAllClients");
-                    if ((object)smtacMethod != null)
-                    {
-                        harmony.Patch(smtacMethod, prefix: new HarmonyMethod(
-                            AccessTools.Method(typeof(Plugin), nameof(SendBroadcastPrefix))));
-                        Log.LogInfo("[P6.5] Patched MultiplayerManager.SendMessageToAllClients (log-only).");
-                    }
-                    else
-                    {
-                        Log.LogWarning("[P6.5] Could not find MultiplayerManager.SendMessageToAllClients.");
-                    }
-                }
-                else
-                {
-                    Log.LogWarning("[P6.5] Could not find type MultiplayerManager.");
-                }
-
-                // Phase 6.5 Step 2d — pin MatchmakingHandler.IsNetworkMatch=true.
-                // Controller.cs line 123 + NetworkPlayer.cs line 202 reset
-                // mIsNetworkMatch to MatchmakingHandler.Instance.IsInsideLobby
-                // every lifecycle tick. IsInsideLobby is false on the oracle
-                // because we never invoke SF's HostServer. Without this, the
-                // SetNetworkMatch(true) call gets clobbered → SpawnRandomWeapon
-                // takes the local Instantiate branch with null weaponObject.
                 var mhTypeP = AccessTools.TypeByName("MatchmakingHandler");
-                if ((object)mhTypeP != null)
+                TryPatch(harmony, "MatchmakingHandler.IsNetworkMatch (postfix → true)",
+                    (object)mhTypeP != null ? AccessTools.PropertyGetter(mhTypeP, "IsNetworkMatch") : null,
+                    postfix: nameof(IsNetworkMatchPostfix));
+                // SetNetworkMatch prefix uses a named `ref bool v` to mutate the
+                // arg in-place. Harmony binds prefix params by name, so verify
+                // SF's first param really is named `v`; if SF ever renames it
+                // (e.g. to `value`), the prefix silently no-ops and the fix
+                // we depend on regresses.
+                var setNetMatchMethod = (object)mhTypeP != null ? AccessTools.Method(mhTypeP, "SetNetworkMatch") : null;
+                if ((object)setNetMatchMethod != null)
                 {
-                    // Postfix on getter (in case it's not inlined).
-                    var isNetMatchGetter = AccessTools.PropertyGetter(mhTypeP, "IsNetworkMatch");
-                    if ((object)isNetMatchGetter != null)
+                    var ps = setNetMatchMethod.GetParameters();
+                    if (ps.Length == 0 || ps[0].Name != "v")
                     {
-                        harmony.Patch(isNetMatchGetter, postfix: new HarmonyMethod(
-                            AccessTools.Method(typeof(Plugin), nameof(IsNetworkMatchPostfix))));
-                        Log.LogInfo("[P6.5] Patched MatchmakingHandler.IsNetworkMatch getter → true.");
-                    }
-                    // Prefix on SetNetworkMatch — force the parameter to true.
-                    // Mono inlined IsNetworkMatch getter into SpawnRandomWeapon,
-                    // so the getter postfix doesn't catch inlined reads. The
-                    // backing field mIsNetworkMatch needs to stay true. Pin it
-                    // by intercepting every SetNetworkMatch call (Controller's
-                    // lifecycle reset, etc.) and forcing the arg.
-                    var setNetMatchMethod = AccessTools.Method(mhTypeP, "SetNetworkMatch");
-                    if ((object)setNetMatchMethod != null)
-                    {
-                        harmony.Patch(setNetMatchMethod, prefix: new HarmonyMethod(
-                            AccessTools.Method(typeof(Plugin), nameof(SetNetworkMatchPrefix))));
-                        Log.LogInfo("[P6.5] Patched MatchmakingHandler.SetNetworkMatch (force arg=true).");
+                        Log.LogError($"[P6.5] SetNetworkMatch first param is '{(ps.Length > 0 ? ps[0].Name : "<none>")}', expected 'v' — SetNetworkMatchPrefix will silently no-op. Update prefix signature.");
                     }
                 }
+                TryPatch(harmony, "MatchmakingHandler.SetNetworkMatch (prefix force arg=true)",
+                    setNetMatchMethod, prefix: nameof(SetNetworkMatchPrefix));
 
-                // Phase 6.5 Step 2c — bypass WeaponSelectionHandler.GetRandomWeaponIndex
-                // returning -1 (no active weapons because UI never initialized
-                // on batchmode). Force a valid index so SpawnRandomWeapon
-                // proceeds to call mNetworkManager.SpawnWeapon → our intercept.
                 var wsType = AccessTools.TypeByName("WeaponSelectionHandler");
-                if ((object)wsType != null)
-                {
-                    var grwiMethod = AccessTools.Method(wsType, "GetRandomWeaponIndex");
-                    if ((object)grwiMethod != null)
-                    {
-                        harmony.Patch(grwiMethod, prefix: new HarmonyMethod(
-                            AccessTools.Method(typeof(Plugin), nameof(GetRandomWeaponIndexPrefix))));
-                        Log.LogInfo("[P6.5] Patched WeaponSelectionHandler.GetRandomWeaponIndex (forced index 0).");
-                    }
-                    else
-                    {
-                        Log.LogWarning("[P6.5] WeaponSelectionHandler.GetRandomWeaponIndex method not found.");
-                    }
-                }
-                else
-                {
-                    Log.LogWarning("[P6.5] WeaponSelectionHandler type not found.");
-                }
+                TryPatch(harmony, "WeaponSelectionHandler.GetRandomWeaponIndex (prefix → valid index)",
+                    (object)wsType != null ? AccessTools.Method(wsType, "GetRandomWeaponIndex") : null,
+                    prefix: nameof(GetRandomWeaponIndexPrefix));
 
-                // Phase 6.5 Step 2e — replace GameManager.SpawnRandomWeapon entirely.
-                // Mono inlined MatchmakingHandler.IsNetworkMatch getter into the
-                // method body, so neither the getter postfix nor SetNetworkMatch
-                // prefix can flip the inlined ldsfld read. The else branch fires
-                // with weaponObject=null → ArgumentException. Skip the original
-                // and call MultiplayerManager.SpawnWeapon directly.
                 var gmTypeP = AccessTools.TypeByName("GameManager");
-                if ((object)gmTypeP != null)
-                {
-                    var srwMethod = AccessTools.Method(gmTypeP, "SpawnRandomWeapon");
-                    if ((object)srwMethod != null)
-                    {
-                        harmony.Patch(srwMethod, prefix: new HarmonyMethod(
-                            AccessTools.Method(typeof(Plugin), nameof(SpawnRandomWeaponPrefix))));
-                        Log.LogInfo("[P6.5] Patched GameManager.SpawnRandomWeapon (replaced with network-only impl).");
-                    }
-                }
+                TryPatch(harmony, "GameManager.SpawnRandomWeapon (prefix replace impl)",
+                    (object)gmTypeP != null ? AccessTools.Method(gmTypeP, "SpawnRandomWeapon") : null,
+                    prefix: nameof(SpawnRandomWeaponPrefix));
 
+                // P2PPackageHandler.SendP2PPacketToUser has two overloads;
+                // we want the CSteamID one. AccessTools.Method without a
+                // typeArray returns the first match which may be the wrong
+                // overload, so probe explicitly.
+                MethodInfo csteamSend = null;
                 var ppType = AccessTools.TypeByName("P2PPackageHandler");
                 if ((object)ppType != null)
                 {
-                    MethodInfo csteamSend = null;
                     foreach (var m in ppType.GetMethods(BindingFlags.Public | BindingFlags.Instance))
                     {
                         if (m.Name != "SendP2PPacketToUser") continue;
                         var ps = m.GetParameters();
-                        if (ps.Length >= 1 && ps[0].ParameterType.Name == "CSteamID")
-                        {
-                            csteamSend = m;
-                            break;
-                        }
+                        if (ps.Length >= 1 && ps[0].ParameterType.Name == "CSteamID") { csteamSend = m; break; }
                     }
-                    if ((object)csteamSend != null)
-                    {
-                        harmony.Patch(csteamSend, prefix: new HarmonyMethod(
-                            AccessTools.Method(typeof(Plugin), nameof(SendDirectPrefix))));
-                        Log.LogInfo("[P6.5] Patched P2PPackageHandler.SendP2PPacketToUser(CSteamID,...) (log-only).");
-                    }
-                    else
-                    {
-                        Log.LogWarning("[P6.5] Could not find P2PPackageHandler.SendP2PPacketToUser(CSteamID,...).");
-                    }
+                }
+                TryPatch(harmony, "P2PPackageHandler.SendP2PPacketToUser(CSteamID,…) (prefix log)",
+                    csteamSend, prefix: nameof(SendDirectPrefix));
+
+                if (_p65MissingPatches.Count == 0)
+                {
+                    Log.LogInfo($"[P6.5] All {_p65PatchesSucceeded}/{_p65PatchesAttempted} patches installed.");
                 }
                 else
                 {
-                    Log.LogWarning("[P6.5] Could not find type P2PPackageHandler.");
+                    Log.LogError($"[P6.5] {_p65PatchesSucceeded}/{_p65PatchesAttempted} patches installed; MISSING: {string.Join("; ", _p65MissingPatches.ToArray())}");
+                    Log.LogError("[P6.5] Oracle will boot, but Phase 6.5 host-side gameplay will be partial. Investigate above failures.");
                 }
-            }
-            catch (Exception e)
-            {
-                Log.LogError($"[P6.5] observe patch failed: {e}");
             }
 
             _bootStartedAt = Time.realtimeSinceStartup;
@@ -563,9 +481,15 @@ namespace SFHeadlessHost
             {
                 _p65BroadcastCount++;
                 var data = __args.Length > 0 ? __args[0] as byte[] : null;
-                byte msgType = (__args.Length > 1 && __args[1] != null) ? (byte)__args[1] : (byte)255;
+                // (byte)__args[1] on a boxed byte-backed enum may throw on
+                // strict CLRs; Convert.ToInt32 unboxes via IConvertible and
+                // works for either a raw byte or an enum.
+                byte msgType = UnboxByte(__args.Length > 1 ? __args[1] : null);
                 bool ignoreServer = __args.Length > 2 && __args[2] is bool b && b;
-                ulong ignoreUID = __args.Length > 3 && __args[3] is ulong u ? u : 0uL;
+                // SF's signature is (..., ulong ignoreUserID, ...) — raw ulong,
+                // NOT CSteamID. So a typed cast works, but use Convert for
+                // robustness against future SF refactors.
+                ulong ignoreUID = UnboxUlong(__args.Length > 3 ? __args[3] : null);
 
                 int prev;
                 _p65BroadcastByType.TryGetValue(msgType, out prev);
@@ -634,7 +558,7 @@ namespace SFHeadlessHost
                     if ((object)f != null) sid = (ulong)f.GetValue(idObj);
                 }
                 var data = __args.Length > 1 ? __args[1] as byte[] : null;
-                byte msgType = (__args.Length > 2 && __args[2] != null) ? (byte)__args[2] : (byte)255;
+                byte msgType = UnboxByte(__args.Length > 2 ? __args[2] : null);
 
                 int prev;
                 _p65DirectByType.TryGetValue(msgType, out prev);
@@ -789,6 +713,52 @@ namespace SFHeadlessHost
             {
                 Log.LogError($"[P6.5] InvokeOracleStartMatch threw: {e}");
             }
+        }
+
+        // Per-patch install with status tracking. A single try/catch around
+        // the whole block silently skipped patches if any one threw early.
+        // Failures now accumulate in _p65MissingPatches for a post-install
+        // summary line.
+        private static int _p65PatchesAttempted;
+        private static int _p65PatchesSucceeded;
+        private static readonly List<string> _p65MissingPatches = new List<string>();
+        private static void TryPatch(Harmony harmony, string label, MethodInfo target, string prefix = null, string postfix = null)
+        {
+            _p65PatchesAttempted++;
+            if ((object)target == null)
+            {
+                _p65MissingPatches.Add($"{label} — target method not found");
+                Log.LogError($"[P6.5] SKIP {label} — target method not found.");
+                return;
+            }
+            try
+            {
+                var pfx = prefix != null ? new HarmonyMethod(AccessTools.Method(typeof(Plugin), prefix)) : null;
+                var pst = postfix != null ? new HarmonyMethod(AccessTools.Method(typeof(Plugin), postfix)) : null;
+                harmony.Patch(target, prefix: pfx, postfix: pst);
+                _p65PatchesSucceeded++;
+                Log.LogInfo($"[P6.5] Patched {label}.");
+            }
+            catch (Exception e)
+            {
+                _p65MissingPatches.Add($"{label} — {e.GetType().Name}: {e.Message}");
+                Log.LogError($"[P6.5] FAIL {label}: {e}");
+            }
+        }
+
+        // Safe-unbox helpers. Mono's runtime is permissive about typed casts on
+        // boxed enums, but a direct `(byte)box` can throw InvalidCastException
+        // on a stricter CLR. Convert.* uses IConvertible which handles both
+        // raw primitives and byte-backed enums uniformly.
+        private static byte UnboxByte(object o)
+        {
+            if (o == null) return (byte)255;
+            try { return (byte)Convert.ToInt32(o); } catch { return (byte)255; }
+        }
+        private static ulong UnboxUlong(object o)
+        {
+            if (o == null) return 0uL;
+            try { return Convert.ToUInt64(o); } catch { return 0uL; }
         }
 
         // SF MsgType enum (P2PPackageHandler.MsgType byte values, from decompile).
@@ -996,6 +966,9 @@ namespace SFHeadlessHost
                     DrainBridgeCommands();
                     // Drain raw v25 protocol packets from patched DLL clients.
                     DrainSfServer();
+                    // Drop stale clients so we don't keep forwarding broadcasts
+                    // to ghosts after ungraceful disconnects.
+                    SweepStaleClients();
                     // Fire scheduled auto-match-start if armed and time reached.
                     if (_autoStartAt > 0f && Time.realtimeSinceStartup >= _autoStartAt && !_matchStarted)
                     {
@@ -1250,6 +1223,36 @@ namespace SFHeadlessHost
                 {
                     if (Verbose) Log.LogDebug($"SF server recv: {e.Message}");
                     return;
+                }
+            }
+        }
+
+        // Periodic sweep — drop _sfClients entries whose last seen exceeds
+        // ClientTimeoutSec. Without this, ungracefully disconnected clients
+        // accumulate and keep receiving broadcasts forever.
+        private const float ClientTimeoutSec = 30f;
+        private float _lastClientSweepAt;
+        private void SweepStaleClients()
+        {
+            if (Time.realtimeSinceStartup - _lastClientSweepAt < 5f) return;
+            _lastClientSweepAt = Time.realtimeSinceStartup;
+            float cutoff = Time.realtimeSinceStartup - ClientTimeoutSec;
+            List<string> toRemove = null;
+            foreach (var kv in _sfClients)
+            {
+                if (kv.Value.LastSeen < cutoff)
+                {
+                    if (toRemove == null) toRemove = new List<string>();
+                    toRemove.Add(kv.Key);
+                }
+            }
+            if (toRemove != null)
+            {
+                foreach (var k in toRemove)
+                {
+                    var cli = _sfClients[k];
+                    Log.LogInfo($"[SF] Dropping stale client {k} (slot={cli.Slot} steamID={cli.SteamID}, last seen {Time.realtimeSinceStartup - cli.LastSeen:0.0}s ago)");
+                    _sfClients.Remove(k);
                 }
             }
         }
@@ -1580,13 +1583,16 @@ namespace SFHeadlessHost
         {
             try
             {
-                _bridge = new UdpClient(BridgePort);
+                // Loopback-only: bridge commands (loadMap/teleport/addForce/...)
+                // mutate gameplay state with no auth. Co-located Go server is on
+                // the same host, so 0.0.0.0 exposure is gratuitous network risk.
+                _bridge = new UdpClient(new IPEndPoint(IPAddress.Loopback, BridgePort));
                 _bridge.Client.Blocking = false;
-                Log.LogInfo($"Bridge: listening on UDP {BridgePort}.");
+                Log.LogInfo($"Bridge: listening on UDP 127.0.0.1:{BridgePort}.");
             }
             catch (Exception e)
             {
-                Log.LogError($"Bridge: bind on {BridgePort} failed: {e.Message}");
+                Log.LogError($"Bridge: bind on 127.0.0.1:{BridgePort} failed: {e.Message}");
                 _bridge = null;
             }
         }
@@ -1637,15 +1643,20 @@ namespace SFHeadlessHost
                 int scene = ExtractIntField(body, "scene", -1);
                 if (scene >= 0)
                 {
-                    // Optional teleport-after-load coordinates. If x/y/z are
-                    // provided, after the scene loads we teleport every
-                    // spawned rig to (x, y, z) so they land in the new
-                    // scene's playable area rather than wherever they were
-                    // mid-air/below-killbox in the previous scene.
-                    float tx = ExtractFloatField(body, "x");
-                    float ty = ExtractFloatField(body, "y");
-                    float tz = ExtractFloatField(body, "z");
-                    bool hasTeleport = body.IndexOf("\"x\"") >= 0;
+                    // Optional teleport-after-load coordinates. ALL THREE of
+                    // x/y/z must be present, else we reject — silently
+                    // defaulting missing coords to 0 was sending rigs to the
+                    // origin (right above the killbox).
+                    bool hasX = HasField(body, "x"), hasY = HasField(body, "y"), hasZ = HasField(body, "z");
+                    bool hasTeleport = hasX || hasY || hasZ;
+                    if (hasTeleport && !(hasX && hasY && hasZ))
+                    {
+                        SendBridgeJson(from, "{\"reply\":\"ack\",\"cmd\":\"loadMap\",\"ok\":false,\"err\":\"partial teleport coords — need x,y,z together\"}");
+                        return;
+                    }
+                    float tx = hasTeleport ? ExtractFloatField(body, "x") : 0f;
+                    float ty = hasTeleport ? ExtractFloatField(body, "y") : 0f;
+                    float tz = hasTeleport ? ExtractFloatField(body, "z") : 0f;
                     Log.LogInfo($"Bridge: loadMap({scene}) requested; teleport=({tx},{ty},{tz}) hasTeleport={hasTeleport}");
                     if (hasTeleport)
                     {
@@ -1654,6 +1665,9 @@ namespace SFHeadlessHost
                         SceneManager.sceneLoaded -= OnSceneLoadedTeleport;
                         SceneManager.sceneLoaded += OnSceneLoadedTeleport;
                     }
+                    // Track current scene so subsequent BroadcastMapChange
+                    // reflects reality, not the hardcoded boot default.
+                    _currentSceneIndex = scene;
                     SceneManager.LoadScene(scene, LoadSceneMode.Single);
                     SendBridgeJson(from, $"{{\"reply\":\"ack\",\"cmd\":\"loadMap\",\"ok\":true,\"scene\":{scene}}}");
                 }
@@ -1666,7 +1680,15 @@ namespace SFHeadlessHost
             {
                 // Direct teleport command — no scene load. Useful when you
                 // want to re-park the rig (e.g. after it falls into a void).
+                // Require all of x/y/z to be present so a malformed payload
+                // doesn't park the rig at origin (killbox-adjacent).
                 int slot = ExtractIntField(body, "slot", -1);
+                bool hasX = HasField(body, "x"), hasY = HasField(body, "y"), hasZ = HasField(body, "z");
+                if (!(hasX && hasY && hasZ))
+                {
+                    SendBridgeJson(from, "{\"reply\":\"ack\",\"cmd\":\"teleport\",\"ok\":false,\"err\":\"missing x/y/z\"}");
+                    return;
+                }
                 float tx = ExtractFloatField(body, "x");
                 float ty = ExtractFloatField(body, "y");
                 float tz = ExtractFloatField(body, "z");
@@ -1691,7 +1713,15 @@ namespace SFHeadlessHost
                 // Optional x/y/z to spawn directly at — useful when spawning
                 // into a Landfall scene where the default (0,8,0) is below the
                 // killbox and the rig dies before any teleport can save it.
-                bool hasPos = body.IndexOf("\"x\"") >= 0;
+                // Must be all-or-nothing so a partial payload doesn't park the
+                // rig at origin.
+                bool hasX = HasField(body, "x"), hasY = HasField(body, "y"), hasZ = HasField(body, "z");
+                bool hasPos = hasX || hasY || hasZ;
+                if (hasPos && !(hasX && hasY && hasZ))
+                {
+                    SendBridgeJson(from, "{\"reply\":\"ack\",\"cmd\":\"spawnPlayer\",\"ok\":false,\"err\":\"partial spawn coords — need x,y,z together\"}");
+                    return;
+                }
                 Vector3 pos = new Vector3(0f, 8f, 0f);
                 if (hasPos) pos = new Vector3(ExtractFloatField(body, "x"), ExtractFloatField(body, "y"), ExtractFloatField(body, "z"));
                 bool ok = TrySpawnPlayer(slot, pos, out string err);
@@ -2300,10 +2330,38 @@ namespace SFHeadlessHost
         }
 
         // === tiny JSON field extractors (avoid dragging in JSON.NET) ===
+        //
+        // FindField returns the index of a `"field"` token where the preceding
+        // character is a key boundary ({, ,, or whitespace). Without this, a
+        // search for "x" matches "tx", "exit", etc. and a search for "slot"
+        // matches "slotName". Returns -1 if no boundary-respecting match.
+        private static int FindField(string json, string field)
+        {
+            string token = "\"" + field + "\"";
+            int from = 0;
+            while (from < json.Length)
+            {
+                int i = json.IndexOf(token, from);
+                if (i < 0) return -1;
+                bool boundaryOk = (i == 0);
+                if (!boundaryOk)
+                {
+                    char prev = json[i - 1];
+                    boundaryOk = prev == '{' || prev == ',' || prev == ' ' || prev == '\t' || prev == '\n' || prev == '\r';
+                }
+                if (boundaryOk) return i;
+                from = i + 1;
+            }
+            return -1;
+        }
+
+        // HasField — quick presence check used by callers that need to
+        // distinguish "field absent" from "field present with default value".
+        private static bool HasField(string json, string field) => FindField(json, field) >= 0;
+
         private static string ExtractStringField(string json, string field)
         {
-            // Looks for "field":"VALUE" — fragile but adequate for our 2-3 field commands.
-            int i = json.IndexOf("\"" + field + "\"");
+            int i = FindField(json, field);
             if (i < 0) return null;
             int colon = json.IndexOf(':', i);
             if (colon < 0) return null;
@@ -2316,7 +2374,7 @@ namespace SFHeadlessHost
 
         private static float ExtractFloatField(string json, string field)
         {
-            int i = json.IndexOf("\"" + field + "\"");
+            int i = FindField(json, field);
             if (i < 0) return 0f;
             int colon = json.IndexOf(':', i);
             if (colon < 0) return 0f;
@@ -2332,7 +2390,7 @@ namespace SFHeadlessHost
 
         private static int ExtractIntField(string json, string field, int fallback)
         {
-            int i = json.IndexOf("\"" + field + "\"");
+            int i = FindField(json, field);
             if (i < 0) return fallback;
             int colon = json.IndexOf(':', i);
             if (colon < 0) return fallback;
