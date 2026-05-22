@@ -623,6 +623,63 @@ namespace SFHeadlessHost
             }
         }
 
+        // One-shot NetworkSyncableObject inventory — fires once after match-start
+        // settles. Tells us how many syncable objects are in the loaded scene,
+        // their listening state, and whether mHasControl is true (which gates
+        // ObjectUpdate broadcasting on the host side).
+        private static bool _nsoInventoryDone;
+        private static float _nsoInventoryAt = -1f;
+        private static void RunNetworkSyncableObjectInventory()
+        {
+            try
+            {
+                var nsoType = AccessTools.TypeByName("NetworkSyncableObject");
+                if ((object)nsoType == null) { Log.LogWarning("[P6.5 NSO] type not found"); return; }
+                var nsos = UnityEngine.Object.FindObjectsOfType(nsoType);
+                if (nsos == null) { Log.LogInfo("[P6.5 NSO] FindObjectsOfType returned null"); return; }
+                int total = nsos.Length;
+                int listening = 0;
+                var mHasControlF = AccessTools.Field(nsoType, "mHasControl");
+                var mIsListeningF = AccessTools.Field(nsoType, "mIsListening");
+                var mIndexF = AccessTools.Field(nsoType, "m_Index");
+                // mHasControl is static — single value across all NSOs.
+                bool staticHasControl = false;
+                if ((object)mHasControlF != null) staticHasControl = (bool)mHasControlF.GetValue(null);
+                System.Text.StringBuilder sample = new System.Text.StringBuilder();
+                int sampled = 0;
+                foreach (var o in nsos)
+                {
+                    bool listen = (object)mIsListeningF != null && (bool)mIsListeningF.GetValue(o);
+                    if (listen) listening++;
+                    if (sampled < 10)
+                    {
+                        var comp = o as Component;
+                        string name = (object)comp != null ? comp.gameObject.name : "?";
+                        ushort idx = (object)mIndexF != null ? (ushort)mIndexF.GetValue(o) : (ushort)0;
+                        sample.Append($"\n   [{sampled}] name={name} idx={idx} listening={listen}");
+                        sampled++;
+                    }
+                }
+                Log.LogInfo($"[P6.5 NSO] Inventory: {total} NetworkSyncableObjects found in active scene. Static mHasControl={staticHasControl}, {listening}/{total} are listening (mIsListening=true).{sample}");
+                if (total > 0 && !staticHasControl)
+                {
+                    Log.LogError("[P6.5 NSO] WARNING: mHasControl=false. NSOs won't broadcast ObjectUpdate. Check that MultiplayerManager.IsServer postfix fired when NSO.Start ran.");
+                }
+                if (total > 0 && listening == 0)
+                {
+                    Log.LogError("[P6.5 NSO] WARNING: 0 NSOs are listening. InitSyncedObjects didn't run (probably IsNetworkMatch read false during PrepareMapForTravel).");
+                }
+            }
+            catch (Exception e)
+            {
+                Log.LogError($"[P6.5 NSO] inventory threw: {e}");
+            }
+            finally
+            {
+                _nsoInventoryDone = true;
+            }
+        }
+
         // Periodic state probe — log GameManager.inFight + randomWeaponCounter
         // so we can see whether the host-side game loop is actually running.
         // NB: Mono 2.0.50727 lacks FieldInfo.op_Inequality — must cast to
@@ -1037,6 +1094,15 @@ namespace SFHeadlessHost
                         _oracleCountDownAt = -1f;
                         _oracleCountDownFired = true;
                         InvokeOracleStartCountDown();
+                        // Schedule NSO inventory 4s later — gives StartMapSequence
+                        // + PrepareMapForTravel + InitSyncedObjects time to settle.
+                        _nsoInventoryAt = Time.realtimeSinceStartup + 4.0f;
+                        _nsoInventoryDone = false;
+                    }
+                    if (_nsoInventoryAt > 0f && Time.realtimeSinceStartup >= _nsoInventoryAt && !_nsoInventoryDone)
+                    {
+                        _nsoInventoryAt = -1f;
+                        RunNetworkSyncableObjectInventory();
                     }
                     // Push the latest per-slot inputs into each spawned rig's
                     // CharacterActions. Done every frame even if no new input
@@ -1084,23 +1150,45 @@ namespace SFHeadlessHost
         private long _sfPacketsTx;
 
         // V25 protocol packet types (mirror packets.go iota order).
-        private const byte PktPing                       = 0;
-        private const byte PktPingResponse               = 1;
-        private const byte PktClientJoined               = 2;
-        private const byte PktClientRequestingAccepting  = 3;
-        private const byte PktClientAccepted             = 4;
-        private const byte PktClientInit                 = 5;
-        private const byte PktClientRequestingIndex      = 6;
-        private const byte PktClientRequestingToSpawn    = 7;
-        private const byte PktClientSpawned              = 8;
-        private const byte PktClientReadyUp              = 9;
-        private const byte PktPlayerUpdate               = 10;
-        private const byte PktPlayerTookDamage           = 11;
-        private const byte PktPlayerTalked               = 12;
-        private const byte PktMapChange                  = 18;
-        private const byte PktStartMatch                 = 35;
-        private const byte PktWorkshopMapsLoaded         = 34;
-        private const byte PktOptionsChanged             = 37;
+        private const byte PktPing                          = 0;
+        private const byte PktPingResponse                  = 1;
+        private const byte PktClientJoined                  = 2;
+        private const byte PktClientRequestingAccepting     = 3;
+        private const byte PktClientAccepted                = 4;
+        private const byte PktClientInit                    = 5;
+        private const byte PktClientRequestingIndex         = 6;
+        private const byte PktClientRequestingToSpawn       = 7;
+        private const byte PktClientSpawned                 = 8;
+        private const byte PktClientReadyUp                 = 9;
+        private const byte PktPlayerUpdate                  = 10;
+        private const byte PktPlayerTookDamage              = 11;
+        private const byte PktPlayerTalked                  = 12;
+        private const byte PktPlayerForceAdded              = 13;
+        private const byte PktPlayerForceAddedAndBlock      = 14;
+        private const byte PktPlayerLavaForceAdded          = 15;
+        private const byte PktPlayerFallOut                 = 16;
+        private const byte PktPlayerWonWithRicochet         = 17;
+        private const byte PktMapChange                     = 18;
+        private const byte PktWeaponSpawned                 = 19;
+        private const byte PktWeaponThrown                  = 20;
+        private const byte PktRequestingWeaponThrow         = 21;
+        private const byte PktClientRequestWeaponDrop       = 22;
+        private const byte PktWeaponDropped                 = 23;
+        private const byte PktWeaponWasPickedUp             = 24;
+        private const byte PktClientRequestingWeaponPickUp  = 25;
+        private const byte PktObjectUpdate                  = 26;
+        private const byte PktObjectSpawned                 = 27;
+        private const byte PktObjectSimpleDestruction       = 28;
+        private const byte PktObjectInvokeDestructionEvent  = 29;
+        private const byte PktObjectDestructionCollision    = 30;
+        private const byte PktGroundWeaponsInit             = 31;
+        private const byte PktMapInfo                       = 32;
+        private const byte PktMapInfoSync                   = 33;
+        private const byte PktWorkshopMapsLoaded            = 34;
+        private const byte PktStartMatch                    = 35;
+        private const byte PktObjectHello                   = 36;
+        private const byte PktOptionsChanged                = 37;
+        private const byte PktKickPlayer                    = 38;
 
         // Per-client connection state. Keyed by remote address:port string so
         // the same SF instance keeps its slot/SteamID across packets.
@@ -1304,9 +1392,107 @@ namespace SFHeadlessHost
                 case PktClientReadyUp:
                     HandleClientReadyUp(cli, data, bodyOffset, bodyLen);
                     break;
+
+                // === Phase 6.6 — gameplay packets ===
+                // Pickup: re-broadcast as WeaponWasPickedUp with the same body
+                // (1 byte playerIndex + 2 byte weaponNetworkIndex). SF's
+                // OnPlayerRequestingWeaponPickUp would validate against
+                // mSpawnedWeapons which is empty on the oracle, so we
+                // bypass validation. (1 client, no anti-cheat threat model.)
+                case PktClientRequestingWeaponPickUp:
+                    HandlePickupRequest(cli, data, bodyOffset, bodyLen);
+                    break;
+
+                // Damage / force / falloff / ricochet are pure relays in SF's
+                // host code — they just re-broadcast to all-other clients.
+                // Forward them to all v25 clients except the sender.
+                case PktPlayerTookDamage:
+                case PktPlayerForceAdded:
+                case PktPlayerForceAddedAndBlock:
+                case PktPlayerLavaForceAdded:
+                case PktPlayerFallOut:
+                case PktPlayerWonWithRicochet:
+                case PktObjectDestructionCollision:
+                case PktObjectSimpleDestruction:
+                case PktObjectUpdate:
+                    RelayBodyToOthers(cli, msgType, data, bodyOffset, bodyLen, channel);
+                    break;
+
+                // Weapon drop: SF's OnPlayerRequestingWeaponDrop just appends
+                // the next two IDs (weaponSpawnID + syncableObjectSpawnID) and
+                // broadcasts as WeaponDropped. We replicate that logic in pure
+                // C# so the IDs come from our counter and stay in sync with
+                // weapon spawns.
+                case PktClientRequestWeaponDrop:
+                    HandleDropRequest(cli, data, bodyOffset, bodyLen);
+                    break;
+
                 default:
                     if (Verbose) Log.LogDebug($"[SF] unhandled type={msgType} from={from}");
                     break;
+            }
+        }
+
+        // Re-broadcast body to all v25 clients except the sender. Used for
+        // pure-relay gameplay msgTypes (damage, force, falloff, etc).
+        private void RelayBodyToOthers(SfClient sender, byte msgType, byte[] data, int off, int len, byte channel)
+        {
+            if (len <= 0) return;
+            byte[] body = new byte[len];
+            Buffer.BlockCopy(data, off, body, 0, len);
+            int sent = 0;
+            foreach (var kv in _sfClients)
+            {
+                var cli = kv.Value;
+                if (cli == sender) continue;
+                if (!cli.Initialized) continue;
+                SendSfPacket(cli.Addr, msgType, body, 0uL, channel);
+                sent++;
+            }
+            if (Verbose && sent > 0)
+                Log.LogDebug($"[SF] relay msgType={msgType} bodyLen={len} → {sent} other client(s)");
+        }
+
+        // Pickup: re-broadcast incoming ClientRequestingWeaponPickUp body as
+        // WeaponWasPickedUp to ALL clients (including the sender, so their
+        // local game updates the weapon-attached state). Body is identical.
+        private void HandlePickupRequest(SfClient sender, byte[] data, int off, int len)
+        {
+            if (len < 3) { Log.LogWarning($"[SF] pickup request too short ({len} bytes)"); return; }
+            byte[] body = new byte[len];
+            Buffer.BlockCopy(data, off, body, 0, len);
+            byte playerIdx = body[0];
+            ushort weaponNetId = (ushort)(body[1] | (body[2] << 8));
+            Log.LogInfo($"[SF] Pickup: player={playerIdx} weapon={weaponNetId} → broadcasting WeaponWasPickedUp");
+            foreach (var kv in _sfClients)
+            {
+                if (!kv.Value.Initialized) continue;
+                SendSfPacket(kv.Value.Addr, PktWeaponWasPickedUp, body, 0uL, 1); // channel 1 (weapon-events)
+            }
+        }
+
+        // Drop: client sends ClientRequestWeaponDrop with [playerIdx][posY i16][posZ i16][velY i8][velZ i8].
+        // SF host appends GetNextWeaponSpawnID() + GetNextSyncableObjectSpawnID()
+        // and broadcasts as WeaponDropped. We mirror that — the IDs are just
+        // counters, no state lookup required.
+        private ushort _droppedWeaponNextId = 32768;       // give drops a distinct range to avoid colliding with spawn IDs
+        private ushort _droppedSyncableNextId = 32768;
+        private void HandleDropRequest(SfClient sender, byte[] data, int off, int len)
+        {
+            if (len < 7) { Log.LogWarning($"[SF] drop request too short ({len} bytes)"); return; }
+            byte[] body = new byte[len + 4];
+            Buffer.BlockCopy(data, off, body, 0, len);
+            ushort wid = _droppedWeaponNextId++;
+            ushort sid = _droppedSyncableNextId++;
+            body[len + 0] = (byte)(wid & 0xFF);
+            body[len + 1] = (byte)((wid >> 8) & 0xFF);
+            body[len + 2] = (byte)(sid & 0xFF);
+            body[len + 3] = (byte)((sid >> 8) & 0xFF);
+            Log.LogInfo($"[SF] Drop: assigning weaponSpawnID={wid} syncableID={sid}");
+            foreach (var kv in _sfClients)
+            {
+                if (!kv.Value.Initialized) continue;
+                SendSfPacket(kv.Value.Addr, PktWeaponDropped, body, 0uL, 1);
             }
         }
 
