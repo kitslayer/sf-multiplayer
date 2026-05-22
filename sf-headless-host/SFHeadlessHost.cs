@@ -1410,7 +1410,7 @@ namespace SFHeadlessHost
                         Log.LogInfo($"heartbeat: scene={SceneManager.GetActiveScene().name} tick={_heartbeatTicks}");
                     }
                     // Phase 6.5 — periodic state probe (only after match has started).
-                    if (_matchStarted) { StateProbe(); TickNsoProbe(); }
+                    if (_matchStarted) { StateProbe(); TickNsoProbe(); TickStaleNsoFreezer(); }
                     return;
             }
         }
@@ -1955,8 +1955,32 @@ namespace SFHeadlessHost
             if (len >= 8) cli.SteamID = ReadU64LE(data, off);
             byte playerCount = (len >= 9) ? data[off + 8] : (byte)1;
 
-            // Assign first free slot.
-            int slot = AllocSlot(cli);
+            // Evict any prior _sfClients entry with the same SteamID — this
+            // is a reconnect, and we want to reuse the original slot so the
+            // client's view of "I am slot N" matches the oracle's view.
+            // Without this, slot AllocSlot picks the next free slot (1, 2, …)
+            // and the client's channel-routed packets (e.g. throw on
+            // slot*2+3) go to wrong channels.
+            if (cli.SteamID != 0)
+            {
+                List<string> evict = null;
+                foreach (var kv in _sfClients)
+                {
+                    var other = kv.Value;
+                    if (other == cli) continue;
+                    if (other.SteamID == cli.SteamID)
+                    {
+                        if (evict == null) evict = new List<string>();
+                        evict.Add(kv.Key);
+                        Log.LogInfo($"[SF] Evicting stale reconnect: SteamID={other.SteamID} was on {kv.Key} slot={other.Slot}; new conn from {cli.Addr} reusing slot {other.Slot}.");
+                        cli.Slot = other.Slot;
+                    }
+                }
+                if (evict != null) foreach (var k in evict) _sfClients.Remove(k);
+            }
+
+            // Assign a slot only if eviction didn't reuse one.
+            int slot = cli.Slot >= 0 ? cli.Slot : AllocSlot(cli);
             cli.Slot = slot;
             Log.LogInfo($"[SF] ClientRequestingIndex from {cli.Addr} steamID={cli.SteamID} players={playerCount}; assigning slot {slot}; building ClientInit.");
 
@@ -2205,7 +2229,57 @@ namespace SFHeadlessHost
                     if ((object)beh != null) { beh.enabled = false; nsoDisabled++; }
                 }
             }
+            // (Reverted HasControl=false — it broke box pushing and didn't fix
+            // chain breaks. Chains break because OTHER physics objects hit
+            // them — primarily runaway-falling crates. Freezing those crates
+            // is the right fix; see TickStaleNsoFreezer.)
             Log.LogInfo($"[P6.7] Slot {slot}: set {kinSet} rigidbodies to kinematic, disabled {nsoDisabled} NSO components for mirror behavior.");
+        }
+
+        // Freeze NSO rigidbodies that fell out of the playable area.
+        // Stock SF's host kills crates that cross the killbox (Y<-50);
+        // we don't have that cleanup, so falling crates accelerate
+        // forever, eventually slamming into destructibles (chains, ice)
+        // and breaking them with no player input.
+        // Fix: periodically scan all NSOs in scene; any with Y < -25
+        // gets isKinematic=true. Stops the fall + the broadcast spam.
+        private float _nsoFreezerNextAt = -1f;
+        private void TickStaleNsoFreezer()
+        {
+            if (_nsoFreezerNextAt < 0f) _nsoFreezerNextAt = Time.realtimeSinceStartup + 5f;
+            if (Time.realtimeSinceStartup < _nsoFreezerNextAt) return;
+            _nsoFreezerNextAt = Time.realtimeSinceStartup + 3f;
+            try
+            {
+                var nsoType = AccessTools.TypeByName("NetworkSyncableObject");
+                if ((object)nsoType == null) return;
+                var nsos = UnityEngine.Object.FindObjectsOfType(nsoType);
+                if (nsos == null) return;
+                int frozen = 0;
+                foreach (var o in nsos)
+                {
+                    var comp = o as Component;
+                    if ((object)comp == null) continue;
+                    Vector3 pos = comp.transform.position;
+                    if (pos.y > -25f) continue;
+                    // Below playable area — freeze all its rigidbodies.
+                    var rbs = comp.GetComponentsInChildren<Rigidbody>();
+                    foreach (var rb in rbs)
+                    {
+                        if ((object)rb == null) continue;
+                        if (!rb.isKinematic)
+                        {
+                            rb.velocity = Vector3.zero;
+                            rb.angularVelocity = Vector3.zero;
+                            rb.isKinematic = true;
+                            frozen++;
+                        }
+                    }
+                }
+                if (frozen > 0)
+                    Log.LogInfo($"[P6.7] Froze {frozen} runaway-fall rigidbodies (Y < -25).");
+            }
+            catch (Exception e) { Log.LogWarning($"[P6.7 freezer] {e.Message}"); }
         }
 
         // Move all body parts of the mirror rig toward the target position.
