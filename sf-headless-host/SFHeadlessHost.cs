@@ -48,6 +48,11 @@ namespace SFHeadlessHost
         {
             Log = Logger;
             Instance = this;
+            // Phase 6.9 — subscribe to sceneLoaded so we can run the settle
+            // phase that stock SF's PrepareMapForTravel coroutine handles
+            // (but which never reaches the network branch on our oracle).
+            SceneManager.sceneLoaded -= OnAnySceneLoadedRunSettle;
+            SceneManager.sceneLoaded += OnAnySceneLoadedRunSettle;
 
             // Unity 5.6 doesn't have Application.isBatchMode — fall back to
             // checking the command-line for -batchmode.
@@ -203,6 +208,20 @@ namespace SFHeadlessHost
                 }
                 TryPatch(harmony, "P2PPackageHandler.SendP2PPacketToUser(CSteamID,…) (prefix log)",
                     csteamSend, prefix: nameof(SendDirectPrefix));
+
+                // Phase 6.9 diagnostics — log when SF's host-side
+                // PrepareMapForTravel coroutine reaches each critical step.
+                // Tells us whether destructibles are getting the right init
+                // (kinematic-settle, joint detach/reattach, InitSyncedObjects).
+                TryPatch(harmony, "MultiplayerManager.InitSyncedObjects (postfix log)",
+                    (object)mmType != null ? AccessTools.Method(mmType, "InitSyncedObjects") : null,
+                    postfix: nameof(InitSyncedObjectsPostfix));
+                TryPatch(harmony, "MultiplayerManager.InitMapDataObjects (postfix log)",
+                    (object)mmType != null ? AccessTools.Method(mmType, "InitMapDataObjects") : null,
+                    postfix: nameof(InitMapDataObjectsPostfix));
+                TryPatch(harmony, "MultiplayerManager.ReadyUp (postfix log)",
+                    (object)mmType != null ? AccessTools.Method(mmType, "ReadyUp") : null,
+                    postfix: nameof(ReadyUpPostfix));
 
                 if (_p65MissingPatches.Count == 0)
                 {
@@ -373,6 +392,26 @@ namespace SFHeadlessHost
         internal static void IsNetworkMatchPostfix(ref bool __result)
         {
             __result = true;
+        }
+
+        // Phase 6.9 diagnostics — track PrepareMapForTravel progress on oracle.
+        private static int _initSyncedCallCount;
+        internal static void InitSyncedObjectsPostfix()
+        {
+            _initSyncedCallCount++;
+            Log.LogInfo($"[P6.9 init] InitSyncedObjects called (#{_initSyncedCallCount}). PrepareMapForTravel reached settle-end on the oracle.");
+        }
+        private static int _initMapDataCallCount;
+        internal static void InitMapDataObjectsPostfix()
+        {
+            _initMapDataCallCount++;
+            Log.LogInfo($"[P6.9 init] InitMapDataObjects called (#{_initMapDataCallCount}).");
+        }
+        private static int _readyUpCallCount;
+        internal static void ReadyUpPostfix()
+        {
+            _readyUpCallCount++;
+            Log.LogInfo($"[P6.9 init] MultiplayerManager.ReadyUp called (#{_readyUpCallCount}).");
         }
 
         // Phase 6.5 Step 2d — force every SetNetworkMatch(v) call to use v=true.
@@ -665,10 +704,161 @@ namespace SFHeadlessHost
                     rwcField.SetValue(gmInst, 2.0f);
                     Log.LogInfo("[P6.5] randomWeaponCounter = 2.0 (first weapon spawn ~2s from now).");
                 }
+
+                // Phase 6.9: manually invoke the network branch of
+                // PrepareMapForTravel that SF's host normally runs (and which
+                // never reaches us on the oracle — confirmed empirically by
+                // zero hits on InitSyncedObjectsPostfix). This is the critical
+                // sequence for destructibles + chains + ice.
+                InvokeMultiplayerManagerInitChain();
             }
             catch (Exception e)
             {
                 Log.LogError($"[P6.5] InvokeOracleStartCountDown threw: {e}");
+            }
+        }
+
+        // Phase 6.9 — settle phase that stock SF's PrepareMapForTravel runs at
+        // match-load. Without this, every dynamic rigidbody in the map starts
+        // life with whatever-the-prefab-set-it-to physics state, gravity
+        // kicks in immediately, stacks tip, crates fall through the killbox,
+        // and the client sees their local copies vanish off-screen.
+        //
+        // We hook SceneManager.sceneLoaded — whenever a Landfall map scene
+        // loads (anything except MainScene), we kick a coroutine on the
+        // Plugin GameObject that:
+        //   1. Sets ALL rigidbodies in the map root kinematic
+        //   2. Yields 1.5s real-time (lets joints register at rest)
+        //   3. Re-enables kinematic=false ONLY on rigidbodies that are not
+        //      DestructiblePieces (or are simple/event destruction types) and
+        //      don't have DontEnableRig.
+        //
+        // DestructiblePieces (chains, ice) STAY kinematic — they only become
+        // dynamic when struck with enough force (the destruction path).
+        private void OnAnySceneLoadedRunSettle(Scene scene, LoadSceneMode mode)
+        {
+            // Only run for actual gameplay scenes. MainScene is the lobby and
+            // doesn't have crates that need settling.
+            if (scene.name == "MainScene" || string.IsNullOrEmpty(scene.name)) return;
+            Log.LogInfo($"[P6.9 settle] Scene loaded: '{scene.name}' (buildIndex={scene.buildIndex}); starting settle coroutine.");
+            StartCoroutine(SettlePhaseCoroutine(scene));
+        }
+
+        private System.Collections.IEnumerator SettlePhaseCoroutine(Scene scene)
+        {
+            // Wait one frame so Unity's Instantiate / Awake fires complete
+            // before we touch rigidbodies.
+            yield return null;
+            // Find all rigidbodies in the loaded scene. Iterate root GOs and
+            // collect children — works even if currentMapInfo isn't set yet.
+            var rootGOs = scene.GetRootGameObjects();
+            var allRBs = new List<Rigidbody>();
+            foreach (var go in rootGOs)
+            {
+                if ((object)go == null) continue;
+                allRBs.AddRange(go.GetComponentsInChildren<Rigidbody>(true));
+            }
+            int n = allRBs.Count;
+            Log.LogInfo($"[P6.9 settle] Scene '{scene.name}': freezing {n} rigidbodies for settle phase.");
+            // Record original-kinematic so we can restore for the ones that
+            // should stay dynamic after settle.
+            bool[] wasKinematic = new bool[n];
+            for (int i = 0; i < n; i++)
+            {
+                var rb = allRBs[i];
+                if ((object)rb == null) continue;
+                wasKinematic[i] = rb.isKinematic;
+                rb.isKinematic = true;
+                rb.velocity = Vector3.zero;
+                rb.angularVelocity = Vector3.zero;
+            }
+            // Wait for things to settle visually + give joints time to register.
+            yield return new WaitForSecondsRealtime(1.5f);
+            // Re-enable kinematic=false ONLY on:
+            //   - Rigidbodies that aren't DestructiblePieces, OR
+            //   - DestructiblePieces with simpleDestruction or eventDestruction
+            //     (these need physics so they can be hit), but NOT joint-piece
+            //     destructibles like chains (which stay kinematic until struck).
+            //   - AND not have DontEnableRig (a SF marker for "leave kinematic").
+            var dpType = AccessTools.TypeByName("DestructiblePiece");
+            var dontEnableType = AccessTools.TypeByName("DontEnableRig");
+            FieldInfo simpleField = (object)dpType != null ? AccessTools.Field(dpType, "simpleDestruction") : null;
+            FieldInfo eventField = (object)dpType != null ? AccessTools.Field(dpType, "eventDestruction") : null;
+            int reEnabled = 0;
+            for (int i = 0; i < n; i++)
+            {
+                var rb = allRBs[i];
+                if ((object)rb == null) continue;
+                // If the original was already kinematic, leave it kinematic.
+                if (wasKinematic[i]) continue;
+                bool stayKinematic = false;
+                if ((object)dpType != null)
+                {
+                    var dp = rb.GetComponent(dpType);
+                    if ((object)dp != null)
+                    {
+                        bool simple = (object)simpleField != null && (bool)simpleField.GetValue(dp);
+                        bool ev = (object)eventField != null && (bool)eventField.GetValue(dp);
+                        if (!simple && !ev) stayKinematic = true; // chain-style destructible, keep frozen
+                    }
+                }
+                if ((object)dontEnableType != null && rb.GetComponent(dontEnableType) != null) stayKinematic = true;
+                if (!stayKinematic)
+                {
+                    rb.isKinematic = false;
+                    reEnabled++;
+                }
+            }
+            Log.LogInfo($"[P6.9 settle] Settle complete for '{scene.name}': {reEnabled}/{n} rigidbodies re-enabled dynamic; the rest stay kinematic until struck.");
+        }
+
+        // Phase 6.9 — manual invoke of MultiplayerManager.InitMapDataObjects +
+        // ReadyUp + InitSyncedObjects. Mirrors GameManager.PrepareMapForTravel
+        // lines 1023-1029. The full PrepareMapForTravel coroutine ALSO does
+        // a kinematic-settle phase before this (set all rigidbodies kinematic,
+        // detach joints, wait 1s, reattach) which is what stops crates from
+        // tipping off their stack at scene-load. That bigger fix is the
+        // "true" Phase 6.9 work — these three calls are the minimum to make
+        // NSOs networked properly.
+        private static void InvokeMultiplayerManagerInitChain()
+        {
+            try
+            {
+                var mmType = AccessTools.TypeByName("MultiplayerManager");
+                if ((object)mmType == null) { Log.LogWarning("[P6.9] MultiplayerManager type not found"); return; }
+                var mmInst = UnityEngine.Object.FindObjectOfType(mmType);
+                if ((object)mmInst == null) { Log.LogWarning("[P6.9] MultiplayerManager instance not found"); return; }
+
+                var initMapData = AccessTools.Method(mmType, "InitMapDataObjects");
+                if ((object)initMapData != null)
+                {
+                    try { initMapData.Invoke(mmInst, null); Log.LogInfo("[P6.9] InitMapDataObjects invoked manually."); }
+                    catch (Exception e) { Log.LogError($"[P6.9] InitMapDataObjects threw: {e.InnerException?.Message ?? e.Message}"); }
+                }
+
+                var readyUp = AccessTools.Method(mmType, "ReadyUp");
+                if ((object)readyUp != null)
+                {
+                    try { readyUp.Invoke(mmInst, null); Log.LogInfo("[P6.9] ReadyUp invoked manually."); }
+                    catch (Exception e) { Log.LogError($"[P6.9] ReadyUp threw: {e.InnerException?.Message ?? e.Message}"); }
+                }
+
+                // InitSyncedObjects is the critical one — runs NSO.Init on every
+                // syncable object in scene, which calls AddSyncableObject + sets
+                // mIsListening=true + InitRigidBodies. Without it, NSOs are in
+                // a half-initialized state where physics works but networking
+                // doesn't (boxes broadcast position but their NetworkSpawnID
+                // never gets registered properly).
+                var initSynced = AccessTools.Method(mmType, "InitSyncedObjects");
+                if ((object)initSynced != null)
+                {
+                    try { initSynced.Invoke(mmInst, null); Log.LogInfo("[P6.9] InitSyncedObjects invoked manually — NSOs should now be fully networked."); }
+                    catch (Exception e) { Log.LogError($"[P6.9] InitSyncedObjects threw: {e.InnerException?.Message ?? e.Message}"); }
+                }
+            }
+            catch (Exception e)
+            {
+                Log.LogError($"[P6.9] InvokeMultiplayerManagerInitChain threw: {e}");
             }
         }
 
