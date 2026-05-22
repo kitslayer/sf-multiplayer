@@ -1,5 +1,9 @@
 using System;
+using System.Collections.Generic;
+using System.Net;
+using System.Net.Sockets;
 using System.Reflection;
+using System.Text;
 using BepInEx;
 using BepInEx.Logging;
 using HarmonyLib;
@@ -34,7 +38,8 @@ namespace SFHeadlessHost
         public const string PluginVersion = "0.1.0";
 
         internal static ManualLogSource Log;
-        internal static int BindPort = 1340;
+        internal static int BindPort = 1340;     // Game-traffic port (Lidgren)
+        internal static int BridgePort = 1341;   // State-bridge port (this plugin)
         internal static int InitialScene = 6;
         internal static bool Verbose;
 
@@ -178,11 +183,21 @@ namespace SFHeadlessHost
 
                 case BootState.HostStarting:
                     StartHost();
+                    StartBridge();
                     _bootState = BootState.Running;
                     _lastHeartbeat = Time.realtimeSinceStartup;
+                    _lastStateEmit = Time.realtimeSinceStartup;
                     return;
 
                 case BootState.Running:
+                    // Drain any incoming bridge commands.
+                    DrainBridgeCommands();
+                    // Emit a state snapshot at 30 Hz if anyone has pinged us.
+                    if (_bridgePeer != null && Time.realtimeSinceStartup - _lastStateEmit >= (1.0f / 30.0f))
+                    {
+                        _lastStateEmit = Time.realtimeSinceStartup;
+                        EmitStateSnapshot();
+                    }
                     var interval = Verbose ? 5.0f : 30.0f;
                     if (Time.realtimeSinceStartup - _lastHeartbeat >= interval)
                     {
@@ -192,6 +207,203 @@ namespace SFHeadlessHost
                     }
                     return;
             }
+        }
+
+        // ========== Bridge: UDP socket the Go server talks to ==========
+        // Wire format v0 (JSON, easy to debug; will go binary in v1 if needed):
+        //   Go → Oracle commands:
+        //     {"cmd":"ping"}
+        //     {"cmd":"loadMap","scene":N}
+        //     {"cmd":"snapshot"}  -- request a one-shot snapshot
+        //     {"cmd":"sub"}       -- subscribe to 30Hz snapshot stream (default after first contact)
+        //   Oracle → Go responses (always JSON, one packet each):
+        //     {"reply":"pong","tick":N,"scene":"X"}
+        //     {"reply":"snapshot","tick":N,"scene":"X","ents":[{"slot":i,"x":...,"y":...,"z":...,"vx":...,"vy":...,"vz":...}]}
+        //     {"reply":"ack","cmd":"loadMap","ok":true}
+
+        private UdpClient _bridge;
+        private IPEndPoint _bridgePeer; // last sender; we reply to whoever pinged us last
+        private float _lastStateEmit;
+        private long _bridgeTick;
+
+        private void StartBridge()
+        {
+            try
+            {
+                _bridge = new UdpClient(BridgePort);
+                _bridge.Client.Blocking = false;
+                Log.LogInfo($"Bridge: listening on UDP {BridgePort}.");
+            }
+            catch (Exception e)
+            {
+                Log.LogError($"Bridge: bind on {BridgePort} failed: {e.Message}");
+                _bridge = null;
+            }
+        }
+
+        private void DrainBridgeCommands()
+        {
+            if ((object)_bridge == null) return;
+            int processed = 0;
+            while (processed++ < 16) // cap per frame
+            {
+                byte[] data;
+                IPEndPoint remote = new IPEndPoint(IPAddress.Any, 0);
+                try
+                {
+                    if (_bridge.Available <= 0) return;
+                    data = _bridge.Receive(ref remote);
+                }
+                catch (SocketException)
+                {
+                    return; // would-block / nothing to read
+                }
+                catch (Exception e)
+                {
+                    if (Verbose) Log.LogDebug($"Bridge recv: {e.Message}");
+                    return;
+                }
+                _bridgePeer = remote;
+                HandleBridgeCommand(data, remote);
+            }
+        }
+
+        private void HandleBridgeCommand(byte[] data, IPEndPoint from)
+        {
+            string body = Encoding.UTF8.GetString(data);
+            if (Verbose) Log.LogDebug($"Bridge ← {from}: {body}");
+            // Tiny ad-hoc JSON parser — body shapes are trivial so we don't need a full lib.
+            string cmd = ExtractStringField(body, "cmd");
+            if (cmd == "ping")
+            {
+                SendBridgeJson(from, $"{{\"reply\":\"pong\",\"tick\":{_bridgeTick},\"scene\":\"{SceneManager.GetActiveScene().name}\"}}");
+            }
+            else if (cmd == "snapshot")
+            {
+                EmitStateSnapshotTo(from);
+            }
+            else if (cmd == "loadMap")
+            {
+                int scene = ExtractIntField(body, "scene", -1);
+                if (scene >= 0)
+                {
+                    Log.LogInfo($"Bridge: loadMap({scene}) requested by {from}.");
+                    SceneManager.LoadScene(scene, LoadSceneMode.Single);
+                    SendBridgeJson(from, $"{{\"reply\":\"ack\",\"cmd\":\"loadMap\",\"ok\":true,\"scene\":{scene}}}");
+                }
+                else
+                {
+                    SendBridgeJson(from, "{\"reply\":\"ack\",\"cmd\":\"loadMap\",\"ok\":false,\"err\":\"missing or invalid scene\"}");
+                }
+            }
+            else if (cmd == "sub")
+            {
+                // Just record peer for stream; no-op response.
+                SendBridgeJson(from, "{\"reply\":\"ack\",\"cmd\":\"sub\",\"ok\":true}");
+            }
+            else
+            {
+                SendBridgeJson(from, $"{{\"reply\":\"ack\",\"cmd\":\"{cmd}\",\"ok\":false,\"err\":\"unknown cmd\"}}");
+            }
+        }
+
+        private void SendBridgeJson(IPEndPoint to, string json)
+        {
+            if ((object)_bridge == null) return;
+            try
+            {
+                byte[] data = Encoding.UTF8.GetBytes(json);
+                _bridge.Send(data, data.Length, to);
+            }
+            catch (Exception e)
+            {
+                if (Verbose) Log.LogDebug($"Bridge send: {e.Message}");
+            }
+        }
+
+        // EmitStateSnapshot pushes the current world entity state to the most
+        // recently active peer (for the 30Hz stream). When the bridge has never
+        // been pinged we don't emit, avoiding wasted work.
+        private void EmitStateSnapshot()
+        {
+            if ((object)_bridgePeer == null) return;
+            EmitStateSnapshotTo(_bridgePeer);
+        }
+
+        private static readonly StringBuilder _sb = new StringBuilder(2048);
+
+        private void EmitStateSnapshotTo(IPEndPoint to)
+        {
+            _bridgeTick++;
+            try
+            {
+                _sb.Length = 0;
+                _sb.Append("{\"reply\":\"snapshot\",\"tick\":").Append(_bridgeTick);
+                _sb.Append(",\"scene\":\"").Append(SceneManager.GetActiveScene().name).Append("\"");
+                _sb.Append(",\"ents\":[");
+
+                // For v0 we extract Controller-managed player rigs only.
+                // Controller is the Stick Fight player controller MonoBehaviour
+                // (per decompile); its transform.position is the player's
+                // current world position.
+                var ctrlType = AccessTools.TypeByName("Controller");
+                if ((object)ctrlType != null)
+                {
+                    var insts = UnityEngine.Object.FindObjectsOfType(ctrlType);
+                    bool first = true;
+                    for (int i = 0; i < insts.Length; i++)
+                    {
+                        var comp = insts[i] as Component;
+                        if ((object)comp == null) continue;
+                        var t = comp.transform;
+                        var p = t.position;
+                        if (!first) _sb.Append(",");
+                        first = false;
+                        _sb.Append("{\"slot\":").Append(i);
+                        _sb.Append(",\"x\":").Append(p.x.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture));
+                        _sb.Append(",\"y\":").Append(p.y.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture));
+                        _sb.Append(",\"z\":").Append(p.z.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture));
+                        _sb.Append("}");
+                    }
+                }
+                _sb.Append("]}");
+                SendBridgeJson(to, _sb.ToString());
+            }
+            catch (Exception e)
+            {
+                if (Verbose) Log.LogDebug($"EmitStateSnapshot: {e.Message}");
+            }
+        }
+
+        // === tiny JSON field extractors (avoid dragging in JSON.NET) ===
+        private static string ExtractStringField(string json, string field)
+        {
+            // Looks for "field":"VALUE" — fragile but adequate for our 2-3 field commands.
+            int i = json.IndexOf("\"" + field + "\"");
+            if (i < 0) return null;
+            int colon = json.IndexOf(':', i);
+            if (colon < 0) return null;
+            int q1 = json.IndexOf('"', colon + 1);
+            if (q1 < 0) return null;
+            int q2 = json.IndexOf('"', q1 + 1);
+            if (q2 < 0) return null;
+            return json.Substring(q1 + 1, q2 - q1 - 1);
+        }
+
+        private static int ExtractIntField(string json, string field, int fallback)
+        {
+            int i = json.IndexOf("\"" + field + "\"");
+            if (i < 0) return fallback;
+            int colon = json.IndexOf(':', i);
+            if (colon < 0) return fallback;
+            int start = colon + 1;
+            while (start < json.Length && (json[start] == ' ' || json[start] == '\t')) start++;
+            int end = start;
+            while (end < json.Length && (char.IsDigit(json[end]) || json[end] == '-')) end++;
+            if (end == start) return fallback;
+            int n;
+            if (int.TryParse(json.Substring(start, end - start), out n)) return n;
+            return fallback;
         }
 
         private void StartHost()
@@ -264,11 +476,14 @@ namespace SFHeadlessHost
             int.TryParse(Environment.GetEnvironmentVariable("SFHEADLESS_PORT"), out var p);
             if (p > 0 && p < 65536) BindPort = p;
 
+            int.TryParse(Environment.GetEnvironmentVariable("SFHEADLESS_BRIDGEPORT"), out var bp);
+            if (bp > 0 && bp < 65536) BridgePort = bp;
+
             int.TryParse(Environment.GetEnvironmentVariable("SFHEADLESS_SCENE"), out var s);
             if (s >= 0) InitialScene = s;
 
             Verbose = Environment.GetEnvironmentVariable("SFHEADLESS_DEBUG") == "1";
-            Log.LogInfo($"Config: BindPort={BindPort} InitialScene={InitialScene} Verbose={Verbose}");
+            Log.LogInfo($"Config: BindPort={BindPort} BridgePort={BridgePort} InitialScene={InitialScene} Verbose={Verbose}");
         }
 
         // Harmony postfix on NetworkSocketServer ctor. The stock ctor sets
