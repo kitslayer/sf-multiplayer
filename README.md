@@ -2,16 +2,21 @@
 
 Centralized dedicated-server revival for **Stick Fight: The Game** (Steam app 674940), built for the competitive scene to replace stock P2P with an authoritative server. Fixes rubber-banding, host-migration drops, and the long-standing physics divergence between clients.
 
-> **Status: alpha.** Server-side gameplay works end-to-end (v25 relay + v26 authoritative paths). Comp-ready features (server-side physics oracle, full anti-cheat, multi-region) are in progress. Not yet stamped "v2 release" — see [`notes/`](notes/) for current state.
+> **Status: alpha, mid-pivot (2026-05-22).** The architecture pivoted from "Go server + headless Unity oracle" to "headless Unity IS the server, no Go bridge" (Path A). Real Steam SF connects directly to `SFHeadlessHost.dll` running inside headless Unity on UDP 1337. Host-side gameplay (weapon spawns, killboxes) runs through SF's own code driven by 7 Harmony patches — see [`notes/phase6/10-PHASE6.5-host-side-gameplay.md`](notes/phase6/10-PHASE6.5-host-side-gameplay.md) for the live state.
+>
+> The Go dedicated server (`StickFightDedicatedSrv/`) is no longer in the active data path. The repo still carries it (with v25 relay + v26 authoritative scaffolding) as archival reference; it will be quarantined or deleted in an upcoming cleanup pass.
 
 ## What's in this repo
 
 | Path | What it is |
 |---|---|
-| [`StickFightDedicatedSrv/`](StickFightDedicatedSrv/) | Go dedicated server. Originally forked from [StickFightDev/StickFightDedicatedSrv](https://github.com/StickFightDev/StickFightDedicatedSrv) (dormant since 2022); substantially extended with Phase 5 server-authoritative netcode (M2-M4 done, M5 in progress). |
-| [`sf-netcodev2/`](sf-netcodev2/) | BepInEx + Harmony plugin. Bumps client protocol to v26, hooks `Controller.Update` to emit `playerInput`, parses `worldStateSnapshot` + `serverEvent` packets, runs client prediction. |
-| [`sf-leveldumper/`](sf-leveldumper/) | BepInEx plugin that walks Landfall scenes and dumps geometry + spawn points + killboxes to JSON. Runtime-mode listener supports workshop maps too. |
-| [`sf-localcontrol-fix/`](sf-localcontrol-fix/) | Small earlier-session plugin for local-control behavior fixes. |
+| [`sf-headless-host/`](sf-headless-host/) | **Live entry point.** BepInEx + Harmony plugin that turns headless Stick Fight into a v25-speaking server. Implements the raw-UDP protocol, drives SF's own host-side gameplay via 7 Harmony patches, forwards intercepted broadcasts to clients. |
+| [`launch-sf-headless.sh`](launch-sf-headless.sh) | Launches Stick Fight under Proton in `-batchmode -nographics` with the headless-host plugin loaded. Per-instance wineprefix at `/tmp/sf-oracle-prefix-<bridgeport>`. |
+| [`launch-sf-player.sh`](launch-sf-player.sh) | Launches Stick Fight in graphical mode (player-side) against `127.0.0.1:1337`. For local end-to-end testing. |
+| [`StickFightDedicatedSrv/`](StickFightDedicatedSrv/) | **Deprecated (no longer in data path).** Go dedicated server, originally forked from [StickFightDev/StickFightDedicatedSrv](https://github.com/StickFightDev/StickFightDedicatedSrv). Phase 5 work (M1–M4) lives here; physics + v26 paths are now dead code. Will be deleted or quarantined in an upcoming cleanup pass. |
+| [`sf-netcodev2/`](sf-netcodev2/) | **Parked.** BepInEx + Harmony plugin for the v26 client protocol (Go-server-coordinated path). Disabled in deployed plugins directory; obsolete under Path A. |
+| [`sf-localcontrol-fix/`](sf-localcontrol-fix/) | **Parked.** Local-control behavior fix from an earlier session. Disabled. |
+| [`sf-leveldumper/`](sf-leveldumper/) | One-shot BepInEx plugin that walks Landfall scenes and dumps geometry + spawn points + killboxes to JSON. Not loaded at runtime. |
 | [`tools/`](tools/) | Python scripts. `dump-sf-maps.py` is an offline UnityPy-based map extractor that runs without launching SF. |
 | [`maps/`](maps/) | Dumped map data — 123 Landfall scenes as JSON, used by the server for authoritative weapon/player spawn positions. |
 | [`notes/`](notes/) | Living design + research docs. `notes/SUMMARY.md` is the latest top-level entry point. `notes/recon/` has bug investigations, `notes/design/` has fix proposals. |
@@ -21,35 +26,44 @@ Centralized dedicated-server revival for **Stick Fight: The Game** (Steam app 67
 
 ```
 SF clients (Windows or Linux/Proton)
-   │  UDP — Lidgren-style packets (v25 legacy + v26 authoritative)
+   │  UDP v25 — [u32 ts][u8 msgType][N body][u64 steamID][u8 channel]
    ▼
-Go dedicated server (StickFightDedicatedSrv/)
-   • Lobby + matchmaking
-   • Wire-protocol relay
-   • Server-side physics simulation (AABB, killbox, projectile)
-   • Snapshot broadcast @ 30 Hz to v26 clients
-   • Damage validation, anticheat, replay logging
+Headless Stick Fight (Proton + Goldberg, BepInEx + SFHeadlessHost.dll)
+   • Raw-UDP v25 server on :1337 (no Lidgren handshake)
+   • Drives SF's own MultiplayerManager / GameManager via 7 Harmony patches
+     — IsServer=true, IsNetworkMatch pinned true, SpawnRandomWeapon replaced
+   • Forwards intercepted SendMessageToAllClients broadcasts to v25 clients
+   • Diagnostic bridge command channel on 127.0.0.1:1341 (loopback)
 ```
 
-**Current state (Path A: relay + lightweight server physics):** server authoritative for player position, projectile trajectory, damage events, weapon spawn timing/positions. Ragdoll/joint wobble stays client-side (cosmetic).
+**Live state (Path A, since 2026-05-22):** real Stick Fight runs in `-batchmode -nographics`. It hosts the match using its own gameplay code — physics, killboxes, weapon spawn timers — and `SFHeadlessHost.dll` makes that code think it's a multiplayer host. Clients connect on raw UDP. See [`notes/phase6/10-PHASE6.5-host-side-gameplay.md`](notes/phase6/10-PHASE6.5-host-side-gameplay.md).
 
-**Planned Phase 6 (Path D: headless-Unity oracle):** for the comp scene's need for perfect physics, replace the Go AABB sim with a per-lobby headless Unity instance running real SF Movement.cs / ConfigurableJoint / killbox logic. See [`notes/design/`](notes/design/) for the in-progress plan.
+**Earlier path (Path D, deprecated):** Go server `StickFightDedicatedSrv/` ran lobby matchmaking + AABB physics + a headless Unity instance as a "physics oracle" over a JSON IPC bridge. Still in tree as archival reference; not in the active data path.
 
 ## Quickstart
 
-### Build the server
+### Launch the server (headless Stick Fight)
 
 ```bash
-cd StickFightDedicatedSrv
-go build -o /tmp/sfdsrv .
-/tmp/sfdsrv -address 0.0.0.0:1337 -mapsDir ../maps -publicLobbies
+SFHEADLESS_BRIDGEPORT=1341 SFHEADLESS_PORT=1337 SFHEADLESS_DEBUG=1 \
+  bash launch-sf-headless.sh
 ```
 
-The server listens on UDP `:1337` plus an HTTP-on-the-same-port shim for `/status`, `/lobbies`, `/maps`, `/invite`.
+This launches Stick Fight under Proton in `-batchmode -nographics`, loads `SFHeadlessHost.dll` via BepInEx, and binds the v25 raw-UDP server on `0.0.0.0:1337`. Logs go to `$SF_MIRROR/BepInEx/LogOutput.log` and `/tmp/sf-oracle-unity-1341.log`.
 
-### Build the client plugins
+### Connect a real client
 
-Each plugin is a .NET 4.6 BepInEx 5 assembly. **You need to provide the reference DLLs locally** — they're not in this repo for copyright reasons. For each plugin's `refs/` directory you need:
+For a Steam install of Stick Fight, set these launch options:
+
+```
+WINEDLLOVERRIDES="winhttp=n,b" %command% -address 127.0.0.1 -port 1337
+```
+
+The `-address` / `-port` flags are read by the patched `Assembly-CSharp.dll` (see [`refs/`](refs/) for the decompile). For a Goldberg-shimmed local mirror, use [`launch-sf-player.sh`](launch-sf-player.sh).
+
+### Build SFHeadlessHost
+
+It's a .NET 4.6 BepInEx 5 assembly. **You need to provide the reference DLLs locally** — they're not in this repo for copyright reasons. In `sf-headless-host/refs/`:
 
 - `Assembly-CSharp.dll` — from your Stick Fight install (`StickFight_Data/Managed/`)
 - `UnityEngine.dll` — same directory
@@ -58,42 +72,20 @@ Each plugin is a .NET 4.6 BepInEx 5 assembly. **You need to provide the referenc
 Then:
 
 ```bash
-cd sf-netcodev2  # or sf-leveldumper, sf-localcontrol-fix
+cd sf-headless-host
 dotnet build -c Release
-# Output → bin/Release/<PluginName>.dll
+# Output → bin/Release/SFHeadlessHost.dll
 ```
 
-Deploy the `.dll` to `<SF install>/BepInEx/plugins/`.
-
-### Launch SF with the plugins loaded
-
-If you're on Linux (Proton):
-
-```bash
-./launch-sf-bepinex.sh
-```
-
-If you're on Windows via Steam, add `WINEDLLOVERRIDES="winhttp=n,b" %command%` to the game's Launch Options (Properties → General).
-
-### Connect to the server
-
-Use the matching launcher fork (TBD upstream link) or set the address with `-address <ip>:<port>` on the patched DLL.
+Deploy to `<SF install>/BepInEx/plugins/SFHeadlessHost.dll`. (The other plugins in this repo — `sf-netcodev2/`, `sf-localcontrol-fix/`, `sf-leveldumper/` — are not part of the active Path A and should stay parked.)
 
 ## Wire-protocol notes
 
-**v25** is the original P2P-relay protocol used by upstream and stock-with-patched-DLL clients. The server forwards packets unchanged; gameplay logic stays client-side.
+**v25** is the protocol the live Path A oracle speaks. It's the raw-UDP one used by the patched DLL (`StickFightDev/StickFightDLL` dev-v25). Every packet wraps the SF MsgType body in a 14-byte envelope: `[u32 timestamp LE][u8 msgType][N body][u64 steamID LE][u8 channel]`. SF's `P2PPackageHandler.MsgType` enum (38 entries from `Ping=0` ... `KickPlayer=38`) defines the dispatch.
 
-**v26** is the new authoritative protocol introduced here:
+Implementation lives in [`sf-headless-host/SFHeadlessHost.cs`](sf-headless-host/SFHeadlessHost.cs). The handshake (`ClientRequestingAccepting` → `ClientAccepted` → `ClientRequestingIndex` → `ClientInit` → `ClientRequestingToSpawn` → `ClientSpawned`) is implemented in the `Handle*` methods; the v25 wrapper codec is in `SendSfPacket`. Byte layouts for the 50-byte `ClientInit` body are documented in [`notes/recon/`](notes/recon/).
 
-| ID | Type | Direction | Notes |
-|---|---|---|---|
-| 42 | `playerInput` | client → server | 60 Hz; stick + aim + buttons + sequence |
-| 43 | `worldStateSnapshot` | server → client | 30 Hz, ~19 bytes per entity (id + kind + slot + posXYZ\*100 + velXYZ\*100 + flags) |
-| 44 | `serverEvent` | server → client | reliable; damage/impact/weapon-spawn events |
-
-A v26 client advertises protocol `26` in its `clientRequestingIndex`; the server downgrades to v25 (relay only) if it sees `25`.
-
-See [`StickFightDedicatedSrv/packets.go`](StickFightDedicatedSrv/packets.go) for the full enum and [`notes/recon/`](notes/recon/) for byte-layout traces.
+**v26** is the older authoritative protocol designed when the Go server was load-bearing. It's still in `StickFightDedicatedSrv/packets.go` (IDs 42-44 for `playerInput` / `worldStateSnapshot` / `serverEvent`) but is no longer used under Path A. Will be removed alongside the Go server.
 
 ## Credits
 

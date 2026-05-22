@@ -1,8 +1,10 @@
-# Phase 6 — Headless Unity as the Physics Oracle
+# Phase 6 — Headless Unity as the Server
 
-**Goal:** replace the Go server's lightweight AABB physics simulation with a per-lobby headless Unity instance of Stick Fight itself. Real Movement.cs, real ConfigurableJoint ragdolls, real killboxes, real weapon prefabs — Unity is the source of truth for physics; Go server stays as lobby coordinator + wire-protocol relay + player matchmaking.
+> **2026-05-22 path update:** the project pivoted from "oracle as physics consultant + Go server in the data path" (the original Phase 6 design, sometimes called Path D below) to **"oracle IS the server, no Go bridge"** (Path A). The headless Unity instance now speaks the v25 protocol directly to real Steam clients via raw UDP. The Go dedicated server is no longer in the active data path. See [`10-PHASE6.5-host-side-gameplay.md`](10-PHASE6.5-host-side-gameplay.md) for what's live and the seven Harmony patches that make it work.
 
-**Why:** comp scene needs frame-perfect physics. Path A's reimplementation in Go would take 6+ months to match SF's behavior and even then would drift on every Landfall update. Embedding the real Unity layer sidesteps the entire class of "wrong gravity / wrong AABB / wrong killbox" bugs we've been chasing.
+**Goal:** run a headless Unity instance of Stick Fight itself as the multiplayer server. Real Movement.cs, real ConfigurableJoint ragdolls, real killboxes, real weapon prefabs — Unity is the source of truth for physics AND the network endpoint.
+
+**Why:** comp scene needs frame-perfect physics. Reimplementing SF's physics in Go would take 6+ months and drift on every Landfall update. Embedding the real Unity layer sidesteps the entire class of "wrong gravity / wrong AABB / wrong killbox" bugs we've been chasing.
 
 **Trade-off accepted:** ~1+ GB RAM per concurrent lobby, single-VM hosting tops out at maybe 4–8 lobbies. Public-scale would need a fleet. For the comp scene this is fine.
 
@@ -11,10 +13,12 @@
 | # | Status | What | Decision gate |
 |---|---|---|---|
 | 6.0 | ✅ **PASSED** ([see 01](01-batchmode-nographics-vanilla.log), [02](02-batchmode-goldberg.log)) | Confirm SF can launch in `-batchmode -nographics` and progress past Steam init | Headless launch + Steam-API success required |
-| 6.1 | 🟡 Next | Write `SFHeadlessHost` BepInEx plugin — detects batchmode, bypasses splash, loads a Landfall scene, starts a Server-mode NetworkSocketServer | Plugin loads a scene + MultiplayerManager spins up Server.Start() |
-| 6.2 | ⏳ | Define + implement IPC bridge between Go server and SFHeadlessHost (UDP or Unix socket). Inputs in / state out. | Go-driven 2-player match with Unity as physics oracle |
-| 6.3 | ⏳ | Per-lobby lifecycle: spawn/teardown Unity per lobby, restart on crash, resource caps, health checks | One Go server manages 4 concurrent oracle instances |
-| 6.4 | ⏳ | Cutover: replace `physics/` package calls with bridge calls. Path A stays as fallback for un-oraclable lobbies (or removed) | Live test session matches v0.1-alpha behavior with better physics |
+| 6.1 | ✅ Done | `SFHeadlessHost` BepInEx plugin — detects batchmode, bypasses splash, loads MainScene | Plugin loads, Bep banner appears |
+| 6.2 | ✅ Done | Go ↔ oracle bridge JSON command channel on UDP 1341. Originally the Path-D IPC; retained for diagnostic ping/snapshot/teleport, now loopback-only after security review | spawnPlayer + loadMap + ping roundtrip from `cmd/oracle-test` |
+| 6.3 | ✅ Done | Input injection into SF's `Controller.Update` via Harmony prefix, with reflection-driven CharacterActions write — see [09-PHASE6.3-BLOCKER-AND-OPTIONS.md](09-PHASE6.3-BLOCKER-AND-OPTIONS.md) for the saga | Bridge-driven rig moves in oracle |
+| 6.4 | ✅ Done — **pivot from Path D to Path A** | Embed sfdsrv's v25 raw-UDP protocol directly inside `SFHeadlessHost.dll`. Real Steam SF connects to oracle:1337, handshake completes, client spawns into Desert3 | Live test: Steam SF joins + auto-loads map + sees real geometry |
+| 6.5 | ✅ Done | Drive SF's own host-side gameplay loop on the oracle via 7 Harmony patches (IsServer, IsNetworkMatch pin, GameManager.StartMatch, SpawnRandomWeapon replacement, etc.) | First WeaponSpawned packet forwarded through plugin's v25 socket → client renders weapon |
+| 6.6 | ⏳ Next | Forward incoming gameplay packets (msgType ≥ 11, e.g. ClientRequestingWeaponPickUp, PlayerTookDamage) into SF's `P2PPackageHandler.CheckMessageType` so pickup / damage / physics interactions work | User can pick up + use weapons; killboxes register |
 
 ## Phase 6.0 — what we proved
 

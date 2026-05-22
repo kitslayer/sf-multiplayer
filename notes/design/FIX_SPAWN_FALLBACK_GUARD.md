@@ -1,6 +1,8 @@
 # Design — Loosen the all-zero spawn-position guard
 
-**Status:** designed; not implemented. Secondary to the flag fix; do this after the headline fix lands.
+**Status:** ✅ Applied in initial commit `12801bc` (players.go:15 + lobbies.go:1533). Doc retained for design rationale.
+
+> **2026-05-22 note:** the Go server this guard lived in is being deprecated as part of the Path A pivot — see [`../phase6/10-PHASE6.5-host-side-gameplay.md`](../phase6/10-PHASE6.5-host-side-gameplay.md).
 
 ## Problem
 

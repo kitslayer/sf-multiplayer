@@ -1,6 +1,8 @@
 # Design — Fix `SpawnPlayer` flag logic (3-second-match-cycle fix)
 
-**Status:** designed; not implemented. The next Claude session should implement.
+**Status:** ✅ Applied in initial commit `12801bc` (lobbies.go:1523 + lobbies.go:1769). Doc retained for design rationale + diagnostic history.
+
+> **2026-05-22 note:** the Go server this fix targeted is being deprecated as part of the Path A pivot — see [`../phase6/10-PHASE6.5-host-side-gameplay.md`](../phase6/10-PHASE6.5-host-side-gameplay.md). The fix still lives in `lobbies.go` for archival reasons; the live SF server is now the headless Unity instance with `SFHeadlessHost.dll`, not sfdsrv.
 
 ## Problem (one line)
 

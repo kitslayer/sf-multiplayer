@@ -1,5 +1,7 @@
 # Bug — Matches end after ~3 seconds, in a loop
 
+> **Status: ✅ RESOLVED in initial commit `12801bc`.** Fix is in `lobbies.go:1521-1540` (flag=0 on round-start spawns) and `lobbies.go:1769` (`StartMatch` resets `SpawnedThisRound = false`). See [`../design/FIX_FLAG_LOGIC.md`](../design/FIX_FLAG_LOGIC.md) for the design and rationale. Subsequent line refs in this doc target the recon snapshot under `notes/recon/StickFightDedicatedSrv/`, not live source.
+
 Symptom (from `prior-memory/phase5_state.md` "End-of-session state"):
 > The short-match-cycle problem (matches ending in 3 seconds) is still real.
 
