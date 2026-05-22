@@ -445,6 +445,15 @@ namespace SFHeadlessHost
                     DrainBridgeCommands();
                     // Drain raw v25 protocol packets from patched DLL clients.
                     DrainSfServer();
+                    // Fire scheduled auto-match-start if armed and time reached.
+                    if (_autoStartAt > 0f && Time.realtimeSinceStartup >= _autoStartAt && !_matchStarted)
+                    {
+                        _autoStartAt = -1f;
+                        Log.LogInfo($"[SF] Auto-match-start firing: broadcast MapChange + StartMatch.");
+                        BroadcastMapChange(_currentSceneIndex);
+                        BroadcastStartMatch();
+                        _matchStarted = true;
+                    }
                     // Push the latest per-slot inputs into each spawned rig's
                     // CharacterActions. Done every frame even if no new input
                     // arrived — analog sticks need their last value held so
@@ -503,6 +512,7 @@ namespace SFHeadlessHost
         private const byte PktPlayerTookDamage           = 11;
         private const byte PktPlayerTalked               = 12;
         private const byte PktMapChange                  = 18;
+        private const byte PktStartMatch                 = 35;
         private const byte PktWorkshopMapsLoaded         = 34;
         private const byte PktOptionsChanged             = 37;
 
@@ -675,6 +685,9 @@ namespace SFHeadlessHost
                 case PktPlayerUpdate:
                     HandlePlayerUpdate(cli, data, bodyOffset, bodyLen);
                     break;
+                case PktClientReadyUp:
+                    HandleClientReadyUp(cli, data, bodyOffset, bodyLen);
+                    break;
                 default:
                     if (Verbose) Log.LogDebug($"[SF] unhandled type={msgType} from={from}");
                     break;
@@ -786,6 +799,12 @@ namespace SFHeadlessHost
             Log.LogInfo($"[SF] Post-init bundle sent (WorkshopMapsLoaded + OptionsChanged).");
         }
 
+        // After first player spawns in the lobby, auto-start a match. The
+        // stock SF lobby requires 2+ players to walk under the ready-hat
+        // trigger; for solo testing that never fires. So we schedule the
+        // match-start ourselves a few seconds after first spawn.
+        private float _autoStartAt = -1f;
+
         // ClientRequestingToSpawn → ClientSpawned broadcast.
         // Incoming body: byte playerIndex + 6 × float32 (pos + euler) = 25 bytes
         // Outgoing body: byte playerIndex + 6×f32 + bool spawnFlag + i32 colorCount = 30 bytes
@@ -814,6 +833,56 @@ namespace SFHeadlessHost
                 BroadcastSfPacket(PktClientSpawned, body, cli.SteamID, 0);
             }
             cli.Spawned = true;
+
+            // First spawn into the lobby — schedule auto-match-start in 4s
+            // so player has time to register the spawn before the scene loads.
+            if (!_matchStarted && _autoStartAt < 0f)
+            {
+                _autoStartAt = Time.realtimeSinceStartup + 4.0f;
+                Log.LogInfo($"[SF] Auto-match-start scheduled in 4s.");
+            }
+        }
+
+        // ClientReadyUp from client (walked through the ready hat in lobby).
+        // Body: byte playerCount + playerCount × byte playerIndex.
+        // Response: broadcast MapChange (load Landfall scene) + StartMatch.
+        // Once both go out, clients drop the lobby map, load the new scene,
+        // and send ClientRequestingToSpawn for it — we reply with ClientSpawned.
+        private bool _matchStarted = false;
+        private int _currentSceneIndex = 6; // Desert3 — known-good Landfall map
+        private void HandleClientReadyUp(SfClient cli, byte[] data, int off, int len)
+        {
+            Log.LogInfo($"[SF] ClientReadyUp from {cli.Addr} bodyLen={len}; broadcasting MapChange+StartMatch.");
+            if (_matchStarted) {
+                Log.LogInfo($"[SF] Match already started; re-sending StartMatch to {cli.Addr} only.");
+                SendSfPacket(cli.Addr, PktStartMatch, new byte[0], 0, 0);
+                return;
+            }
+            BroadcastMapChange(_currentSceneIndex);
+            BroadcastStartMatch();
+            _matchStarted = true;
+        }
+
+        // MapChange body: byte winnerIndex + byte mapType + mapData.
+        // For a fresh start: winnerIndex=255 (no winner), mapType=0 (Landfall),
+        // mapData=i32 sceneIndex LE.
+        private void BroadcastMapChange(int sceneIndex)
+        {
+            byte[] body = new byte[1 + 1 + 4];
+            body[0] = 255;             // winnerIndex (no winner)
+            body[1] = 0;               // mapType Landfall
+            WriteU32LE(body, 2, (uint)sceneIndex);
+            BroadcastSfPacket(PktMapChange, body, 0, 0);
+            Log.LogInfo($"[SF] Broadcast MapChange → scene {sceneIndex}");
+        }
+
+        private void BroadcastStartMatch()
+        {
+            BroadcastSfPacket(PktStartMatch, new byte[0], 0, 0);
+            // Clear per-round spawn flag so next ClientRequestingToSpawn
+            // is treated as a fresh round-start rather than a respawn.
+            foreach (var kv in _sfClients) kv.Value.Spawned = false;
+            Log.LogInfo("[SF] Broadcast StartMatch");
         }
 
         // PlayerUpdate from client → broadcast to all OTHER clients.
