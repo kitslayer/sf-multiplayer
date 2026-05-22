@@ -69,10 +69,10 @@ namespace SFHeadlessHost
             {
                 var harmony = new Harmony(PluginGuid);
                 var sockType = AccessTools.TypeByName("Landfall.Network.Sockets.NetworkSocketServer");
-                if (sockType != null)
+                if ((object)sockType != null)
                 {
                     var ctor = AccessTools.Constructor(sockType, Type.EmptyTypes);
-                    if (ctor != null)
+                    if ((object)ctor != null)
                     {
                         harmony.Patch(ctor, postfix: new HarmonyMethod(
                             AccessTools.Method(typeof(Plugin), nameof(PatchServerPort))));
@@ -198,14 +198,14 @@ namespace SFHeadlessHost
         {
             // Step 2: ensure MatchmakingHandler is in Sockets mode.
             var mmType = AccessTools.TypeByName("MatchmakingHandler");
-            if (mmType != null)
+            if ((object)mmType != null)
             {
                 var runningOnSockets = AccessTools.Field(mmType, "mRunningOnSockets")
                                        ?? AccessTools.Field(mmType, "m_RunningOnSockets");
                 var instance = UnityEngine.Object.FindObjectOfType(mmType);
-                if (instance != null && runningOnSockets != null)
+                if ((object)instance != null && (object)runningOnSockets != null)
                 {
-                    runningOnSockets.SetValue(instance, true);
+                    runningOnSockets.SetValue(instance, true); /* FieldInfo — no compat fix needed */
                     Log.LogInfo("Set MatchmakingHandler.mRunningOnSockets = true.");
                 }
                 else
@@ -214,26 +214,26 @@ namespace SFHeadlessHost
                 }
 
                 var runningOnSocketsStatic = AccessTools.Property(mmType, "RunningOnSockets");
-                if (runningOnSocketsStatic != null && runningOnSocketsStatic.CanWrite)
+                if ((object)runningOnSocketsStatic != null && runningOnSocketsStatic.CanWrite)
                 {
-                    runningOnSocketsStatic.SetValue(null, true);
+                    runningOnSocketsStatic.SetValue(null, true, null);
                 }
                 else
                 {
                     var backing = AccessTools.Field(mmType, "<RunningOnSockets>k__BackingField");
-                    if (backing != null) backing.SetValue(null, true);
+                    if ((object)backing != null) backing.SetValue(null, true);
                 }
             }
 
             // Step 3: HostServer on MatchMakingHandlerSockets.
             var hostType = AccessTools.TypeByName("MatchMakingHandlerSockets");
-            if (hostType == null)
+            if ((object)hostType == null)
             {
                 Log.LogError("MatchMakingHandlerSockets type not found.");
                 return;
             }
             var hostInstance = UnityEngine.Object.FindObjectOfType(hostType);
-            if (hostInstance == null)
+            if ((object)hostInstance == null)
             {
                 Log.LogWarning("No MatchMakingHandlerSockets instance in scene; creating one.");
                 var go = new GameObject("SFHeadlessHost_MMSockets");
@@ -241,7 +241,7 @@ namespace SFHeadlessHost
                 hostInstance = go.AddComponent(hostType);
             }
             var hostMethod = AccessTools.Method(hostType, "HostServer");
-            if (hostMethod == null)
+            if ((object)hostMethod == null)
             {
                 Log.LogError("MatchMakingHandlerSockets.HostServer method not found.");
                 return;
@@ -280,16 +280,16 @@ namespace SFHeadlessHost
             try
             {
                 var serverProp = AccessTools.Property(__instance.GetType(), "Server");
-                if (serverProp == null) return;
-                var netServer = serverProp.GetValue(__instance);
-                if (netServer == null) return;
+                if ((object)serverProp == null) return;
+                var netServer = serverProp.GetValue(__instance, null);
+                if ((object)netServer == null) return;
                 var configProp = AccessTools.Property(netServer.GetType(), "Configuration");
-                if (configProp == null) return;
-                var config = configProp.GetValue(netServer);
-                if (config == null) return;
+                if ((object)configProp == null) return;
+                var config = configProp.GetValue(netServer, null);
+                if ((object)config == null) return;
                 var portProp = AccessTools.Property(config.GetType(), "Port");
-                if (portProp == null) return;
-                portProp.SetValue(config, BindPort);
+                if ((object)portProp == null) return;
+                portProp.SetValue(config, BindPort, null);
                 Log.LogInfo($"NetworkSocketServer ctor postfix: rewrote Port → {BindPort}.");
             }
             catch (Exception e)
