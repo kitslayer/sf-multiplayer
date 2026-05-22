@@ -62,7 +62,8 @@ namespace SFHeadlessHost
             }
             if (!batchMode)
             {
-                Log.LogInfo($"{PluginName} {PluginVersion}: interactive run detected (no -batchmode arg). No-op.");
+                Log.LogInfo($"{PluginName} {PluginVersion}: interactive run — installing CLIENT-MODE shim.");
+                InstallClientModePatches();
                 return;
             }
             Log.LogInfo($"{PluginName} {PluginVersion}: batchmode detected, bootstrapping headless host.");
@@ -475,6 +476,9 @@ namespace SFHeadlessHost
         // Use object[] __args to dodge needing typed refs to EP2PSend (Steamworks).
         private static int _p65BroadcastCount;
         private static readonly Dictionary<byte, int> _p65BroadcastByType = new Dictionary<byte, int>();
+        private static int _p65ObjUpdateIdxLogCount;
+        private static readonly HashSet<ushort> _p65ObjUpdateSeenIndices = new HashSet<ushort>();
+        private static int _p65ObjUpdateFilterCount;
         internal static bool SendBroadcastPrefix(object[] __args)
         {
             try
@@ -501,6 +505,19 @@ namespace SFHeadlessHost
                 {
                     Log.LogInfo($"[P6.5] HostBroadcast#{_p65BroadcastCount} msgType={msgType}({MsgTypeName(msgType)}) bodyLen={data?.Length ?? 0} ignoreSrv={ignoreServer} ignoreUID={ignoreUID} count[{msgType}]={_p65BroadcastByType[msgType]}");
                 }
+                // For ObjectUpdate, log the index every time so we can see
+                // which scene NSOs are broadcasting (the index is the first
+                // 2 bytes of the body, ushort LE).
+                if (msgType == 26 && data != null && data.Length >= 2 && _p65ObjUpdateIdxLogCount < 30)
+                {
+                    ushort idx = (ushort)(data[0] | (data[1] << 8));
+                    if (!_p65ObjUpdateSeenIndices.Contains(idx))
+                    {
+                        _p65ObjUpdateSeenIndices.Add(idx);
+                        _p65ObjUpdateIdxLogCount++;
+                        Log.LogInfo($"[P6.5] ObjectUpdate from new index={idx} (total unique={_p65ObjUpdateSeenIndices.Count})");
+                    }
+                }
 
                 // Phase 6.5 Step 2 — forward the broadcast through our v25
                 // protocol so the real client actually receives it. SF's own
@@ -520,7 +537,31 @@ namespace SFHeadlessHost
                     && msgType != 10  // PktPlayerUpdate
                     && msgType != 12) // PktPlayerTalked
                 {
-                    Instance.ForwardBroadcastToV25Clients(msgType, data, ignoreUID);
+                    // Extract the channel arg (index 5 in SendMessageToAllClients).
+                    // The patched DLL routes incoming packets by channel — using
+                    // channel 0 for everything sends them to CheckMessageType
+                    // which throws "Messagetype X is not setup!" for things like
+                    // ObjectUpdate that should go to NSO.ListenForPackages instead.
+                    byte channel = 0;
+                    if (__args.Length > 5)
+                    {
+                        try { channel = (byte)Convert.ToInt32(__args[5]); } catch { }
+                    }
+                    // For ObjectUpdate, filter out broadcasts where the object's
+                    // Y position is out of int16 range (overflow artifact).
+                    bool skip = false;
+                    if (msgType == 26 && data.Length >= 4)
+                    {
+                        short posYmul100 = (short)(data[2] | (data[3] << 8));
+                        if (posYmul100 < -3000)
+                        {
+                            skip = true;
+                            if (_p65ObjUpdateFilterCount < 5 || _p65ObjUpdateFilterCount % 100 == 0)
+                                Log.LogInfo($"[P6.5] Skipping ObjectUpdate forward — Y={posYmul100/100f:0.0} out of playable range (#{_p65ObjUpdateFilterCount})");
+                            _p65ObjUpdateFilterCount++;
+                        }
+                    }
+                    if (!skip) Instance.ForwardBroadcastToV25Clients(msgType, data, ignoreUID, channel);
                 }
             }
             catch (Exception e)
@@ -531,7 +572,10 @@ namespace SFHeadlessHost
         }
 
         // Forward an intercepted host broadcast through our v25 UDP socket.
-        internal void ForwardBroadcastToV25Clients(byte msgType, byte[] body, ulong ignoreUID)
+        // Channel is critical — the patched DLL routes by channel; non-zero
+        // channels (e.g. 10 for ObjectUpdate) dispatch via NSO.ListenForPackages,
+        // while channel 0 goes to P2PPackageHandler.CheckMessageType.
+        internal void ForwardBroadcastToV25Clients(byte msgType, byte[] body, ulong ignoreUID, byte channel = 0)
         {
             int sent = 0;
             foreach (var kv in _sfClients)
@@ -539,11 +583,11 @@ namespace SFHeadlessHost
                 var cli = kv.Value;
                 if (!cli.Initialized) continue;
                 if (ignoreUID != 0 && cli.SteamID == ignoreUID) continue;
-                SendSfPacket(cli.Addr, msgType, body, 0uL, 0);
+                SendSfPacket(cli.Addr, msgType, body, 0uL, channel);
                 sent++;
             }
             if (sent > 0 && _p65BroadcastCount <= 5)
-                Log.LogInfo($"[P6.5] Forwarded msgType={msgType}({MsgTypeName(msgType)}) bodyLen={body.Length} to {sent} v25 client(s).");
+                Log.LogInfo($"[P6.5] Forwarded msgType={msgType}({MsgTypeName(msgType)}) bodyLen={body.Length} ch={channel} to {sent} v25 client(s).");
         }
 
         // Phase 6.5 Step 1 — log direct user-targeted sends (CSteamID overload).
@@ -711,12 +755,23 @@ namespace SFHeadlessHost
                     var updIdxField = AccessTools.Field(nsoType, "mUpdateIndex");
                     var sendRateField = AccessTools.Field(nsoType, "mSendRate");
                     var sendRatePerSecField = AccessTools.Field(nsoType, "mSendRatePerSecond");
-                    int patched = 0, listenSet = 0, otsSet = 0;
+                    int patched = 0, listenSet = 0, otsSet = 0, updIdxSet = 0;
+                    int nsoIter = 0;
                     foreach (var o in nsos)
                     {
+                        nsoIter++;
                         try
                         {
                             var oComp = o as Component;
+                            // Distribute NSOs across UpdateIndexHandler buckets
+                            // (0..MAX_UPDATE_INDEX-1, currently 5). Without this,
+                            // all NSOs cluster on bucket 0 and only fire on every
+                            // 5th frame, halving broadcast density.
+                            if ((object)updIdxField != null)
+                            {
+                                updIdxField.SetValue(o, nsoIter % 5);
+                                updIdxSet++;
+                            }
                             if ((object)nmField != null && (object)mmFromGm != null)
                             {
                                 var cur = nmField.GetValue(o);
@@ -752,7 +807,29 @@ namespace SFHeadlessHost
                         }
                         catch (Exception e) { Log.LogWarning($"[P6.5 NSO] patch one NSO threw: {e.Message}"); }
                     }
-                    Log.LogInfo($"[P6.5 NSO] Patched {patched} NSOs (mNetworkManager was null), set mObjectToSync on {otsSet}, mIsListening=true on {listenSet}/{total}.");
+                    Log.LogInfo($"[P6.5 NSO] Patched {patched} NSOs (mNetworkManager was null), set mObjectToSync on {otsSet}, distributed mUpdateIndex on {updIdxSet}, mIsListening=true on {listenSet}/{total}.");
+
+                    // Probe: snapshot 10 NSOs' initial position + kinematic state
+                    // so we can see in the log whether the oracle's boxes
+                    // actually move when the mirror rig walks through them.
+                    _probeNsos.Clear();
+                    int probeCount = 0;
+                    foreach (var o in nsos)
+                    {
+                        if (probeCount >= 10) break;
+                        var comp = o as Component;
+                        if ((object)comp == null) continue;
+                        var rb = comp.GetComponentInChildren<Rigidbody>();
+                        bool kin = (object)rb != null && rb.isKinematic;
+                        Vector3 pos = comp.transform.position;
+                        ushort idx = 0;
+                        var idxF = AccessTools.Field(nsoType, "m_Index");
+                        if ((object)idxF != null) idx = (ushort)idxF.GetValue(o);
+                        _probeNsos.Add(new ProbeNsoEntry { Component = comp, Name = comp.gameObject.name, Index = idx, InitialPos = pos, HasRigidbody = (object)rb != null, IsKinematic = kin });
+                        Log.LogInfo($"[NSO probe] [{probeCount}] name='{comp.gameObject.name}' index={idx} pos={pos} rb={(object)rb != null} kinematic={kin}");
+                        probeCount++;
+                    }
+                    _probeNextLogAt = Time.realtimeSinceStartup + 5f;
                 }
             }
             catch (Exception e)
@@ -763,6 +840,39 @@ namespace SFHeadlessHost
             {
                 _nsoInventoryDone = true;
             }
+        }
+
+        // === NSO movement probe ===
+        // Captures a few NSOs' initial position at scene-ready and reports
+        // displacement every 5s. Answers: "do oracle boxes actually move
+        // when the mirror rig walks through them?"
+        private struct ProbeNsoEntry
+        {
+            public Component Component;
+            public string Name;
+            public ushort Index;
+            public Vector3 InitialPos;
+            public bool HasRigidbody;
+            public bool IsKinematic;
+        }
+        private static readonly List<ProbeNsoEntry> _probeNsos = new List<ProbeNsoEntry>();
+        private static float _probeNextLogAt = -1f;
+        private static void TickNsoProbe()
+        {
+            if (_probeNsos.Count == 0) return;
+            if (Time.realtimeSinceStartup < _probeNextLogAt) return;
+            _probeNextLogAt = Time.realtimeSinceStartup + 5f;
+            int moved = 0;
+            for (int i = 0; i < _probeNsos.Count; i++)
+            {
+                var e = _probeNsos[i];
+                if ((object)e.Component == null) continue;
+                Vector3 cur = e.Component.transform.position;
+                float disp = (cur - e.InitialPos).magnitude;
+                if (disp > 0.05f) moved++;
+                Log.LogInfo($"[NSO probe] [{i}] name='{e.Name}' index={e.Index} pos={cur} disp={disp:0.00} (init={e.InitialPos})");
+            }
+            Log.LogInfo($"[NSO probe] summary: {moved}/{_probeNsos.Count} moved >5cm from initial.");
         }
 
         // Periodic state probe — log GameManager.inFight + randomWeaponCounter
@@ -855,6 +965,75 @@ namespace SFHeadlessHost
             {
                 Log.LogError($"[P6.5] InvokeOracleStartMatch threw: {e}");
             }
+        }
+
+        // === CLIENT-MODE SHIM ===
+        // Runs on the user's graphical Steam client (NOT batchmode oracle).
+        // Goal: make crate/destructible physics work locally so the user sees
+        // boxes move when they push them. SF's stock client logic forces all
+        // NSO rigidbodies kinematic (DisableAllRigidBodies in NSO.Init) and
+        // sets static mHasControl=false (because IsServer is false on the
+        // client) — both prevent local physics + local broadcasts.
+        //
+        // Two surgical patches let the client act as the local-physics
+        // authority for boxes, with the oracle continuing as the network
+        // coordinator. Doesn't try to flip IsServer entirely (which would
+        // break weapon spawning on the client).
+        private static void InstallClientModePatches()
+        {
+            try
+            {
+                var harmony = new Harmony(PluginGuid + ".client-shim");
+
+                var nsoType = AccessTools.TypeByName("NetworkSyncableObject");
+                if ((object)nsoType == null) { Log.LogWarning("[CLIENT] NetworkSyncableObject type not found."); return; }
+
+                // Patch 1: skip DisableAllRigidBodies. Stops the client from
+                // setting every NSO's rigidbody to kinematic on Init. Crates
+                // remain dynamic → local physics works → pushing them moves
+                // them visually on the user's screen.
+                var dis = AccessTools.Method(nsoType, "DisableAllRigidBodies");
+                if ((object)dis != null)
+                {
+                    harmony.Patch(dis, prefix: new HarmonyMethod(AccessTools.Method(typeof(Plugin), nameof(SkipPrefix))));
+                    Log.LogInfo("[CLIENT] Patched NetworkSyncableObject.DisableAllRigidBodies (skip).");
+                }
+                else Log.LogWarning("[CLIENT] DisableAllRigidBodies method not found.");
+
+                // Patch 2: NSO.Start postfix to force static mHasControl=true.
+                // Allows the client's NSO.LateUpdate to broadcast position
+                // updates so a future multi-player setup would work too.
+                // (Single-player: the local push is already visible without
+                // any broadcast — this is just for forward compatibility.)
+                var startM = AccessTools.Method(nsoType, "Start");
+                if ((object)startM != null)
+                {
+                    harmony.Patch(startM, postfix: new HarmonyMethod(AccessTools.Method(typeof(Plugin), nameof(NsoStartPostfix_Client))));
+                    Log.LogInfo("[CLIENT] Patched NetworkSyncableObject.Start (postfix → mHasControl=true).");
+                }
+                else Log.LogWarning("[CLIENT] NetworkSyncableObject.Start method not found.");
+
+                Log.LogInfo("[CLIENT] Client-mode shim installed. Crates should be dynamic + locally pushable.");
+            }
+            catch (Exception e)
+            {
+                Log.LogError($"[CLIENT] Client-mode shim install failed: {e}");
+            }
+        }
+        // Generic skip-prefix: return false to skip the original method.
+        internal static bool SkipPrefix() => false;
+
+        // NSO.Start postfix on client: force the static mHasControl=true so
+        // the client's NSO.LateUpdate broadcasts position deltas.
+        internal static void NsoStartPostfix_Client(object __instance)
+        {
+            try
+            {
+                var t = __instance.GetType();
+                var f = AccessTools.Field(t, "mHasControl");
+                if ((object)f != null) f.SetValue(null, true);
+            }
+            catch { /* swallow — Mono inlining may have us miss */ }
         }
 
         // Per-patch install with status tracking. A single try/catch around
@@ -1231,7 +1410,7 @@ namespace SFHeadlessHost
                         Log.LogInfo($"heartbeat: scene={SceneManager.GetActiveScene().name} tick={_heartbeatTicks}");
                     }
                     // Phase 6.5 — periodic state probe (only after match has started).
-                    if (_matchStarted) StateProbe();
+                    if (_matchStarted) { StateProbe(); TickNsoProbe(); }
                     return;
             }
         }
@@ -1991,7 +2170,10 @@ namespace SFHeadlessHost
 
         // Make all body part rigidbodies kinematic so we can MovePosition
         // them and they'll push other dynamic rigidbodies (boxes) correctly
-        // via Unity's kinematic-sweep resolution.
+        // via Unity's kinematic-sweep resolution. ALSO disable any
+        // NetworkSyncableObject components on the rig — without this the rig's
+        // own body parts broadcast ObjectUpdate spam to the client, hijacking
+        // indices that map to real scene objects.
         private void MakeRigKinematicMirror(int slot)
         {
             if (!SlotToRig.TryGetValue(slot, out var rig) || (object)rig == null) return;
@@ -2003,7 +2185,21 @@ namespace SFHeadlessHost
                 rb.isKinematic = true;
                 kinSet++;
             }
-            Log.LogInfo($"[P6.7] Slot {slot}: set {kinSet} rigidbodies to kinematic for mirror behavior.");
+            // Disable NSO components on the rig — they'd otherwise broadcast
+            // ObjectUpdate packets with whatever Index the rig parts carry,
+            // potentially corrupting scene-object positions on the client.
+            int nsoDisabled = 0;
+            var nsoType = AccessTools.TypeByName("NetworkSyncableObject");
+            if ((object)nsoType != null)
+            {
+                var nsos = rig.GetComponentsInChildren(nsoType);
+                foreach (var nso in nsos)
+                {
+                    var beh = nso as Behaviour;
+                    if ((object)beh != null) { beh.enabled = false; nsoDisabled++; }
+                }
+            }
+            Log.LogInfo($"[P6.7] Slot {slot}: set {kinSet} rigidbodies to kinematic, disabled {nsoDisabled} NSO components for mirror behavior.");
         }
 
         // Move all body parts of the mirror rig toward the target position.
