@@ -11,7 +11,7 @@ Extracts per Landfall scene 1..124 (skipping 102=stats):
   - Killbox volumes: GameObjects with KillingFloor / KIllAllOutOfRange components
   - Syncable objects (NetworkSyncableObject / DestructiblePiece): same approach
 
-Output: one landfall-N.json per scene at $SF_LEVELDUMPER_OUT (default /home/miles/sf-multiplayer/maps/).
+Output: one landfall-N.json per scene at $SF_LEVELDUMPER_OUT (default ./maps/).
 
 Usage:
     /tmp/sf-unity-venv/bin/python tools/dump-sf-maps.py [--data DIR] [--out DIR] [-v]
@@ -45,9 +45,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--data",
-        default="/home/miles/.local/share/Steam/steamapps/common/StickFightTheGame/StickFight_Data",
+        default="$HOME/.local/share/Steam/steamapps/common/StickFightTheGame/StickFight_Data",
     )
-    ap.add_argument("--out", default="/home/miles/sf-multiplayer/maps")
+    ap.add_argument("--out", default="./maps")
     ap.add_argument("--only", type=int, default=None)
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args()

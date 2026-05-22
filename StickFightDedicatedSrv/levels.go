@@ -13,7 +13,7 @@ var (
 	lobbyLevels   = make([]*Level, 0)
 
 	//loadedMaps holds the dumped-from-game map data, indexed by Landfall scene
-	//index. Populated at server startup by main() from /home/miles/sf-multiplayer/maps/
+	//index. Populated at server startup by main() from ./maps/
 	//(or whatever -mapsDir is set to). Used for Phase 5 server-authoritative
 	//weapon spawning, killbox enforcement, and (later) collision physics.
 	//A nil entry / missing key means "no dumped data for this scene" — we then

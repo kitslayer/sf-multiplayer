@@ -1,7 +1,7 @@
 sfdsrv.next — adds /lobbies HTTP endpoint
 =========================================
 
-Built from: /home/miles/sf-multiplayer/StickFightDedicatedSrv (HEAD as of 2026-05-21)
+Built from: $HOME/sf-multiplayer/StickFightDedicatedSrv (HEAD as of 2026-05-21)
 Diff vs. /tmp/sfdsrv:
   - server.go: added LobbyInfo, LobbyList types, gameModeName() helper,
     Server.LobbyList() snapshot method.

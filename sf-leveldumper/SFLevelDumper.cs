@@ -43,16 +43,8 @@ namespace SFLevelDumper
             OutputDir = Environment.GetEnvironmentVariable("SF_LEVELDUMPER_OUT");
             if (string.IsNullOrEmpty(OutputDir))
             {
-                // Prefer the dev path if it exists; otherwise drop next to the SF exe.
-                const string devPath = "/home/miles/sf-multiplayer/maps";
-                if (Directory.Exists("/home/miles/sf-multiplayer"))
-                {
-                    OutputDir = devPath;
-                }
-                else
-                {
-                    OutputDir = Path.Combine(Application.dataPath ?? ".", "..", "LevelDumps");
-                }
+                // Default: next to the SF exe. Override with SF_LEVELDUMPER_OUT env var.
+                OutputDir = Path.Combine(Application.dataPath ?? ".", "..", "LevelDumps");
             }
 
             try { Directory.CreateDirectory(OutputDir); }

@@ -1,7 +1,7 @@
 # sf-multiplayer/notes — Research & Handoff
 
-Author: Claude (Opus 4.7) session 2026-05-21 ~19:45 ET on Miles' Proxmox VM.
-Source of truth lives on dev laptop **gentoo @ 100.66.167.44** (Tailscale), user **miles**.
+Author: Claude (Opus 4.7) session 2026-05-21 ~19:45 ET on the operator' Proxmox VM.
+Source of truth lives on dev laptop **gentoo @ <tailnet-ip>** (Tailscale), user **<user>**.
 Production server (do NOT touch): `/tmp/sfdsrv.combined`, port **1337**.
 If running a test server, use port **1338** and a separate binary path.
 
@@ -26,7 +26,7 @@ If running a test server, use port **1338** and a separate binary path.
 - `recon/baseline-lines.txt` — empty/tiny marker file.
 - `recon/BepInEx_main.log` — BepInEx log from main Steam install (predates today's test).
 - `recon/BepInEx_mirror.log` — BepInEx log from mirror install (`~/sf-mirror-local`), shows SFNetcodeV2 0.1.0 advertising protocol v26.
-- `recon/prior-memory/` — full prior-session memory dump from `~/.claude/projects/-home-miles-sf-multiplayer/memory/` on the dev laptop. **Treat `phase5_state.md` here as ground truth for what is/isn't deployed.**
+- `recon/prior-memory/` — full prior-session memory dump from `~/.claude/projects/-home-<user>-sf-multiplayer/memory/` on the dev laptop. **Treat `phase5_state.md` here as ground truth for what is/isn't deployed.**
 - `recon/StickFightDedicatedSrv/` — full local copy of the Go server source (read-only mirror; the live source is on the dev laptop).
 - `recon/sf-netcodev2/` — full local copy of the C# patched-DLL plugin source.
 

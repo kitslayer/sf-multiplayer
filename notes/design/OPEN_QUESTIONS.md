@@ -42,7 +42,7 @@ Pulled it; contents are tiny. Looks like a marker/checksum file from some baseli
 
 ### 6. The flag-decision logic on upstream StickFightDev
 
-The `flag=1` condition probably came from the abandoned upstream JoshuaDoes/StickFightDev project. Did upstream guard it differently? Comparing against the original repo would either confirm the bug was carried over or reveal that upstream guarded it correctly and Miles' fork diverged. Worth a quick `git log -p -- lobbies.go` on the dev laptop's clone.
+The `flag=1` condition probably came from the abandoned upstream JoshuaDoes/StickFightDev project. Did upstream guard it differently? Comparing against the original repo would either confirm the bug was carried over or reveal that upstream guarded it correctly and the operator' fork diverged. Worth a quick `git log -p -- lobbies.go` on the dev laptop's clone.
 
 ### 7. v25 client behavior
 

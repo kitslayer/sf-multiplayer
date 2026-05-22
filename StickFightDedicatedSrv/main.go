@@ -26,7 +26,7 @@ var (
 	maxBufferSize = 8192
 	maxLobbies    = 100
 	defaultPublic = false //If true, new lobbies are created public (auto-joinable by anyone)
-	mapsDir       = "/home/miles/sf-multiplayer/maps" //Phase 5 M1: dumped map JSONs (tools/dump-sf-maps.py output)
+	mapsDir       = "./maps" //Phase 5 M1: dumped map JSONs (tools/dump-sf-maps.py output)
 	replayDir     = ""                                //Phase 5 M5: if set, every lobby writes a binary replay log to this dir
 	//                      ; if false (default), new lobbies are private (room code only)
 	//                      so the comp scene can have invite-only matches
@@ -105,7 +105,7 @@ func main() {
 	log.Trace("Loading default levels...")
 	os.Mkdir("maps", 0755)
 
-	//Phase 5 M1: load dumped map JSONs from /home/miles/sf-multiplayer/maps/
+	//Phase 5 M1: load dumped map JSONs from ./maps/
 	//(or whatever -mapsDir points at). Each lobby's SpawnWeaponRandom will
 	//then use real spawn positions from the dumped scenes. Falls back to the
 	//legacy heuristic for scenes without dumped data.

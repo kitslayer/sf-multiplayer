@@ -1,15 +1,15 @@
 # NEXT SESSION HANDOFF — pick up here
 
-Hi future Claude / future Miles. Here's where things stand.
+Hi future Claude / future the operator. Here's where things stand.
 
 ## What you should do, in order
 
 1. **Read `SUMMARY.md`.** One paragraph; the headline recommendation.
 2. **Read `recon/BUG_3SEC_MATCH_CYCLE.md`.** Full evidence trail for the diagnosis. Confidence is very high. Don't re-derive — if you want to spot-check, the verification recipe is below.
 3. **Read `design/FIX_FLAG_LOGIC.md` and `design/FIX_SPAWN_FALLBACK_GUARD.md`.** These are the changes to make.
-4. **Implement on the dev laptop.** Source lives at `~/sf-multiplayer/StickFightDedicatedSrv/` on `gentoo @ 100.66.167.44` (user `miles`, SSH key auth works from this VM).
+4. **Implement on the dev laptop.** Source lives at `~/sf-multiplayer/StickFightDedicatedSrv/` on `gentoo @ <tailnet-ip>` (user `<user>`, SSH key auth works from this VM).
 5. **Build and test on port 1338.** **Do not touch the production server on port 1337.** Build path: `/tmp/sfdsrv.test`. See `design/VERIFICATION_PLAN.md` for the recipe.
-6. **Once verified, ask Miles before swapping into prod.** The cutover replaces `/tmp/sfdsrv.combined` on port 1337 and should be his call.
+6. **Once verified, ask the operator before swapping into prod.** The cutover replaces `/tmp/sfdsrv.combined` on port 1337 and should be his call.
 
 Estimated total time: ~1.5-2 hours, dominated by the live 2-Goldberg-instance test loop.
 
@@ -21,14 +21,14 @@ Estimated total time: ~1.5-2 hours, dominated by the live 2-Goldberg-instance te
 - Decompiled stock SF: `~/sf-multiplayer/refs/decompiled/Assembly-CSharp/` on dev laptop (358 .cs files).
 - Patched DLL source: `~/sf-multiplayer/sf-netcodev2/` on dev laptop; local copy at `recon/sf-netcodev2/` here.
 - Prior session memory: `recon/prior-memory/` here (mirrored from the dev laptop). `phase5_state.md` is the most useful single file.
-- Approved Phase 5 plan: `/home/miles/.claude/plans/iterative-sparking-pascal.md` on the dev laptop.
+- Approved Phase 5 plan: `$HOME/.claude/plans/iterative-sparking-pascal.md` on the dev laptop.
 
 ## Verification quick recipe
 
 To prove the bug exists before fixing (5 minutes):
 
 ```bash
-ssh miles@100.66.167.44
+ssh user@<tailnet-ip>
 cd ~/sf-multiplayer/StickFightDedicatedSrv
 
 # Build a test binary at a separate path
@@ -65,7 +65,7 @@ If the log matches, the diagnosis is confirmed. Implement the fixes from `design
 
 ## What I did NOT do
 
-- I did **not** write or modify any code in `~/sf-multiplayer/`. Everything I produced is `.md` files under `/home/miles/sf-multiplayer/notes/` on **this** VM (the Proxmox VM, not the dev laptop).
+- I did **not** write or modify any code in `~/sf-multiplayer/`. Everything I produced is `.md` files under `$HOME/sf-multiplayer/notes/` on **this** VM (the Proxmox VM, not the dev laptop).
 - I did **not** restart, stop, or touch the production server on port 1337.
 - I did **not** run a test server.
 - I did **not** message anyone, push to git, or update the prior-session memory directory on the dev laptop.

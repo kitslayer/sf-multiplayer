@@ -6,7 +6,7 @@ How the next session should confirm the fix actually fixes the 3-second-match-cy
 
 Goal: prove the diagnosis is correct **before** changing anything.
 
-1. SSH to the dev laptop: `ssh miles@100.66.167.44`.
+1. SSH to the dev laptop: `ssh user@<tailnet-ip>`.
 2. Confirm the production server is still on port 1337 and the binary is `/tmp/sfdsrv.combined`:
    ```
    ss -tlnp | grep 1337
@@ -58,8 +58,8 @@ Apply `FIX_SPAWN_FALLBACK_GUARD.md` (Option B) in the same patch — small, rela
 4. Late-joiner test (regression): with one match running, connect a third Goldberg instance. Expect: third player joins, spawns with `flag=1` (dead), waits for next round, then spawns alive on the next `ChangeMap`.
 5. If both 3 and 4 hold, the fix is good. Promote `/tmp/sfdsrv.test` to `/tmp/sfdsrv.combined`:
    ```
-   # Tell Miles before doing this — production swap should be his call.
-   kill $(pgrep -f sfdsrv.combined)   # OR however Miles stops it
+   # Tell the operator before doing this — production swap should be his call.
+   kill $(pgrep -f sfdsrv.combined)   # OR however the operator stops it
    cp /tmp/sfdsrv.test /tmp/sfdsrv.combined
    /tmp/sfdsrv.combined -address 0.0.0.0:1337 -mapsDir ~/sf-multiplayer/maps -publicLobbies -replayDir /tmp/sf-replays -verbosity 1 &
    curl http://127.0.0.1:1337/status

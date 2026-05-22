@@ -92,9 +92,9 @@ broadcasts mapChange + level data, hydrates the new map into the World.
 ## Where the "do not touch in prod" surface is
 
 - Live binary: `/tmp/sfdsrv.combined` (PID owner of port 1337).
-- Live source: `~/sf-multiplayer/StickFightDedicatedSrv/` on dev laptop @ `100.66.167.44`.
+- Live source: `~/sf-multiplayer/StickFightDedicatedSrv/` on dev laptop @ `<tailnet-ip>`.
 - Live replay output: `/tmp/sf-replays/` (binaries named `ABCDEF-YYYYMMDDTHHMMSS.sfreplay`).
 - Live BepInEx logs on the dev laptop's Steam install: `~/.local/share/Steam/steamapps/common/StickFightTheGame/BepInEx/LogOutput.log` (currently has StickFightGym, not SFNetcodeV2 — see `BepInEx_main.log` here for verbatim).
 - Mirror Steam install (with SFNetcodeV2 deployed): `~/sf-mirror-local/BepInEx/` — see `BepInEx_mirror.log` (advertises v26).
 
-For testing, build a separate binary, run on port 1338, do **not** kill or restart the 1337 process unless Miles explicitly asks.
+For testing, build a separate binary, run on port 1338, do **not** kill or restart the 1337 process unless the operator explicitly asks.
