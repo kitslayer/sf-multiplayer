@@ -40,7 +40,7 @@ namespace SFHeadlessHost
         internal static ManualLogSource Log;
         internal static int BindPort = 1340;     // Game-traffic port (Lidgren)
         internal static int BridgePort = 1341;   // State-bridge port (this plugin)
-        internal static int InitialScene = 6;
+        internal static int InitialScene = 0; // 0 = lobby (boots ControllerHandler + GameManager DontDestroyOnLoad infrastructure)
         internal static bool Verbose;
 
         private void Awake()
