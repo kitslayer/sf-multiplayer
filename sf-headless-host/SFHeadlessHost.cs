@@ -98,8 +98,142 @@ namespace SFHeadlessHost
                 Log.LogError($"Port-patch failed: {e}");
             }
 
+            // Harmony-prefix Controller.Update so that, right before SF's
+            // own Update reads PlayerActions.Movement.X / .Y / button states,
+            // we write our per-slot input buffer values into the relevant
+            // backing fields. This bypasses InControl's tick + Commit
+            // lifecycle (which was overwriting our injection from outside).
+            try
+            {
+                var harmony = new Harmony(PluginGuid + ".controller-input-prefix");
+                var ctrlType = AccessTools.TypeByName("Controller");
+                if ((object)ctrlType != null)
+                {
+                    var updateMethod = AccessTools.Method(ctrlType, "Update");
+                    if ((object)updateMethod != null)
+                    {
+                        var prefix = AccessTools.Method(typeof(Plugin), nameof(InjectInputPrefix));
+                        harmony.Patch(updateMethod, prefix: new HarmonyMethod(prefix));
+                        Log.LogInfo("Patched Controller.Update with input-injection prefix.");
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Log.LogError($"Controller.Update prefix patch failed: {e}");
+            }
+
             _bootStartedAt = Time.realtimeSinceStartup;
             _bootState = BootState.WaitForInit;
+        }
+
+        // Harmony prefix on Controller.Update. Runs once per controller per
+        // frame, immediately before the original method body. We look up
+        // our static input buffer by the controller's playerID, and write
+        // those values directly into the Movement / Aiming / button-action
+        // backing fields. The original Update then reads them and dispatches
+        // movement.MoveRight() / etc with our values.
+        //
+        // Only runs for rigs WE spawned (gated by SlotToRig containing the
+        // controller's GameObject) — never touches real-player rigs.
+        private static int _prefixCallCount;
+        private static int _prefixOurRigCount;
+        internal static bool InjectInputPrefix(object __instance)
+        {
+            try
+            {
+                _prefixCallCount++;
+                if ((object)__instance == null) return true;
+                var ctrlComp = __instance as Component;
+                if ((object)ctrlComp == null) return true;
+                var rig = ctrlComp.gameObject;
+
+                int slot = -1;
+                foreach (var kv in SlotToRig)
+                {
+                    if (kv.Value == rig) { slot = kv.Key; break; }
+                }
+                if (slot < 0)
+                {
+                    if (_prefixCallCount % 600 == 1)
+                        Log.LogDebug($"InjectInputPrefix: rig {rig.name} not ours (prefix call #{_prefixCallCount})");
+                    return true;
+                }
+                _prefixOurRigCount++;
+
+                if (!SlotInputs.TryGetValue(slot, out var input)) return true;
+
+                if (_prefixOurRigCount == 1 || _prefixOurRigCount % 120 == 0)
+                    Log.LogInfo($"InjectInputPrefix: our rig slot={slot} stick=({input.StickX},{input.StickY}) ourCallCount={_prefixOurRigCount}");
+
+                var actionsField = AccessTools.Field(__instance.GetType(), "mPlayerActions");
+                if ((object)actionsField == null) return true;
+                var actions = actionsField.GetValue(__instance);
+                if ((object)actions == null) return true;
+
+                // Stuff our values into Movement.X / .Y backing fields and
+                // Movement.thisValue. Read by the original Update body
+                // immediately after this prefix returns.
+                ForceTwoAxis(actions, "Movement", input.StickX, input.StickY);
+                ForceTwoAxis(actions, "Aiming",   input.AimX,   input.AimY);
+
+                // Button-action backing field updates. PlayerAction is a
+                // OneAxisInputControl with private InputControlState
+                // (lastState, thisState, nextState). The IsPressed/WasPressed
+                // accessors read thisState. We reach into thisState's .State
+                // bool and .Value float to set the press.
+                ForceButton(actions, "Jump",        (input.Buttons & 0x01) != 0);
+                ForceButton(actions, "Jump2",       (input.Buttons & 0x01) != 0);
+                ForceButton(actions, "PunchOrFire", (input.Buttons & 0x02) != 0);
+                ForceButton(actions, "Block",       (input.Buttons & 0x04) != 0);
+                ForceButton(actions, "Throw",       (input.Buttons & 0x08) != 0);
+            }
+            catch (Exception e)
+            {
+                if (Verbose && Log != null) Log.LogDebug($"InjectInputPrefix: {e.Message}");
+            }
+            return true; // always let original Update run
+        }
+
+        // Force the named TwoAxisInputControl's X/Y to (x, y) by writing
+        // its private fields. Run from the Harmony prefix on Controller.Update.
+        private static void ForceTwoAxis(object actions, string fieldName, float x, float y)
+        {
+            var f = AccessTools.Field(actions.GetType(), fieldName);
+            if ((object)f == null) return;
+            var ctrl = f.GetValue(actions);
+            if ((object)ctrl == null) return;
+            var t = ctrl.GetType();
+            var thisValueField = AccessTools.Field(t, "thisValue");
+            if ((object)thisValueField != null) thisValueField.SetValue(ctrl, new Vector2(x, y));
+            var xBacking = AccessTools.Field(t, "<X>k__BackingField");
+            var yBacking = AccessTools.Field(t, "<Y>k__BackingField");
+            if ((object)xBacking != null) xBacking.SetValue(ctrl, x);
+            if ((object)yBacking != null) yBacking.SetValue(ctrl, y);
+        }
+
+        // Force a button's IsPressed / Value via InputControlState struct
+        // backing fields. PlayerAction.thisState is an InputControlState
+        // struct with public bool State and public float Value; reading
+        // IsPressed returns thisState.State.
+        private static void ForceButton(object actions, string fieldName, bool pressed)
+        {
+            var f = AccessTools.Field(actions.GetType(), fieldName);
+            if ((object)f == null) return;
+            var pa = f.GetValue(actions);
+            if ((object)pa == null) return;
+            // OneAxisInputControl has private thisState field.
+            var thisStateField = AccessTools.Field(pa.GetType(), "thisState");
+            if ((object)thisStateField == null) return;
+            // thisState is a struct. We have to box, mutate, write back.
+            object state = thisStateField.GetValue(pa);
+            if ((object)state == null) return;
+            var stateType = state.GetType();
+            var stateField = AccessTools.Field(stateType, "State");
+            var valueField = AccessTools.Field(stateType, "Value");
+            if ((object)stateField != null) stateField.SetValue(state, pressed);
+            if ((object)valueField != null) valueField.SetValue(state, pressed ? 1.0f : 0.0f);
+            thisStateField.SetValue(pa, state);
         }
 
         // Boot is driven by Update() as a state machine because Unity 5.6's
