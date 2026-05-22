@@ -116,6 +116,7 @@ namespace SFHeadlessHost
         private int _heartbeatTicks;
         private float _lastHeartbeat;
 
+        private int _updateErrorTicks;
         private void Update()
         {
             try
@@ -124,8 +125,12 @@ namespace SFHeadlessHost
             }
             catch (Exception e)
             {
-                Log.LogError($"SFHeadlessHost.Update: {e}");
-                _bootState = BootState.Idle; // give up; don't spam errors every frame
+                _updateErrorTicks++;
+                // Don't kill the boot state; just log periodically so we can see what's wrong.
+                if (_updateErrorTicks <= 5 || _updateErrorTicks % 300 == 0)
+                {
+                    Log.LogError($"SFHeadlessHost.Update (count={_updateErrorTicks}): {e}");
+                }
             }
         }
 
@@ -301,6 +306,19 @@ namespace SFHeadlessHost
                 // Just record peer for stream; no-op response.
                 SendBridgeJson(from, "{\"reply\":\"ack\",\"cmd\":\"sub\",\"ok\":true}");
             }
+            else if (cmd == "spawnPlayer")
+            {
+                int slot = ExtractIntField(body, "slot", 0);
+                bool ok = TrySpawnPlayer(slot, out string err);
+                if (ok)
+                {
+                    SendBridgeJson(from, $"{{\"reply\":\"ack\",\"cmd\":\"spawnPlayer\",\"ok\":true,\"slot\":{slot}}}");
+                }
+                else
+                {
+                    SendBridgeJson(from, $"{{\"reply\":\"ack\",\"cmd\":\"spawnPlayer\",\"ok\":false,\"err\":\"{err}\"}}");
+                }
+            }
             else
             {
                 SendBridgeJson(from, $"{{\"reply\":\"ack\",\"cmd\":\"{cmd}\",\"ok\":false,\"err\":\"unknown cmd\"}}");
@@ -372,6 +390,40 @@ namespace SFHeadlessHost
             catch (Exception e)
             {
                 if (Verbose) Log.LogDebug($"EmitStateSnapshot: {e.Message}");
+            }
+        }
+
+        // TrySpawnPlayer instantiates a Player rig in the active scene at the
+        // slot's spawn point, by grabbing ControllerHandler.playerPrefab and
+        // calling Object.Instantiate directly. This sidesteps the InputDevice
+        // pairing path (which requires real input hardware) — the rig will
+        // exist but won't move until we inject inputs.
+        //
+        // Returns (true, "") on success or (false, "reason") on failure.
+        private bool TrySpawnPlayer(int slot, out string err)
+        {
+            err = "";
+            try
+            {
+                var chType = AccessTools.TypeByName("ControllerHandler");
+                if ((object)chType == null) { err = "ControllerHandler type not found"; return false; }
+                var chInst = UnityEngine.Object.FindObjectOfType(chType);
+                if ((object)chInst == null) { err = "ControllerHandler instance not in scene"; return false; }
+                var prefabField = AccessTools.Field(chType, "playerPrefab");
+                if ((object)prefabField == null) { err = "playerPrefab field not found"; return false; }
+                var prefab = prefabField.GetValue(chInst) as GameObject;
+                if ((object)prefab == null) { err = "playerPrefab is null"; return false; }
+                var spawnPos = new Vector3(0f, 8f, 0f); // matches ControllerHandler.CreatePlayer's default
+                var go = UnityEngine.Object.Instantiate(prefab, spawnPos, Quaternion.identity) as GameObject;
+                if ((object)go == null) { err = "Instantiate returned null"; return false; }
+                go.name = $"OracleSpawn_Slot{slot}";
+                Log.LogInfo($"Spawned oracle player rig for slot {slot} at {spawnPos} (GO: {go.name})");
+                return true;
+            }
+            catch (Exception e)
+            {
+                err = e.Message;
+                return false;
             }
         }
 
