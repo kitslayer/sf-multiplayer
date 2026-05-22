@@ -340,6 +340,16 @@ namespace SFHeadlessHost
                     SendBridgeJson(from, $"{{\"reply\":\"ack\",\"cmd\":\"spawnPlayer\",\"ok\":false,\"err\":\"{err}\"}}");
                 }
             }
+            else if (cmd == "forceMove")
+            {
+                // Diagnostic: directly call Movement.MoveRight() for one tick.
+                // If position changes, Controller.Update isn't routing our
+                // inputs to MoveRight. If it doesn't, MoveRight itself is broken.
+                int slot = ExtractIntField(body, "slot", 0);
+                string dir = ExtractStringField(body, "dir") ?? "right";
+                bool ok = TryForceMove(slot, dir, out string err);
+                SendBridgeJson(from, $"{{\"reply\":\"ack\",\"cmd\":\"forceMove\",\"ok\":{(ok?"true":"false")},\"err\":\"{err}\"}}");
+            }
             else if (cmd == "inspect")
             {
                 int slot = ExtractIntField(body, "slot", 0);
@@ -442,6 +452,25 @@ namespace SFHeadlessHost
             }
         }
 
+        // TryForceMove directly calls Movement.MoveRight/MoveLeft on the rig
+        // for diagnostic purposes — bypassing Controller.Update's input read.
+        private bool TryForceMove(int slot, string dir, out string err)
+        {
+            err = "";
+            try
+            {
+                if (!SlotToRig.TryGetValue(slot, out var rig) || (object)rig == null) { err = "no rig"; return false; }
+                var mov = rig.GetComponent(AccessTools.TypeByName("Movement"));
+                if ((object)mov == null) { err = "no Movement"; return false; }
+                string methodName = dir == "left" ? "MoveLeft" : "MoveRight";
+                var m = AccessTools.Method(mov.GetType(), methodName);
+                if ((object)m == null) { err = "no " + methodName; return false; }
+                m.Invoke(mov, null);
+                return true;
+            }
+            catch (Exception e) { err = e.Message; return false; }
+        }
+
         // InspectRig dumps the slot's rig state — useful to diagnose why a
         // freshly-spawned player isn't moving / falling / responding to input.
         private string InspectRig(int slot)
@@ -476,8 +505,33 @@ namespace SFHeadlessHost
                 else sb.Append("; no Controller");
 
                 var mov = rig.GetComponent(AccessTools.TypeByName("Movement"));
-                if ((object)mov != null) sb.Append("; Movement=").Append(((Behaviour)mov).enabled);
+                if ((object)mov != null)
+                {
+                    sb.Append("; Movement=").Append(((Behaviour)mov).enabled);
+                    var fm = AccessTools.Field(mov.GetType(), "forceMultiplier");
+                    if ((object)fm != null) sb.Append(" forceMultiplier=").Append(fm.GetValue(mov));
+                }
                 else sb.Append("; no Movement");
+
+                var fighting = rig.GetComponent(AccessTools.TypeByName("Fighting"));
+                if ((object)fighting != null)
+                {
+                    var mm = AccessTools.Field(fighting.GetType(), "movementMultiplier");
+                    if ((object)mm != null) sb.Append("; movementMultiplier=").Append(mm.GetValue(fighting));
+                }
+
+                var info = rig.GetComponent(AccessTools.TypeByName("CharacterInformation"));
+                if ((object)info != null)
+                {
+                    var sf = AccessTools.Field(info.GetType(), "sinceFallen");
+                    if ((object)sf != null) sb.Append("; sinceFallen=").Append(sf.GetValue(info));
+                    var dead = AccessTools.Field(info.GetType(), "isDead");
+                    if ((object)dead != null) sb.Append(" isDead=").Append(dead.GetValue(info));
+                }
+
+                sb.Append("; Time.timeScale=").Append(Time.timeScale.ToString("0.000"));
+                sb.Append("; Time.deltaTime=").Append(Time.deltaTime.ToString("0.000"));
+                sb.Append("; fixedDelta=").Append(Time.fixedDeltaTime.ToString("0.000"));
 
                 var standing = rig.GetComponent(AccessTools.TypeByName("Standing"));
                 if ((object)standing != null) sb.Append("; Standing=").Append(((Behaviour)standing).enabled);
