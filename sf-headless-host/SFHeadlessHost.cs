@@ -1880,16 +1880,21 @@ namespace SFHeadlessHost
             body[len + 2] = (byte)(sid & 0xFF);
             body[len + 3] = (byte)((sid >> 8) & 0xFF);
             Log.LogInfo($"[SF] Drop: assigning weaponSpawnID={wid} syncableID={sid}");
+            // WeaponDropped is in P2PPackageHandler.CheckMessageType (line 268),
+            // dispatched on channel 0 in the patched-DLL routing.
             foreach (var kv in _sfClients)
             {
                 if (!kv.Value.Initialized) continue;
-                SendSfPacket(kv.Value.Addr, PktWeaponDropped, body, 0uL, 1);
+                SendSfPacket(kv.Value.Addr, PktWeaponDropped, body, 0uL, 0);
             }
         }
 
         // Throw: client sends RequestingWeaponThrow (21) — same shape as drop
         // structurally: SF's OnPlayerThrowWeapon appends weaponSpawnID +
         // syncableObjectSpawnID and broadcasts as WeaponThrown (20).
+        // WeaponThrown is NOT in CheckMessageType; it's dispatched via
+        // NetworkPlayer.ListenForEventPackages on the SENDER's mEventChannel
+        // (= slot*2 + 3). Wrong channel → packet arrives but nothing listens.
         private void HandleThrowRequest(SfClient sender, byte[] data, int off, int len)
         {
             if (len < 1) { Log.LogWarning($"[SF] throw request too short ({len} bytes)"); return; }
@@ -1901,11 +1906,12 @@ namespace SFHeadlessHost
             body[len + 1] = (byte)((wid >> 8) & 0xFF);
             body[len + 2] = (byte)(sid & 0xFF);
             body[len + 3] = (byte)((sid >> 8) & 0xFF);
-            Log.LogInfo($"[SF] Throw: assigning weaponSpawnID={wid} syncableID={sid} (incoming bodyLen={len})");
+            byte throwChannel = (byte)(sender.Slot * 2 + 3);
+            Log.LogInfo($"[SF] Throw: assigning weaponSpawnID={wid} syncableID={sid} (incoming bodyLen={len}, slot={sender.Slot} → channel={throwChannel})");
             foreach (var kv in _sfClients)
             {
                 if (!kv.Value.Initialized) continue;
-                SendSfPacket(kv.Value.Addr, PktWeaponThrown, body, 0uL, 1);
+                SendSfPacket(kv.Value.Addr, PktWeaponThrown, body, 0uL, throwChannel);
             }
         }
 
