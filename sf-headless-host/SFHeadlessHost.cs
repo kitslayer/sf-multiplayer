@@ -661,13 +661,53 @@ namespace SFHeadlessHost
                     }
                 }
                 Log.LogInfo($"[P6.5 NSO] Inventory: {total} NetworkSyncableObjects found in active scene. Static mHasControl={staticHasControl}, {listening}/{total} are listening (mIsListening=true).{sample}");
-                if (total > 0 && !staticHasControl)
+
+                // === Phase 6.7 brute-force fixes ===
+
+                // Fix 1: force-set static mHasControl=true. NSO.Start reads
+                // MultiplayerManager.IsServer (which Mono inlined past our
+                // postfix) and writes the result here. Single static field
+                // across all 91 NSOs — one write fixes everything.
+                if ((object)mHasControlF != null && !staticHasControl)
                 {
-                    Log.LogError("[P6.5 NSO] WARNING: mHasControl=false. NSOs won't broadcast ObjectUpdate. Check that MultiplayerManager.IsServer postfix fired when NSO.Start ran.");
+                    mHasControlF.SetValue(null, true);
+                    Log.LogInfo("[P6.5 NSO] Forced static NetworkSyncableObject.mHasControl = true.");
                 }
+
+                // Fix 2: manually invoke MultiplayerManager.InitSyncedObjects()
+                // to flip mIsListening on every NSO. SF normally calls this
+                // from PrepareMapForTravel coroutine; that path seems to have
+                // bailed early on the oracle.
                 if (total > 0 && listening == 0)
                 {
-                    Log.LogError("[P6.5 NSO] WARNING: 0 NSOs are listening. InitSyncedObjects didn't run (probably IsNetworkMatch read false during PrepareMapForTravel).");
+                    var mmType = AccessTools.TypeByName("MultiplayerManager");
+                    if ((object)mmType != null)
+                    {
+                        var mmInst = UnityEngine.Object.FindObjectOfType(mmType);
+                        if ((object)mmInst != null)
+                        {
+                            var initMethod = AccessTools.Method(mmType, "InitSyncedObjects");
+                            if ((object)initMethod != null)
+                            {
+                                try
+                                {
+                                    initMethod.Invoke(mmInst, null);
+                                    Log.LogInfo("[P6.5 NSO] Forced MultiplayerManager.InitSyncedObjects() invocation.");
+                                    // Re-count listening NSOs after init.
+                                    int relisten = 0;
+                                    foreach (var o in nsos)
+                                    {
+                                        if ((object)mIsListeningF != null && (bool)mIsListeningF.GetValue(o)) relisten++;
+                                    }
+                                    Log.LogInfo($"[P6.5 NSO] After InitSyncedObjects: {relisten}/{total} listening.");
+                                }
+                                catch (Exception e)
+                                {
+                                    Log.LogError($"[P6.5 NSO] InitSyncedObjects invocation threw: {e.Message}");
+                                }
+                            }
+                        }
+                    }
                 }
             }
             catch (Exception e)
@@ -1104,6 +1144,19 @@ namespace SFHeadlessHost
                         _nsoInventoryAt = -1f;
                         RunNetworkSyncableObjectInventory();
                     }
+                    // Round advance: kill detected → fire MapChange after delay.
+                    if (_pendingRoundAdvanceAt > 0f && Time.realtimeSinceStartup >= _pendingRoundAdvanceAt)
+                    {
+                        _pendingRoundAdvanceAt = -1f;
+                        AdvanceRound();
+                    }
+                    // After MapChange settles, send StartMatch to kick the next round's countdown.
+                    if (_pendingStartMatchAt > 0f && Time.realtimeSinceStartup >= _pendingStartMatchAt)
+                    {
+                        _pendingStartMatchAt = -1f;
+                        BroadcastStartMatch();
+                        Log.LogInfo("[SF] Round advance: StartMatch sent.");
+                    }
                     // Push the latest per-slot inputs into each spawned rig's
                     // CharacterActions. Done every frame even if no new input
                     // arrived — analog sticks need their last value held so
@@ -1403,15 +1456,24 @@ namespace SFHeadlessHost
                     HandlePickupRequest(cli, data, bodyOffset, bodyLen);
                     break;
 
-                // Damage / force / falloff / ricochet are pure relays in SF's
-                // host code — they just re-broadcast to all-other clients.
-                // Forward them to all v25 clients except the sender.
+                // SF's host code broadcasts PlayerTookDamage with ignoreUserID=0
+                // — INCLUDING the sender. That return-trip is the killing-blow
+                // signal: client.SyncClientHealth applies the damage, sees
+                // damage==666.666, sets health=0, calls Die(). Without the echo
+                // back to the sender, void/lava damage never kills them.
+                // PlayerWonWithRicochet similarly broadcasts to all.
                 case PktPlayerTookDamage:
+                case PktPlayerWonWithRicochet:
+                    RelayBodyToAll(msgType, data, bodyOffset, bodyLen, channel);
+                    break;
+
+                // The rest are "relay to all OTHER clients" — SF's host passes
+                // ignoreUserID = sender so they don't get duplicate force
+                // events / fall-outs.
                 case PktPlayerForceAdded:
                 case PktPlayerForceAddedAndBlock:
                 case PktPlayerLavaForceAdded:
                 case PktPlayerFallOut:
-                case PktPlayerWonWithRicochet:
                 case PktObjectDestructionCollision:
                 case PktObjectSimpleDestruction:
                 case PktObjectUpdate:
@@ -1427,6 +1489,14 @@ namespace SFHeadlessHost
                     HandleDropRequest(cli, data, bodyOffset, bodyLen);
                     break;
 
+                // Weapon throw: client sends RequestingWeaponThrow (21) with
+                // [bool justDrop][byte weaponIdx][ShortVector2 pos][ByteVector2 rot]
+                // [optional ByteVector2 aim]. Host appends weaponSpawnID +
+                // syncableObjectSpawnID and broadcasts as WeaponThrown (20).
+                case PktRequestingWeaponThrow:
+                    HandleThrowRequest(cli, data, bodyOffset, bodyLen);
+                    break;
+
                 default:
                     if (Verbose) Log.LogDebug($"[SF] unhandled type={msgType} from={from}");
                     break;
@@ -1434,7 +1504,7 @@ namespace SFHeadlessHost
         }
 
         // Re-broadcast body to all v25 clients except the sender. Used for
-        // pure-relay gameplay msgTypes (damage, force, falloff, etc).
+        // pure-relay gameplay msgTypes (force, falloff, etc).
         private void RelayBodyToOthers(SfClient sender, byte msgType, byte[] data, int off, int len, byte channel)
         {
             if (len <= 0) return;
@@ -1451,6 +1521,73 @@ namespace SFHeadlessHost
             }
             if (Verbose && sent > 0)
                 Log.LogDebug($"[SF] relay msgType={msgType} bodyLen={len} → {sent} other client(s)");
+        }
+
+        // Re-broadcast body to ALL v25 clients including sender. Used for
+        // msgTypes that the sender's own client expects to receive back
+        // (PlayerTookDamage carries the killing-blow signal; without the
+        // echo, the sender never dies).
+        private void RelayBodyToAll(byte msgType, byte[] data, int off, int len, byte channel)
+        {
+            if (len <= 0) return;
+            byte[] body = new byte[len];
+            Buffer.BlockCopy(data, off, body, 0, len);
+            int sent = 0;
+            foreach (var kv in _sfClients)
+            {
+                var cli = kv.Value;
+                if (!cli.Initialized) continue;
+                SendSfPacket(cli.Addr, msgType, body, 0uL, channel);
+                sent++;
+            }
+            if (sent > 0)
+            {
+                // Sample-log so we can see this firing without flooding.
+                if (_relayAllCount++ < 5 || _relayAllCount % 30 == 0)
+                    Log.LogInfo($"[SF] relay-to-all msgType={msgType} bodyLen={len} → {sent} client(s) (#{_relayAllCount})");
+            }
+
+            // Detect killing-blow for round-advance. PlayerTookDamage body
+            // format (from NetworkPlayer.UnitWasDamaged): byte attacker, float
+            // damage, bool playParticles, [particle dir bytes], byte dmgType.
+            // damage == 666.666f signals "this hit kills."
+            if (msgType == PktPlayerTookDamage && len >= 5)
+            {
+                float dmg = BitConverter.ToSingle(body, 1);
+                if (System.Math.Abs(dmg - 666.666f) < 0.01f && _pendingRoundAdvanceAt < 0f)
+                {
+                    _pendingRoundAdvanceAt = Time.realtimeSinceStartup + 2.5f;
+                    Log.LogInfo($"[SF] Killing-blow detected (damage={dmg}); scheduling round advance in 2.5s.");
+                }
+            }
+        }
+        private int _relayAllCount;
+        private float _pendingRoundAdvanceAt = -1f;
+        private float _pendingStartMatchAt = -1f;
+        private int _roundCounter;
+
+        // Cycle through a small set of Landfall maps when the round advances.
+        // Deliberately conservative — these are stable simple maps.
+        private static readonly int[] _mapCycle = new[] { 6, 8, 10, 12, 14, 16 };
+
+        private void AdvanceRound()
+        {
+            _roundCounter++;
+            int nextScene = _mapCycle[_roundCounter % _mapCycle.Length];
+            _currentSceneIndex = nextScene;
+            Log.LogInfo($"[SF] Round advance #{_roundCounter}: MapChange → scene {nextScene}");
+            // ChangeMap body: [byte winnerIndex=255 (no winner)][byte mapType=0 (Landfall)][int32 sceneIndex LE]
+            byte[] body = new byte[1 + 1 + 4];
+            body[0] = 255;
+            body[1] = 0;
+            WriteU32LE(body, 2, (uint)nextScene);
+            BroadcastSfPacket(PktMapChange, body, 0, 0);
+            // SF's host normally follows MapChange with StartMatch after
+            // clients re-ready up. Schedule it ~3s later to give the client
+            // time to load the scene + respawn.
+            _pendingStartMatchAt = Time.realtimeSinceStartup + 3.0f;
+            // Reset Spawned flags so next ClientRequestingToSpawn is honored.
+            foreach (var kv in _sfClients) kv.Value.Spawned = false;
         }
 
         // Pickup: re-broadcast incoming ClientRequestingWeaponPickUp body as
@@ -1493,6 +1630,28 @@ namespace SFHeadlessHost
             {
                 if (!kv.Value.Initialized) continue;
                 SendSfPacket(kv.Value.Addr, PktWeaponDropped, body, 0uL, 1);
+            }
+        }
+
+        // Throw: client sends RequestingWeaponThrow (21) — same shape as drop
+        // structurally: SF's OnPlayerThrowWeapon appends weaponSpawnID +
+        // syncableObjectSpawnID and broadcasts as WeaponThrown (20).
+        private void HandleThrowRequest(SfClient sender, byte[] data, int off, int len)
+        {
+            if (len < 1) { Log.LogWarning($"[SF] throw request too short ({len} bytes)"); return; }
+            byte[] body = new byte[len + 4];
+            Buffer.BlockCopy(data, off, body, 0, len);
+            ushort wid = _droppedWeaponNextId++;
+            ushort sid = _droppedSyncableNextId++;
+            body[len + 0] = (byte)(wid & 0xFF);
+            body[len + 1] = (byte)((wid >> 8) & 0xFF);
+            body[len + 2] = (byte)(sid & 0xFF);
+            body[len + 3] = (byte)((sid >> 8) & 0xFF);
+            Log.LogInfo($"[SF] Throw: assigning weaponSpawnID={wid} syncableID={sid} (incoming bodyLen={len})");
+            foreach (var kv in _sfClients)
+            {
+                if (!kv.Value.Initialized) continue;
+                SendSfPacket(kv.Value.Addr, PktWeaponThrown, body, 0uL, 1);
             }
         }
 
