@@ -877,55 +877,90 @@ namespace SFClientRecon
                 foreach (var entry in snap)
                 {
                     bool isLocal = entry.Slot == localSlot;
-                    // Phase 6.11 default: only correct LOCAL player. Other
-                    // players come from forwarded PlayerUpdate (msgType 10).
-                    // Opt-in via SFCLIENTRECON_SMOOTH_REMOTE=1 to also apply
-                    // server positions for remote slots — fully server-
-                    // authoritative view, more consistent across clients, but
-                    // depends on server having accurate positions (gated until
-                    // server-side simulation is rock solid).
-                    if (!isLocal && !smoothRemote) continue;
                     var target = new Vector3(entry.X, entry.Y, entry.Z);
-                    _playerTargets[entry.Slot] = target;
-                    if (isLocal) _serverLastAckedSeq = entry.LastInputSeq;
-                    // Phase 6.12.2 — divergence detection + hard snap.
-                    // Look up local-predicted position at the same seq the
-                    // server is reporting. If drift > tolerance, hard-snap
-                    // the rigidbody to server position (overriding the
-                    // gentle SmoothTowardTargets lerp). Full input-replay
-                    // rollback (re-running Movement.cs from snapped seq to
-                    // current) is next; this is the corrective floor.
-                    if (isLocal && _historyLookup.TryGetValue(entry.LastInputSeq, out var predictedAtSeq))
-                    {
-                        float drift = Vector3.Distance(predictedAtSeq, target);
-                        const float HardSnapThreshold = 2.5f;  // hard-snap above 2.5u
-                        const float SoftSnapThreshold = 1.0f;  // log + smooth above 1.0u
-                        if (drift > SoftSnapThreshold)
-                        {
-                            _divergenceLogged++;
-                            if (_divergenceLogged == 1 || _divergenceLogged % 30 == 0)
-                                Log.LogWarning($"[P6.12.2 divergence] seq={entry.LastInputSeq} predicted={predictedAtSeq} server={target} drift={drift:0.00}u — total events {_divergenceLogged}");
 
-                            if (drift > HardSnapThreshold)
+                    // Phase 6.12.2 v1.0 — SHIFT correction for the local
+                    // player. Instead of "lerp / snap to the stale server
+                    // position" (which pulls the predicting player visually
+                    // BACKWARD by ~RTT-equivalent distance and feels awful),
+                    // compute the drift between server's view at sequence N
+                    // and local's predicted position at sequence N, then
+                    // apply that drift as an OFFSET to the player's CURRENT
+                    // position. Mathematically: new_pos = current_local +
+                    // (server_at_N - predicted_at_N). This is the canonical
+                    // CSGO / Valorant / Overwatch correction — the server's
+                    // adjustment is incorporated WITHOUT the visual snap-back.
+                    // Below SoftDriftThresholdSq → ignore (natural RTT jitter).
+                    if (isLocal)
+                    {
+                        _serverLastAckedSeq = entry.LastInputSeq;
+                        if (_historyLookup.TryGetValue(entry.LastInputSeq, out var predictedAtSeq))
+                        {
+                            Vector3 driftVec = target - predictedAtSeq;
+                            float driftSq = driftVec.sqrMagnitude;
+                            const float SoftDriftThresholdSq = 0.3f * 0.3f; // ignore below 0.3u
+                            const float HardDriftThresholdSq = 2.5f * 2.5f; // log loud above 2.5u
+                            if (driftSq > SoftDriftThresholdSq)
                             {
-                                // Hard snap — find local player's rigidbody and slam it.
-                                // Bypasses the lerp so correction is instant when drift
-                                // is bad (player in wall, fell through platform, etc.).
-                                // npType / nps are already in scope from the enclosing
-                                // ApplySnapshot lookup.
                                 foreach (var np2 in nps)
                                 {
                                     var pidObj2 = pidField.GetValue(np2);
                                     if (!(pidObj2 is int pi2) || pi2 != localSlot) continue;
                                     var npComp2 = np2 as Component;
                                     var rb2 = npComp2.GetComponent<Rigidbody>() ?? npComp2.GetComponentInChildren<Rigidbody>();
-                                    if ((object)rb2 != null) { rb2.position = target; rb2.velocity = Vector3.zero; }
-                                    else npComp2.transform.position = target;
-                                    Log.LogWarning($"[P6.12.2 HARD SNAP] drift {drift:0.00}u > {HardSnapThreshold}u — snapped to {target}");
+                                    if ((object)rb2 != null)
+                                    {
+                                        Vector3 newPos = rb2.position + driftVec;
+                                        rb2.position = newPos;
+                                        // Velocity is preserved — local
+                                        // prediction continues unchanged.
+                                    }
+                                    else
+                                    {
+                                        npComp2.transform.position += driftVec;
+                                    }
+                                    // Re-stamp our history with the corrected
+                                    // position so subsequent comparisons are
+                                    // against the post-correction baseline,
+                                    // not the pre-correction prediction.
+                                    _historyLookup[entry.LastInputSeq] = target;
                                     break;
+                                }
+                                _divergenceLogged++;
+                                if (driftSq > HardDriftThresholdSq
+                                    && (_divergenceLogged == 1 || _divergenceLogged % 15 == 0))
+                                {
+                                    Log.LogWarning($"[P6.12.2 v1.0 SHIFT] seq={entry.LastInputSeq} drift={Mathf.Sqrt(driftSq):0.00}u — applied as offset, current local pos shifted");
+                                }
+                                else if (_divergenceLogged == 1 || _divergenceLogged % 60 == 0)
+                                {
+                                    Log.LogInfo($"[P6.12.2 v1.0 shift] seq={entry.LastInputSeq} drift={Mathf.Sqrt(driftSq):0.00}u corrected #{_divergenceLogged}");
                                 }
                             }
                         }
+                        else
+                        {
+                            // No history for this seq (just connected, or
+                            // buffer wrapped). Fall back to absolute snap
+                            // so the player can't be permanently lost.
+                            foreach (var np2 in nps)
+                            {
+                                var pidObj2 = pidField.GetValue(np2);
+                                if (!(pidObj2 is int pi2) || pi2 != localSlot) continue;
+                                var npComp2 = np2 as Component;
+                                var rb2 = npComp2.GetComponent<Rigidbody>() ?? npComp2.GetComponentInChildren<Rigidbody>();
+                                if ((object)rb2 != null) { rb2.position = target; rb2.velocity = Vector3.zero; }
+                                else npComp2.transform.position = target;
+                                break;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // REMOTE player. Opt-in smoothing via env var; default
+                        // is to let stock forwarded PlayerUpdate (msgType 10)
+                        // drive remote positions.
+                        if (smoothRemote) _playerTargets[entry.Slot] = target;
                     }
                 }
                 _snapsApplied++;
