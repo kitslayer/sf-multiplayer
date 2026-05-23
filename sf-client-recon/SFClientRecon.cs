@@ -57,6 +57,9 @@ namespace SFClientRecon
         private uint _inputSeq;
         private float _lastInputSendAt;
         private const float InputSendInterval = 1.0f / 60.0f;  // 60Hz cap
+        // Phase 6.12.2 prep — latest server-acked input seq from snapshots.
+        // Stored but not yet acted on (full replay rollback comes later).
+        private uint _serverLastAckedSeq;
 
         // Pending snapshot (set on RX thread, applied on main thread).
         private readonly object _snapLock = new object();
@@ -74,6 +77,7 @@ namespace SFClientRecon
         {
             public int Slot;
             public float X, Y, Z;
+            public uint LastInputSeq;  // v26.2 — server's last-acked input seq for this slot
         }
 
         private struct NsoSnapEntry
@@ -180,7 +184,7 @@ namespace SFClientRecon
             byte playerCount = pkt[bodyOff + 4];
             int o = bodyOff + 5;
             var list = new List<SnapshotEntry>(playerCount);
-            int playerEntrySize = 1 + 12;
+            int playerEntrySize = 1 + 12 + 4;  // slot + 3 floats + u32 lastInputSeq (v26.2)
             for (int i = 0; i < playerCount; i++)
             {
                 if (o + playerEntrySize > bodyOff + bodyLen) break;
@@ -190,6 +194,7 @@ namespace SFClientRecon
                     X = BitConverter.ToSingle(pkt, o + 1),
                     Y = BitConverter.ToSingle(pkt, o + 5),
                     Z = BitConverter.ToSingle(pkt, o + 9),
+                    LastInputSeq = (uint)(pkt[o + 13] | (pkt[o + 14] << 8) | (pkt[o + 15] << 16) | (pkt[o + 16] << 24)),
                 });
                 o += playerEntrySize;
             }
@@ -466,6 +471,10 @@ namespace SFClientRecon
                     if (entry.Slot != localSlot) continue;
                     // Phase 6.11.2 — record target; SmoothTowardTargets lerps each frame.
                     _playerTargets[entry.Slot] = new Vector3(entry.X, entry.Y, entry.Z);
+                    // Phase 6.12.2 (in-progress) — record the server's last-acked
+                    // input seq so the replay-rollback loop knows which prediction
+                    // tick to compare against.
+                    _serverLastAckedSeq = entry.LastInputSeq;
                 }
                 _snapsApplied++;
                 if (_snapsApplied == 1 || _snapsApplied % 90 == 0)

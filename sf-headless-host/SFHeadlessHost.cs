@@ -2767,13 +2767,19 @@ namespace SFHeadlessHost
 
                 if (n == 0 && nsoEntries.Count == 0) return;
 
-                // Body layout v26.1:
+                // Body layout v26.2:
                 //   u32 serverTick
                 //   u8  playerCount
-                //   players: [u8 slot, f32 x, f32 y, f32 z] × n              (13/each)
+                //   players: [u8 slot, f32 x, f32 y, f32 z, u32 lastInputSeq] × n  (17/each)
                 //   u16 nsoCount
-                //   NSOs:    [u16 id, f32 x, f32 y, f32 z, f32 rotZ] × m     (18/each)
-                int bodyLen = 4 + 1 + n * 13 + 2 + nsoEntries.Count * 18;
+                //   NSOs:    [u16 id, f32 x, f32 y, f32 z, f32 rotZ]         × m  (18/each)
+                //
+                // lastInputSeq is the latest PktPlayerInput sequence the server
+                // has consumed for this slot — foundation for Phase 6.12.2 input
+                // replay rollback (client compares local-predicted position at
+                // sequence N to server's reported position at N; if divergent,
+                // snap + replay buffered inputs from N to current).
+                int bodyLen = 4 + 1 + n * 17 + 2 + nsoEntries.Count * 18;
                 byte[] body = new byte[bodyLen];
                 int off = 0;
                 WriteU32LE(body, off, _serverTick); off += 4;
@@ -2787,6 +2793,10 @@ namespace SFHeadlessHost
                     WriteF32LE(body, off, p.x); off += 4;
                     WriteF32LE(body, off, p.y); off += 4;
                     WriteF32LE(body, off, p.z); off += 4;
+                    // Look up the SfClient owning this slot for its LastInputSeq.
+                    uint lastSeq = 0;
+                    foreach (var ckv in _sfClients) { if (ckv.Value.Slot == kv.Key) { lastSeq = ckv.Value.LastInputSeq; break; } }
+                    WriteU32LE(body, off, lastSeq); off += 4;
                 }
                 WriteU16LE(body, off, (ushort)nsoEntries.Count); off += 2;
                 foreach (var e in nsoEntries)
