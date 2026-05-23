@@ -23,8 +23,15 @@ if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
   # python → steam.exe → StickFight.exe) and kill the tree.
   echo "Stopping lobby '$CODE' (pid $PID, port $PORT)..."
   pkill -P "$PID" 2>/dev/null || true
-  # Also nuke any orphaned StickFight.exe whose -port matches this lobby.
-  pkill -f "StickFight.exe.*-port ${PORT}" 2>/dev/null || true
+  # Match the StickFight.exe specifically by its bridge-port logfile,
+  # which is unique per lobby (legacy variable BRIDGEPORT is captured at
+  # launch in the registry as 'bridge'). NEVER pkill by "-port $PORT"
+  # because player SF instances are launched with the same -port and we
+  # don't want to murder them.
+  BRIDGE=$(grep '^bridge=' "$CONF" | cut -d= -f2)
+  if [ -n "$BRIDGE" ]; then
+    pkill -f "StickFight.exe.*-logFile.*sf-oracle-unity-${BRIDGE}\.log" 2>/dev/null || true
+  fi
   kill "$PID" 2>/dev/null || true
   # Wait briefly for Proton to tear down.
   for i in 1 2 3 4 5; do
