@@ -43,6 +43,15 @@ namespace SFHeadlessHost
         internal static int BridgePort = 1341;   // State-bridge port (this plugin)
         internal static int InitialScene = 0; // 0 = lobby (boots ControllerHandler + GameManager DontDestroyOnLoad infrastructure)
         internal static bool Verbose;
+        // Round pacing. Stock SF fires ChangeMap instantly when last player dies
+        // (KillPlayer in GameManager.cs). The 0.5s default here gives clients a
+        // beat to render the death animation before the map-swoosh starts.
+        // SF_ROUND_END_DELAY env var override.
+        internal static float RoundEndDelaySec = 0.5f;
+        // Time between MapChange broadcast and StartMatch broadcast — must be
+        // long enough for clients to load the scene and respawn. Stock SF's
+        // k_MAX_SECONDS_UNTIL_AUTO_START is 3s. SF_NEXT_MATCH_DELAY env override.
+        internal static float NextMatchDelaySec = 2.0f;
 
         private void Awake()
         {
@@ -2344,8 +2353,8 @@ namespace SFHeadlessHost
                 float dmg = BitConverter.ToSingle(body, 1);
                 if (System.Math.Abs(dmg - 666.666f) < 0.01f && _pendingRoundAdvanceAt < 0f)
                 {
-                    _pendingRoundAdvanceAt = Time.realtimeSinceStartup + 2.5f;
-                    Log.LogInfo($"[SF] Killing-blow detected (damage={dmg}); scheduling round advance in 2.5s.");
+                    _pendingRoundAdvanceAt = Time.realtimeSinceStartup + RoundEndDelaySec;
+                    Log.LogInfo($"[SF] Killing-blow detected (damage={dmg}); scheduling round advance in {RoundEndDelaySec:0.0}s.");
                 }
             }
         }
@@ -2391,9 +2400,10 @@ namespace SFHeadlessHost
             WriteU32LE(body, 2, (uint)nextScene);
             BroadcastSfPacket(PktMapChange, body, 0, 0);
             // SF's host normally follows MapChange with StartMatch after
-            // clients re-ready up. Schedule it ~3s later to give the client
-            // time to load the scene + respawn.
-            _pendingStartMatchAt = Time.realtimeSinceStartup + 3.0f;
+            // clients re-ready up. Stock SF uses k_MAX_SECONDS_UNTIL_AUTO_START=3s
+            // but the client's map-load animation eats most of that. Defaulting
+            // to 2s; configurable via SF_NEXT_MATCH_DELAY env var.
+            _pendingStartMatchAt = Time.realtimeSinceStartup + NextMatchDelaySec;
             // Reset Spawned flags so next ClientRequestingToSpawn is honored.
             foreach (var kv in _sfClients) kv.Value.Spawned = false;
         }
@@ -4455,7 +4465,14 @@ namespace SFHeadlessHost
             if (s >= 0) InitialScene = s;
 
             Verbose = Environment.GetEnvironmentVariable("SFHEADLESS_DEBUG") == "1";
-            Log.LogInfo($"Config: BindPort={BindPort} BridgePort={BridgePort} InitialScene={InitialScene} Verbose={Verbose}");
+
+            float fv;
+            if (float.TryParse(Environment.GetEnvironmentVariable("SF_ROUND_END_DELAY"), out fv) && fv >= 0f && fv <= 10f)
+                RoundEndDelaySec = fv;
+            if (float.TryParse(Environment.GetEnvironmentVariable("SF_NEXT_MATCH_DELAY"), out fv) && fv >= 0f && fv <= 10f)
+                NextMatchDelaySec = fv;
+
+            Log.LogInfo($"Config: BindPort={BindPort} BridgePort={BridgePort} InitialScene={InitialScene} Verbose={Verbose} RoundEndDelay={RoundEndDelaySec:0.0}s NextMatchDelay={NextMatchDelaySec:0.0}s");
         }
 
         // Harmony postfix on NetworkSocketServer ctor. The stock ctor sets
