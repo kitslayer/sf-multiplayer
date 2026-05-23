@@ -2,6 +2,20 @@
 
 **60+ commits** landed in one day. Running tally so visitors can scan the deltas without scrolling git log. See [`notes/ARCHITECTURE.md`](notes/ARCHITECTURE.md) for the system overview, [`notes/PROTOCOL.md`](notes/PROTOCOL.md) for the wire-format spec, [`notes/BUGS_BACKLOG.md`](notes/BUGS_BACKLOG.md) for the bug incident log, [`notes/AUDIT_2026-05-23.md`](notes/AUDIT_2026-05-23.md) for the end-of-session deep audit.
 
+## Phase 6.19 — five P0s + one P1 + projectile hit reg shipped (2026-05-23 night)
+
+Implemented and pushed in three commits (`c6e9797`, `7b5a037`, `8fa0f20`):
+
+- **P0-11** — Y-aware destruction filter (replaces the coarse drop-all). Server now forwards legitimate destructions while still dropping killbox-fall events. `NsoIsKillboxFallen(idx)` helper looks up the NSO's current Y by index.
+- **P0-12** — Vector2 key quantization for `MapInfoSync` dictionary. Both server and client install Harmony prefixes on `AddMapDataObject` + `OnMapDataRecieved` that round to 0.01 precision. Fixes silent platform-lookup failures from float ULP drift.
+- **P0-13** — Full-keyframe snapshot to each new v26 endpoint on first PlayerInput. `CollectAllNsoSnapshot` mirrors the active variant but skips position-delta filtering (Y > -30 still applies). Late-joining clients see at-rest NSO positions immediately.
+- **P0-14** — v26.5 wire format adds a `MapInfoSyncable` section to `WorldStateSnapshot`. Entries identified by `m_StartPos` Vector2 (stable cross-process; quantized by P0-12). Client kinematic-flips the platform/pillar on first sight so local AddForce/spring integrator stops fighting the snapshot.
+- **P0-15** — Harmony prefix on `DestructiblePiece.OnCollisionEnter` skips when colliding body was lerped >0.3u in the last 150ms. Initial implementation marked every NSO every frame (over-suppression); tightened to only mark large-jump snapshot deltas.
+- **P1-8** — `ValidateDamagePacket` rejects attacker-slot spoofing (`attackerIdx != sender.Slot`).
+- **Phase 6.17 v0.2** — server-side projectile hit registration. Swept sphere-sphere check per projectile per tick (radius 1.2u). On hit, server emits authoritative `PktPlayerTookDamage` (25 damage, dmgType 0) on victim's mEventChannel. Projectile removed from registry. No occlusion / no particles yet (v0.3).
+
+Plus a TOC added to the top of both `SFHeadlessHost.cs` and `SFClientRecon.cs` so newcomers can navigate by feature.
+
 ## End-of-session audit (2026-05-23 evening)
 
 Three open issues identified during a research-only pass — see [`notes/AUDIT_2026-05-23.md`](notes/AUDIT_2026-05-23.md) for full evidence:

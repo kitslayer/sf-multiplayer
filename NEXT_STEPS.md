@@ -12,16 +12,22 @@ Live server end-to-end. Steam Stick Fight (Windows or Linux/Proton) connects to 
 - Death + kill propagation + round advance, full 123-map rotation
 - Box pushing — via the Phase 6.7 *mirror rig* (a kinematic player rig per client that the oracle teleports to the client's reported position so it can collide with `NetworkSyncableObject`s)
 
-**Known broken / partial / untested-live (as of 2026-05-23 evening):**
+**Known broken / partial / untested-live (as of 2026-05-23 night, post-Phase 6.19):**
 - Hard-snap on big divergence is implemented but never live-tested — could be too aggressive (snap thrashing) or too lenient
-- Server-side projectile sim is observability-only (v0.1) — clients still run their own raycasts for visuals; server-side hit registration (v0.2) is the next step
-- Per-map weapon allow-lists still ignored beyond what SF natively does — every map gets random-from-global, plus pre-placed weapons from `CheckForGroundWeapons`
+- Per-map weapon allow-lists still ignored beyond what SF natively does — every map gets random-from-global, plus pre-placed weapons from `CheckForGroundWeapons` (Phase 6.8 pending)
 - Workshop maps not supported at runtime (just the 123 pre-dumped Landfall scenes)
-- **P0-11**: destruction race from the hybrid dynamic-NSO patch (server-originated destruction filter is too coarse). See [AUDIT_2026-05-23.md](notes/AUDIT_2026-05-23.md).
-- **P0-12**: `GhostPlatform` Vector2-key dictionary precision can silently drop platform state on clients.
-- **P0-13**: late-joining clients see stale positions for at-rest NSOs until something pushes them again.
-- **P0-14**: `MoveAlongPathUsingForce` and `PillarHandler` drift across clients because every client integrates platform physics locally and only abstract state is sync'd. **High severity** on maps with moving platforms.
-- **P0-15**: ice randomly breaks during snapshot-lerp reconciliation because swept lerp motion can fire `OnCollisionEnter` with high `relativeVelocity` → crosses force threshold → broadcasts a destruction.
+- Full input-replay rollback (Phase 6.12.2 v1.0) — currently only hard-snap on divergence; replay loop needs SF Movement state restore
+- Projectile particles in server-side hit damage (v0.3) — current v0.2 hit reg emits damage but skips particle direction bytes for visual feedback
+- Server-side projectile occlusion (v0.3) — bullets currently pass through walls
+
+**Shipped this session (Phase 6.19, commits `c6e9797`, `7b5a037`, `8fa0f20`):**
+- ✅ P0-11 — Y-aware destruction filter (drops killbox-fall destructions, forwards legit ones)
+- ✅ P0-12 — `MapInfoSync` Vector2 key quantization to 0.01 precision
+- ✅ P0-13 — full-keyframe snapshot to each new v26 endpoint
+- ✅ P0-14 — v26.5 `WorldStateSnapshot` carries authoritative `MapInfoSyncableBase` positions; clients kinematic-flip on first sight
+- ✅ P0-15 — `DestructiblePiece.OnCollisionEnter` guard suppresses spurious post-large-lerp destructions
+- ✅ P1-8 — `ValidateDamagePacket` rejects attacker-slot spoofing
+- ✅ Phase 6.17 v0.2 — server-side projectile hit registration (swept sphere check, server-authoritative damage emit)
 
 ## End-state goal — CONFIRMED 2026-05-23
 

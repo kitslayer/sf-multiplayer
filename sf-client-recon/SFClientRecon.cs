@@ -11,11 +11,35 @@ using UnityEngine;
 
 namespace SFClientRecon
 {
-    // Phase 6.11 — client-side reconciliation.
+    // Phase 6.11+ — client-side reconciliation companion plugin.
     //
-    // Listens on UDP port 1339 for v26 WorldStateSnapshot packets (msgType 39)
-    // sent by the oracle (sf-headless-host), and snap-corrects the local
-    // NetworkPlayer's position to the server's authoritative view.
+    // Deployed to each PLAYER's SF install. Listens on UDP 1339 (default;
+    // env SFCLIENTRECON_PORT) for v26 snapshots from the oracle, applies
+    // them, sends inputs back at 60Hz.
+    //
+    // ============================================================
+    //                    TABLE OF CONTENTS
+    // ============================================================
+    //  Anchor (search this line)                          ~Line
+    //  ─────────────────────────────────────────────────  ─────
+    //  Awake — bootstrap, harmony patches, UDP bind       ~ 100
+    //  RxLoop — UDP receive thread                        ~ 240
+    //  HandlePacket — snapshot parser (v26.5)             ~ 250
+    //  Update — apply pending snapshots + send inputs     ~ 350
+    //  SmoothTowardTargets — per-frame exponential lerp   ~ 395
+    //  ApplyNsoSnapshot (P0-15 large-lerp flag here)      ~ 490
+    //  ApplyMapSyncSnapshot (P0-14)                       ~ 560
+    //  SendPlayerInputPacket — 60Hz outbound              ~ 630
+    //  DestructibleCollisionPrefix (P0-15 guard)          ~ 680
+    //  WeaponShootPostfix — emits PktClientFireWeapon     ~ 740
+    //  Input ring buffer + divergence-snap (Phase 6.12.2) ~ 790
+    // ============================================================
+    //
+    // Wire protocol: see ../notes/PROTOCOL.md
+    // Foundation for client-prediction + server-reconciliation:
+    //   - Snapshot smoothing (Phase 6.11.2) ✓ shipped
+    //   - Hard-snap on divergence > 2.5u (Phase 6.12.2 v0.2) ✓ shipped
+    //   - Full input-replay rollback (Phase 6.12.2 v1.0) — pending
     //
     // This is the foundation for client-prediction + server-reconciliation:
     //   - For now, snap (no smoothing, no replay).

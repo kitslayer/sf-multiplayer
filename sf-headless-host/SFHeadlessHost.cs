@@ -12,24 +12,65 @@ using UnityEngine.SceneManagement;
 
 namespace SFHeadlessHost
 {
-    // SFHeadlessHost — drives Stick Fight headlessly so the Go server can use
-    // it as a physics oracle for one lobby.
+    // SFHeadlessHost — turns a headless Stick Fight instance into a UDP
+    // dedicated server. Loaded by BepInEx on the oracle (`-batchmode`) and
+    // also on each player's SF install (interactive mode, where only the
+    // CLIENT-MODE SHIM runs).
     //
-    // When SF is launched with `-batchmode -nographics`, Unity loads but no UI
-    // is available to navigate the menus. This plugin:
-    //   1. Detects batchmode on Awake; no-ops in interactive runs.
-    //   2. Waits for the chainloader to finish, then forces SceneManager.LoadScene
-    //      to skip the splash/menu and jump to a Landfall gameplay scene.
-    //   3. Ensures MatchmakingHandler is in Sockets mode, then calls
-    //      MatchMakingHandlerSockets.HostServer() to bind a Lidgren NetServer.
-    //   4. Patches the hardcoded port 1337 in NetworkSocketServer's ctor with
-    //      whatever SFHEADLESS_PORT env var says (default: 1340 to avoid
-    //      colliding with the Go server on 1337).
+    // ============================================================
+    //                    TABLE OF CONTENTS
+    // ============================================================
+    //  Anchor (search this line)                          ~Line
+    //  ─────────────────────────────────────────────────  ─────
+    //  private void Awake()                               ~  56   bootstrap, mode detect
+    //  Phase 6.5 Step 1 — IsServer=true                   ~ 397   Harmony postfixes to fake host mode
+    //  SendBroadcastPrefix                                ~ 524   intercepts host-side broadcasts → forwards
+    //                                                              over our v25 UDP socket (P0-11 lives here)
+    //  Phase 6.5 Step 2 — invoke GameManager.StartMatch   ~ 724
+    //  InvokeMultiplayerManagerInitChain                  ~ 776   manual init chain after scene load
+    //  NSO inventory + diagnostics                        ~ 815
+    //  === CLIENT-MODE SHIM ===                           ~1137   patches applied on player-side SF
+    //  P0-12 — MapInfoSync Vector2 quantize               ~1149   prefix patches (server + client)
+    //  InstallClientModePatches                           ~1247   dynamic NSO patch (skip DisableAllRigidBodies)
+    //  Bridge: UDP socket                                 ~1674   the v25 raw socket
+    //  v26 extension constants (msgTypes 39/40/41)        ~1735
+    //  Patched-DLL extensions (msgTypes 56/57)            ~1743
+    //  SfDispatch                                         ~1917   inbound packet router
+    //  ValidateDamagePacket (P1-8 lives here)             ~2140   anticheat damage validation
+    //  Chat / admin                                       ~2224   /code /ping /start /tickrate /help…
+    //  RateGuard / AnticheatObserve                       ~2356
+    //  Pickup / Drop / Throw handlers                     ~2558
+    //  Handshake handlers                                 ~2626   ClientRequestingAccepting → Spawned
+    //  HandlePlayerInput (v26)                            ~2933   inbound PktPlayerInput; P0-13 keyframe send here
+    //  HandlePlayerUpdate                                 ~3022   v25 client position relay
+    //  Phase 6.9 — auth rig spawn + ghost rig update      ~3046
+    //  Phase 6.10 — server-authoritative snapshots        ~3214   v26 WorldStateSnapshot broadcast
+    //  Phase 6.17 v0.1+v0.2 — projectile sim + hit reg    ~3240
+    //  EmitServerDamage                                   ~3369
+    //  Tick-history ring buffer (lag-comp)                ~3388
+    //  BroadcastWorldStateSnapshot                        ~3443   v26.5 (players + NSOs + projs + mapSync)
+    //  CollectAllNsoSnapshot + SendKeyframeSnapshot       ~3556   P0-13 first-snap-on-late-join
+    //  P0-14 MapInfoSyncableBase position broadcast       ~3553+  CollectMapSyncSnapshot, etc.
+    //  CollectActiveNsoSnapshot                           ~3690+
+    //  ApplyClientObjectUpdate (legacy)                   ~3850
+    //  NsoIsKillboxFallen (P0-11 helper)                  ~3940
+    //  ReadEnv                                            ~4530
+    // ============================================================
+    //
+    // Architecture: see ../notes/ARCHITECTURE.md
+    // Wire protocol: see ../notes/PROTOCOL.md
+    // Object sync model: see ../notes/OBJECT_SYNC.md
+    // Open bugs: see ../notes/BUGS_BACKLOG.md (P0-11..P0-15, P1-8)
     //
     // Configuration via env vars (read once at Awake):
-    //   SFHEADLESS_PORT   — Lidgren bind port (default 1340).
-    //   SFHEADLESS_SCENE  — Initial scene index to load (default 6, Landfall 6).
-    //   SFHEADLESS_DEBUG  — "1" enables verbose tick logging.
+    //   SFHEADLESS_PORT       — v25 UDP bind port (default 1337).
+    //   SFHEADLESS_BRIDGEPORT — internal bridge port (default 1341).
+    //   SFHEADLESS_SCENE      — initial scene index (default 0 = lobby).
+    //   SFHEADLESS_DEBUG      — "1" enables verbose tick logging.
+    //   SF_ROUND_END_DELAY    — seconds before MapChange after a kill (default 0.5).
+    //   SF_NEXT_MATCH_DELAY   — seconds before StartMatch after MapChange (default 2.0).
+    //   SF_ANTICHEAT_ENFORCE  — "1" turns anticheat into drop-mode (default observe-only).
+    //   SF_LOBBY_CODE         — 4-char lobby code returned by /code chat command.
     [BepInPlugin(PluginGuid, PluginName, PluginVersion)]
     public class Plugin : BaseUnityPlugin
     {
