@@ -3317,8 +3317,72 @@ namespace SFHeadlessHost
                     _projectiles.RemoveAt(i);
                     continue;
                 }
+                // Phase 6.17 v0.2 — server-side hit registration. Advance,
+                // then test the new position against every active rig
+                // (excluding the owner). Sphere-sphere ~1.2u radius — coarse
+                // but matches the lazy hit-feel of stock SF reasonably well
+                // and is much cheaper than per-bone raycast. Emit server-
+                // authoritative PktPlayerTookDamage on hit; the relay
+                // path validates + fans out to all clients.
+                Vector3 prev = p.Position;
                 p.Position += p.Velocity * dt;
+                int hitSlot = TestProjectileHit(p, prev);
+                if (hitSlot >= 0)
+                {
+                    EmitServerDamage(hitSlot, p.OwnerSlot, p.WeaponType);
+                    _projectiles.RemoveAt(i);
+                }
             }
+        }
+
+        // Returns the slot of the first rig (other than the owner) whose
+        // position is within HitRadiusSq of the projectile's new position
+        // OR whose segment-from-prev-to-new-position passes within
+        // HitRadius of the rig (swept sphere check). -1 if none.
+        private const float ProjectileHitRadius   = 1.2f;
+        private const float ProjectileHitRadiusSq = ProjectileHitRadius * ProjectileHitRadius;
+        private int TestProjectileHit(Projectile p, Vector3 prevPos)
+        {
+            foreach (var kv in SlotToRig)
+            {
+                if (kv.Key == p.OwnerSlot) continue;
+                var rig = kv.Value;
+                if ((object)rig == null) continue;
+                Vector3 rigPos = rig.transform.position;
+                // Cheap end-point sphere check first.
+                if ((rigPos - p.Position).sqrMagnitude <= ProjectileHitRadiusSq) return kv.Key;
+                // Swept: closest point on segment prev→new to rigPos.
+                Vector3 seg = p.Position - prevPos;
+                float segLenSq = seg.sqrMagnitude;
+                if (segLenSq < 0.0001f) continue;
+                float t = Mathf.Clamp01(Vector3.Dot(rigPos - prevPos, seg) / segLenSq);
+                Vector3 closest = prevPos + seg * t;
+                if ((rigPos - closest).sqrMagnitude <= ProjectileHitRadiusSq) return kv.Key;
+            }
+            return -1;
+        }
+
+        // Build a PktPlayerTookDamage body and broadcast it as if it had come
+        // from the victim's own client. The standard 25 damage + dmgType=0
+        // tracks vanilla pistol behavior. weaponType byte is reserved for
+        // when we differentiate pistol/sniper/etc.; logged but not used yet.
+        private void EmitServerDamage(int victimSlot, byte attackerSlot, byte weaponType)
+        {
+            // Body shape from NetworkPlayer.UnitWasDamaged: byte attackerIdx,
+            // f32 damage, bool playParticles, 4×sbyte particleDir (XY pair?),
+            // byte dmgType.  We omit projectile-track particles by setting
+            // playParticles=false; the body shrinks accordingly. Minimum body
+            // length = 1 + 4 + 1 + 1 = 7 bytes (attackerIdx, damage, playFx=0,
+            // dmgType). Channel = (victimSlot*2)+3 per NetworkPlayer.mEventChannel.
+            byte[] body = new byte[7];
+            body[0] = attackerSlot;
+            byte[] dmgBytes = BitConverter.GetBytes(25.0f);  // server-authoritative damage
+            Buffer.BlockCopy(dmgBytes, 0, body, 1, 4);
+            body[5] = 0;  // playParticles=false
+            body[6] = 0;  // dmgType=0 generic
+            byte channel = (byte)(victimSlot * 2 + 3);
+            BroadcastSfPacket(PktPlayerTookDamage, body, 0uL, channel);
+            Log.LogInfo($"[P6.17v2] Server-side hit: attacker={attackerSlot} victim={victimSlot} w={weaponType} → 25 dmg on chan={channel}");
         }
 
         // Phase 6.14.5 — tick-history ring buffer for lag-comp.
