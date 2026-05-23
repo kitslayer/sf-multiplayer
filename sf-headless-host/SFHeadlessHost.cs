@@ -1756,6 +1756,10 @@ namespace SFHeadlessHost
                     var cli = _sfClients[k];
                     Log.LogInfo($"[SF] Dropping stale client {k} (slot={cli.Slot} steamID={cli.SteamID}, last seen {Time.realtimeSinceStartup - cli.LastSeen:0.0}s ago)");
                     _sfClients.Remove(k);
+                    // Also forget the v26 endpoint + rate guard for the slot,
+                    // otherwise we'd keep sending snapshots into the void.
+                    if (cli.Slot >= 0) _slotV26Endpoint.Remove(cli.Slot);
+                    _rateGuards.Remove(k);
                 }
             }
         }
@@ -2424,6 +2428,7 @@ namespace SFHeadlessHost
         private readonly Dictionary<int, IPEndPoint> _slotV26Endpoint = new Dictionary<int, IPEndPoint>();
 
         private uint _inputPacketsRx;
+        private uint _inputPacketsDropped;
         private void HandlePlayerInput(byte[] data, int off, int len, IPEndPoint from)
         {
             if (len < 25) return;
@@ -2434,6 +2439,30 @@ namespace SFHeadlessHost
             float ax    = BitConverter.ToSingle(data, off + 13);
             float ay    = BitConverter.ToSingle(data, off + 17);
             uint btns   = (uint)(data[off + 21] | (data[off + 22] << 8) | (data[off + 23] << 16) | (data[off + 24] << 24));
+
+            // Defensive validation — drop obvious garbage / cheaty inputs so
+            // they don't poison InjectInputPrefix → Movement.cs. Conservative:
+            // accept slightly-over-1.0 magnitudes (analog stick noise) but
+            // reject NaN/Inf/huge values. Phase 6.16+ slot↔SteamID validation
+            // would also live here.
+            if (slot > 3
+                || float.IsNaN(sx) || float.IsInfinity(sx) || sx < -1.5f || sx > 1.5f
+                || float.IsNaN(sy) || float.IsInfinity(sy) || sy < -1.5f || sy > 1.5f
+                || float.IsNaN(ax) || float.IsInfinity(ax) || ax < -1.5f || ax > 1.5f
+                || float.IsNaN(ay) || float.IsInfinity(ay) || ay < -1.5f || ay > 1.5f)
+            {
+                _inputPacketsDropped++;
+                if (_inputPacketsDropped == 1 || _inputPacketsDropped % 50 == 0)
+                    Log.LogWarning($"[P6.12] Dropped malformed PlayerInput: slot={slot} stick=({sx:0.00},{sy:0.00}) aim=({ax:0.00},{ay:0.00}) — total dropped {_inputPacketsDropped}");
+                return;
+            }
+            // Clamp stick magnitudes to canonical [-1,1] so SF's Movement
+            // doesn't see sub-noise > 1.0 values that bypass its own clamps.
+            sx = Mathf.Clamp(sx, -1f, 1f);
+            sy = Mathf.Clamp(sy, -1f, 1f);
+            ax = Mathf.Clamp(ax, -1f, 1f);
+            ay = Mathf.Clamp(ay, -1f, 1f);
+
             SlotInputs[slot] = new InputFrame
             {
                 StickX  = sx,
