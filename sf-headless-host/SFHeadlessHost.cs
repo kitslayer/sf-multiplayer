@@ -48,11 +48,6 @@ namespace SFHeadlessHost
         {
             Log = Logger;
             Instance = this;
-            // Phase 6.9 — subscribe to sceneLoaded so we can run the settle
-            // phase that stock SF's PrepareMapForTravel coroutine handles
-            // (but which never reaches the network branch on our oracle).
-            SceneManager.sceneLoaded -= OnAnySceneLoadedRunSettle;
-            SceneManager.sceneLoaded += OnAnySceneLoadedRunSettle;
 
             // Unity 5.6 doesn't have Application.isBatchMode — fall back to
             // checking the command-line for -batchmode.
@@ -716,100 +711,6 @@ namespace SFHeadlessHost
             {
                 Log.LogError($"[P6.5] InvokeOracleStartCountDown threw: {e}");
             }
-        }
-
-        // Phase 6.9 — settle phase that stock SF's PrepareMapForTravel runs at
-        // match-load. Without this, every dynamic rigidbody in the map starts
-        // life with whatever-the-prefab-set-it-to physics state, gravity
-        // kicks in immediately, stacks tip, crates fall through the killbox,
-        // and the client sees their local copies vanish off-screen.
-        //
-        // We hook SceneManager.sceneLoaded — whenever a Landfall map scene
-        // loads (anything except MainScene), we kick a coroutine on the
-        // Plugin GameObject that:
-        //   1. Sets ALL rigidbodies in the map root kinematic
-        //   2. Yields 1.5s real-time (lets joints register at rest)
-        //   3. Re-enables kinematic=false ONLY on rigidbodies that are not
-        //      DestructiblePieces (or are simple/event destruction types) and
-        //      don't have DontEnableRig.
-        //
-        // DestructiblePieces (chains, ice) STAY kinematic — they only become
-        // dynamic when struck with enough force (the destruction path).
-        private void OnAnySceneLoadedRunSettle(Scene scene, LoadSceneMode mode)
-        {
-            // Only run for actual gameplay scenes. MainScene is the lobby and
-            // doesn't have crates that need settling.
-            if (scene.name == "MainScene" || string.IsNullOrEmpty(scene.name)) return;
-            Log.LogInfo($"[P6.9 settle] Scene loaded: '{scene.name}' (buildIndex={scene.buildIndex}); starting settle coroutine.");
-            StartCoroutine(SettlePhaseCoroutine(scene));
-        }
-
-        private System.Collections.IEnumerator SettlePhaseCoroutine(Scene scene)
-        {
-            // Wait one frame so Unity's Instantiate / Awake fires complete
-            // before we touch rigidbodies.
-            yield return null;
-            // Find all rigidbodies in the loaded scene. Iterate root GOs and
-            // collect children — works even if currentMapInfo isn't set yet.
-            var rootGOs = scene.GetRootGameObjects();
-            var allRBs = new List<Rigidbody>();
-            foreach (var go in rootGOs)
-            {
-                if ((object)go == null) continue;
-                allRBs.AddRange(go.GetComponentsInChildren<Rigidbody>(true));
-            }
-            int n = allRBs.Count;
-            Log.LogInfo($"[P6.9 settle] Scene '{scene.name}': freezing {n} rigidbodies for settle phase.");
-            // Record original-kinematic so we can restore for the ones that
-            // should stay dynamic after settle.
-            bool[] wasKinematic = new bool[n];
-            for (int i = 0; i < n; i++)
-            {
-                var rb = allRBs[i];
-                if ((object)rb == null) continue;
-                wasKinematic[i] = rb.isKinematic;
-                rb.isKinematic = true;
-                rb.velocity = Vector3.zero;
-                rb.angularVelocity = Vector3.zero;
-            }
-            // Wait for things to settle visually + give joints time to register.
-            yield return new WaitForSecondsRealtime(1.5f);
-            // Re-enable kinematic=false ONLY on:
-            //   - Rigidbodies that aren't DestructiblePieces, OR
-            //   - DestructiblePieces with simpleDestruction or eventDestruction
-            //     (these need physics so they can be hit), but NOT joint-piece
-            //     destructibles like chains (which stay kinematic until struck).
-            //   - AND not have DontEnableRig (a SF marker for "leave kinematic").
-            var dpType = AccessTools.TypeByName("DestructiblePiece");
-            var dontEnableType = AccessTools.TypeByName("DontEnableRig");
-            FieldInfo simpleField = (object)dpType != null ? AccessTools.Field(dpType, "simpleDestruction") : null;
-            FieldInfo eventField = (object)dpType != null ? AccessTools.Field(dpType, "eventDestruction") : null;
-            int reEnabled = 0;
-            for (int i = 0; i < n; i++)
-            {
-                var rb = allRBs[i];
-                if ((object)rb == null) continue;
-                // If the original was already kinematic, leave it kinematic.
-                if (wasKinematic[i]) continue;
-                bool stayKinematic = false;
-                if ((object)dpType != null)
-                {
-                    var dp = rb.GetComponent(dpType);
-                    if ((object)dp != null)
-                    {
-                        bool simple = (object)simpleField != null && (bool)simpleField.GetValue(dp);
-                        bool ev = (object)eventField != null && (bool)eventField.GetValue(dp);
-                        if (!simple && !ev) stayKinematic = true; // chain-style destructible, keep frozen
-                    }
-                }
-                if ((object)dontEnableType != null && rb.GetComponent(dontEnableType) != null) stayKinematic = true;
-                if (!stayKinematic)
-                {
-                    rb.isKinematic = false;
-                    reEnabled++;
-                }
-            }
-            Log.LogInfo($"[P6.9 settle] Settle complete for '{scene.name}': {reEnabled}/{n} rigidbodies re-enabled dynamic; the rest stay kinematic until struck.");
         }
 
         // Phase 6.9 — manual invoke of MultiplayerManager.InitMapDataObjects +
@@ -1557,16 +1458,18 @@ namespace SFHeadlessHost
                     {
                         _nsoInventoryAt = -1f;
                         RunNetworkSyncableObjectInventory();
-                        // Schedule mirror-rig spawn after NSO state is fixed.
-                        _mirrorRigSpawnAt = Time.realtimeSinceStartup + 1.0f;
+                        // Schedule authoritative-player spawn after NSO state is fixed.
+                        _authSpawnAt = Time.realtimeSinceStartup + 1.0f;
                     }
-                    // Phase 6.7 — spawn mirror rigs per connected client so they
-                    // collide with NetworkSyncableObjects (boxes/barrels/etc).
-                    if (_mirrorRigSpawnAt > 0f && Time.realtimeSinceStartup >= _mirrorRigSpawnAt && !_mirrorRigSpawnDone)
+                    // Phase 6.9 — spawn real NetworkPlayers per connected client.
+                    // They're the server's authoritative copy; eventually driven
+                    // by client inputs (Phase 6.12) and broadcast back to all
+                    // clients as snapshot (Phase 6.10) for reconciliation.
+                    if (_authSpawnAt > 0f && Time.realtimeSinceStartup >= _authSpawnAt && !_authSpawnDone)
                     {
-                        _mirrorRigSpawnAt = -1f;
-                        _mirrorRigSpawnDone = true;
-                        SpawnMirrorRigsForAllClients();
+                        _authSpawnAt = -1f;
+                        _authSpawnDone = true;
+                        SpawnAuthoritativePlayersForAllClients();
                     }
                     // Round advance: kill detected → fire MapChange after delay.
                     if (_pendingRoundAdvanceAt > 0f && Time.realtimeSinceStartup >= _pendingRoundAdvanceAt)
@@ -2320,8 +2223,13 @@ namespace SFHeadlessHost
             Log.LogInfo("[SF] Broadcast StartMatch");
         }
 
-        // PlayerUpdate from client → broadcast to all OTHER clients + drive
-        // our mirror rig if one exists for this client.
+        // PlayerUpdate from client → broadcast to all OTHER clients.
+        // Phase 6.9+: this is now ONLY a relay between clients (so they see
+        // each other render correctly). The server's own authoritative rig
+        // for this client is driven by SlotInputs, not by the client's
+        // self-reported position. Phase 6.10 will flip this further so the
+        // server broadcasts ITS authoritative position back to all clients,
+        // and Phase 6.11/6.12 patch the client to reconcile against that.
         private void HandlePlayerUpdate(SfClient cli, byte[] data, int off, int len)
         {
             byte[] body = new byte[len];
@@ -2332,29 +2240,26 @@ namespace SFHeadlessHost
                 if (!kv.Value.Spawned) continue;
                 SendSfPacket(kv.Value.Addr, PktPlayerUpdate, body, cli.SteamID, 0);
             }
-
-            // Phase 6.7 — drive the mirror rig's hip to the reported position
-            // so it collides with boxes/barrels on the oracle side. Body
-            // format (from NetworkPlayer SyncClientState): first 4 bytes are
-            // posY + posZ as int16/100.
-            if (len < 4) return;
-            short rawY = (short)(body[0] | (body[1] << 8));
-            short rawZ = (short)(body[2] | (body[3] << 8));
-            float py = rawY / 100f;
-            float pz = rawZ / 100f;
-            UpdateMirrorRigPosition(cli.Slot, new Vector3(0f, py, pz));
         }
 
-        // === Phase 6.7 mirror rigs ===
-        // Spawn a kinematic player rig per connected client so the oracle has
-        // a collider that can push NetworkSyncableObjects (boxes/barrels) when
-        // the client's position pushes through them.
-        private float _mirrorRigSpawnAt = -1f;
-        private bool _mirrorRigSpawnDone;
+        // === Phase 6.9 — authoritative server-side player rigs ===
+        // Spawn one real NetworkPlayer per connected client on the oracle.
+        // The rig is the server's authoritative copy of the player; eventually
+        // it'll be driven from client inputs (Phase 6.12 v26 protocol) and its
+        // position will be broadcast back to all clients as the source of
+        // truth (Phase 6.10 snapshots + Phase 6.11 client reconciliation).
+        //
+        // For now (post-mirror-rig rip), the rig is instantiated via
+        // TrySpawnPlayer (real Player prefab + Controller + Movement + NSO
+        // children) and left at its spawn position. The SlotInputs buffer
+        // is empty until inputs start flowing, so Movement.cs has nothing to
+        // act on. This is intentional: clean foundation, no fake teleport.
+        private float _authSpawnAt = -1f;
+        private bool _authSpawnDone;
 
-        private void SpawnMirrorRigsForAllClients()
+        private void SpawnAuthoritativePlayersForAllClients()
         {
-            Log.LogInfo($"[P6.7] SpawnMirrorRigs: iterating {_sfClients.Count} clients.");
+            Log.LogInfo($"[P6.9] SpawnAuthoritativePlayers: iterating {_sfClients.Count} clients.");
             int considered = 0, spawned = 0, skipped = 0;
             foreach (var kv in _sfClients)
             {
@@ -2362,13 +2267,13 @@ namespace SFHeadlessHost
                 considered++;
                 if (!cli.Initialized)
                 {
-                    Log.LogInfo($"[P6.7] Skip {kv.Key}: not Initialized.");
+                    Log.LogInfo($"[P6.9] Skip {kv.Key}: not Initialized.");
                     skipped++;
                     continue;
                 }
                 if (SlotToRig.ContainsKey(cli.Slot))
                 {
-                    Log.LogInfo($"[P6.7] Skip {kv.Key}: rig already exists for slot {cli.Slot}.");
+                    Log.LogInfo($"[P6.9] Skip {kv.Key}: rig already exists for slot {cli.Slot}.");
                     skipped++;
                     continue;
                 }
@@ -2376,54 +2281,46 @@ namespace SFHeadlessHost
                 bool ok = TrySpawnPlayer(cli.Slot, startPos, out string err);
                 if (ok)
                 {
-                    Log.LogInfo($"[P6.7] Spawned mirror rig for client slot={cli.Slot} steamID={cli.SteamID}.");
-                    MakeRigKinematicMirror(cli.Slot);
+                    Log.LogInfo($"[P6.9] Spawned authoritative rig for client slot={cli.Slot} steamID={cli.SteamID}.");
+                    ConfigureAuthoritativeRig(cli.Slot);
                     spawned++;
                 }
                 else
                 {
-                    Log.LogError($"[P6.7] Failed to spawn mirror rig for slot {cli.Slot}: {err}");
+                    Log.LogError($"[P6.9] Failed to spawn authoritative rig for slot {cli.Slot}: {err}");
                 }
             }
-            Log.LogInfo($"[P6.7] SpawnMirrorRigs done: considered={considered} spawned={spawned} skipped={skipped}");
+            Log.LogInfo($"[P6.9] SpawnAuthoritativePlayers done: considered={considered} spawned={spawned} skipped={skipped}");
         }
 
-        // Make all body part rigidbodies kinematic so we can MovePosition
-        // them and they'll push other dynamic rigidbodies (boxes) correctly
-        // via Unity's kinematic-sweep resolution. ALSO disable any
-        // NetworkSyncableObject components on the rig — without this the rig's
-        // own body parts broadcast ObjectUpdate spam to the client, hijacking
-        // indices that map to real scene objects.
-        private void MakeRigKinematicMirror(int slot)
+        // Configure a freshly-spawned rig as the server's authoritative copy
+        // of that player. Per-instance HasControl=true on the Controller so
+        // SF's host-side gates (destructible piece OnCollisionEnter, etc.)
+        // accept this rig as a legitimate authority source. The static
+        // mHasControl is also forced true elsewhere via the Phase 6.5 NSO
+        // patch, but per-instance avoids any "did the static actually stick"
+        // surprises.
+        private void ConfigureAuthoritativeRig(int slot)
         {
             if (!SlotToRig.TryGetValue(slot, out var rig) || (object)rig == null) return;
-            var rbs = rig.GetComponentsInChildren<Rigidbody>();
-            int kinSet = 0;
-            foreach (var rb in rbs)
+            try
             {
-                if ((object)rb == null) continue;
-                rb.isKinematic = true;
-                kinSet++;
-            }
-            // Disable NSO components on the rig — they'd otherwise broadcast
-            // ObjectUpdate packets with whatever Index the rig parts carry,
-            // potentially corrupting scene-object positions on the client.
-            int nsoDisabled = 0;
-            var nsoType = AccessTools.TypeByName("NetworkSyncableObject");
-            if ((object)nsoType != null)
-            {
-                var nsos = rig.GetComponentsInChildren(nsoType);
-                foreach (var nso in nsos)
+                var ctrlType = AccessTools.TypeByName("Controller");
+                if ((object)ctrlType != null)
                 {
-                    var beh = nso as Behaviour;
-                    if ((object)beh != null) { beh.enabled = false; nsoDisabled++; }
+                    var ctrl = rig.GetComponent(ctrlType);
+                    if ((object)ctrl != null)
+                    {
+                        var hasCtrlF = AccessTools.Field(ctrlType, "mHasControl");
+                        if ((object)hasCtrlF != null)
+                        {
+                            hasCtrlF.SetValue(ctrl, true);
+                            Log.LogInfo($"[P6.9] Slot {slot}: Controller.mHasControl set true (per-instance).");
+                        }
+                    }
                 }
             }
-            // (Reverted HasControl=false — it broke box pushing and didn't fix
-            // chain breaks. Chains break because OTHER physics objects hit
-            // them — primarily runaway-falling crates. Freezing those crates
-            // is the right fix; see TickStaleNsoFreezer.)
-            Log.LogInfo($"[P6.7] Slot {slot}: set {kinSet} rigidbodies to kinematic, disabled {nsoDisabled} NSO components for mirror behavior.");
+            catch (Exception e) { Log.LogWarning($"[P6.9 ConfigureAuthoritativeRig] {e.Message}"); }
         }
 
         // Freeze NSO rigidbodies that fell out of the playable area.
@@ -2470,39 +2367,6 @@ namespace SFHeadlessHost
                     Log.LogInfo($"[P6.7] Froze {frozen} runaway-fall rigidbodies (Y < -25).");
             }
             catch (Exception e) { Log.LogWarning($"[P6.7 freezer] {e.Message}"); }
-        }
-
-        // Move all body parts of the mirror rig toward the target position.
-        // Use Rigidbody.MovePosition for kinematic bodies so Unity sweeps
-        // collisions and pushes dynamic rigidbodies (boxes) along the way.
-        private static int _mirrorMoveLogCount;
-        private void UpdateMirrorRigPosition(int slot, Vector3 target)
-        {
-            if (!SlotToRig.TryGetValue(slot, out var rig) || (object)rig == null) return;
-            // Translate the entire rig so each body part keeps its relative pose.
-            var rootPos = rig.transform.position;
-            var delta = target - rootPos;
-            // Skip tiny deltas to avoid jitter; the position write is cheap
-            // but MovePosition every PlayerUpdate accumulates.
-            if (delta.sqrMagnitude < 0.0001f) return;
-            rig.transform.position = target;
-            var rbs = rig.GetComponentsInChildren<Rigidbody>();
-            foreach (var rb in rbs)
-            {
-                if ((object)rb == null) continue;
-                if (rb.isKinematic)
-                {
-                    rb.MovePosition(rb.position + delta);
-                }
-                else
-                {
-                    rb.position = rb.position + delta;
-                    rb.velocity = Vector3.zero;
-                }
-            }
-            if (_mirrorMoveLogCount < 5 || _mirrorMoveLogCount % 120 == 0)
-                Log.LogInfo($"[P6.7] Mirror rig slot={slot} moved to {target} (delta={delta.magnitude:0.00})");
-            _mirrorMoveLogCount++;
         }
 
         // === helpers ===
