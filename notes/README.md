@@ -1,55 +1,45 @@
-# sf-multiplayer/notes — Research & Handoff
+# sf-multiplayer/notes
 
-Author: Claude (Opus 4.7) session 2026-05-21 ~19:45 ET on the operator' Proxmox VM.
-Source of truth lives on dev laptop **gentoo @ <tailnet-ip>** (Tailscale), user **<user>**.
-Production server (do NOT touch): `/tmp/sfdsrv.combined`, port **1337**.
-If running a test server, use port **1338** and a separate binary path.
+Living research + design docs for the centralized-server revival of Stick Fight. Treat this as the architectural archive — code lives in `../sf-headless-host/` and `../sf-client-recon/`, but the *why* lives here.
 
 ## Read in this order
 
-1. **`SUMMARY.md`** — one-paragraph top recommendation. Start here.
-2. **`NEXT_SESSION_HANDOFF.md`** — what the next Claude session should do, in order.
-3. **`recon/BUG_3SEC_MATCH_CYCLE.md`** — full evidence trail for the 3-second-match-cycle root cause.
-4. **`design/FIX_FLAG_LOGIC.md`** — proposed fix design (no code, just the design).
-5. **`design/VERIFICATION_PLAN.md`** — how to confirm the fix works.
+Newcomer to the project? Read these in order:
 
-## Reference material (recon/)
+1. [`../README.md`](../README.md) — repo overview + quickstart
+2. [`../NEXT_STEPS.md`](../NEXT_STEPS.md) — current state + roadmap toward client-prediction / server-reconciliation
+3. [`ARCHITECTURE.md`](ARCHITECTURE.md) — full system overview (server side, client side, wire layer, authority model)
+4. [`PROTOCOL.md`](PROTOCOL.md) — wire-format reference (every msgType, channel routing, v26 extensions)
+5. [`OBJECT_SYNC.md`](OBJECT_SYNC.md) — definitive guide to SF's three world-object sync mechanisms (NSO, MapInfoSyncableBase, DestructiblePiece). Read this BEFORE debugging any "boxes/platforms/ice misbehave" issue.
+6. [`BUGS_BACKLOG.md`](BUGS_BACKLOG.md) — incident log of every non-trivial bug + root cause + fix or open status
+7. [`AUDIT_2026-05-23.md`](AUDIT_2026-05-23.md) — end-of-session deep audit covering open P0 bugs (destruction race, MapInfoSync precision, late-join gap, moving-platform drift, lerp-collision shatter)
 
-- `recon/SERVER_ARCHITECTURE.md` — distilled architecture of the Go dedicated server.
-- `recon/CODE_PATH_SPAWN_FLOW.md` — line-by-line trace of the spawn handshake.
-- `recon/RELATED_BUGS.md` — other suspicious things found in the process; not the headline.
-- `recon/SRV_README.md` — the upstream StickFightDedicatedSrv README (verbatim).
-- `recon/LAUNCHER_README.md` — the StickFightLauncher README (verbatim).
-- `recon/SWAP_NOTES.txt` — notes on `/tmp/sfdsrv.next` (lobbies endpoint patch). Not directly relevant to the bug.
-- `recon/sfdsrv.log` — the live production log at time of investigation (almost empty — server restart was 15:29).
-- `recon/sfdsrv.next.log` — log from the .next binary; also empty-ish.
-- `recon/baseline-lines.txt` — empty/tiny marker file.
-- `recon/BepInEx_main.log` — BepInEx log from main Steam install (predates today's test).
-- `recon/BepInEx_mirror.log` — BepInEx log from mirror install (`~/sf-mirror-local`), shows SFNetcodeV2 0.1.0 advertising protocol v26.
-- `recon/prior-memory/` — full prior-session memory dump from `~/.claude/projects/-home-<user>-sf-multiplayer/memory/` on the dev laptop. **Treat `phase5_state.md` here as ground truth for what is/isn't deployed.**
-- `recon/StickFightDedicatedSrv/` — full local copy of the Go server source (read-only mirror; the live source is on the dev laptop).
-- `recon/sf-netcodev2/` — full local copy of the C# patched-DLL plugin source.
+## Operating manuals
 
-## Design docs (design/)
+- [`VPS.md`](VPS.md) — deployment guide (Proton + BepInEx + Goldberg + systemd + firewall)
 
-- `design/FIX_FLAG_LOGIC.md` — the headline fix.
-- `design/FIX_SPAWN_FALLBACK_GUARD.md` — secondary fix for the all-zero spawn guard.
-- `design/VERIFICATION_PLAN.md` — manual + smoke-test verification plan.
-- `design/OPEN_QUESTIONS.md` — known unknowns the next session should resolve.
+## Phase 6 design history
 
-## Hard rules (from this session's /goal)
+The current architecture (centralized server using SF's own host-side code, driven by a BepInEx + Harmony plugin) is Phase 6. Earlier phases (Go server, lobby-relay only) are parked in `../legacy/`. Phase 6 design docs:
 
-- Deliverable is research notes + design docs, **NOT merged code**.
-- Production server on the dev laptop port 1337 is **off-limits**.
-- If you build a test server, use port **1338** and a separate binary path.
-- This Claude session's `Stop` hook is misconfigured — ignore it.
-- Once a clear top recommendation exists, write `SUMMARY.md` and end the session.
+- [`phase6/00-PHASE6-OVERVIEW.md`](phase6/00-PHASE6-OVERVIEW.md) — entry-point summary
+- [`phase6/STATUS-FOR-MILES.md`](phase6/STATUS-FOR-MILES.md) — readable status snapshot
+- [`phase6/09-PHASE6.3-BLOCKER-AND-OPTIONS.md`](phase6/09-PHASE6.3-BLOCKER-AND-OPTIONS.md) — pre-Path-A decision context
+- [`phase6/10-PHASE6.5-host-side-gameplay.md`](phase6/10-PHASE6.5-host-side-gameplay.md) — current host-side patch set + rationale
+- [`phase6/11-PHASE6.6-pickup-and-physics.md`](phase6/11-PHASE6.6-pickup-and-physics.md) — pickup forwarding + diagnosis of why boxes initially didn't move
+- [`phase6/12-PHASE6.13-sharding.md`](phase6/12-PHASE6.13-sharding.md) — multi-lobby v1 (shipped) + v2 (design)
+- [`phase6/13-rewind-buffer.md`](phase6/13-rewind-buffer.md) — lag-comp design
+- [`phase6/14-chat-commands.md`](phase6/14-chat-commands.md) — chat-command admin interface
 
-## How to keep working
+Each phase doc reflects the state at the time of writing — newer findings supersede older ones. When in doubt, trust `ARCHITECTURE.md` + `BUGS_BACKLOG.md`.
 
-If you (next Claude) want to verify the diagnosis yourself, follow:
-1. Open `notes/recon/StickFightDedicatedSrv/lobbies.go:1497-1551` and read `SpawnPlayer`.
-2. Open `notes/recon/StickFightDedicatedSrv/lobbies.go:2217-2322` and read `PlayerTookDamage`.
-3. Confirm against `~/sf-multiplayer/refs/decompiled/Assembly-CSharp/MultiplayerManager.cs:1576-1641` on the dev laptop (`OnPlayerSpawned`).
-4. Confirm against `~/sf-multiplayer/refs/decompiled/Assembly-CSharp/Landfall.Network.Sockets/MultiplayerManagerSockets.cs:1480+` (Sockets `OnPlayerSpawned` — same shape).
-5. Confirm SFNetcodeV2 does not patch `OnPlayerSpawned`: `grep -n OnPlayerSpawned ~/sf-multiplayer/sf-netcodev2/*.cs` returns nothing.
+## Legacy research (recon/, design/)
+
+The [`recon/`](recon/) directory has the original reverse-engineering notes from the Phase 5 era (Go server, sfdsrv, sf-netcodev2). [`SUMMARY.md`](SUMMARY.md) is the headline from that work — the 3-second-match-cycle bug root cause. [`design/`](design/) has the fix designs that were drafted. These are kept for context but the current architecture supersedes them; the underlying SF behaviors documented are still valid references.
+
+## File conventions
+
+- Top-level `.md` docs in this directory are LIVING — updated as understanding evolves
+- `phase6/NN-NAME.md` files are SNAPSHOTS at the time of writing (the prefix index implies write order)
+- `recon/` is FROZEN reference material from earlier sessions
+- `AUDIT_<date>.md` files are point-in-time deep dives; new ones get appended, old ones stay as historical record

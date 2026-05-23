@@ -325,6 +325,7 @@ In-process sharding (one SF.exe, multiple match scenes) is designed in [`phase6/
 ## Deep-dive references
 
 - [`AUDIT_2026-05-23.md`](AUDIT_2026-05-23.md) — full end-of-session audit covering destruction race, MapInfoSyncableBase precision, channel-routing false alarms, and first-snapshot-gap.
+- [`OBJECT_SYNC.md`](OBJECT_SYNC.md) — definitive reference for the three world-object sync mechanisms (NSO, MapInfoSyncableBase, DestructiblePiece events). Reads as a debugging cheat sheet when you see boxes/platforms/ice misbehave.
 - [`BUGS_BACKLOG.md`](BUGS_BACKLOG.md) — every bug we've hit with root cause + fix or open status.
 
 ## Recent critical bug history (with fixes)
