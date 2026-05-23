@@ -45,9 +45,16 @@ namespace SFClientRecon
         // override comes when we add multi-client-on-same-host testing.
         private const int V26_LISTEN_PORT = 1339;
 
-        private UdpClient _socket;
+        private UdpClient _socket;       // RX: incoming snapshots from oracle
+        private UdpClient _txSocket;     // TX: outgoing PlayerInput to oracle
+        private IPEndPoint _serverEp;    // oracle's address (read from -address/-port argv)
         private Thread _rxThread;
         private volatile bool _running;
+
+        // Phase 6.12 — outbound input sequence numbers (monotonic).
+        private uint _inputSeq;
+        private float _lastInputSendAt;
+        private const float InputSendInterval = 1.0f / 60.0f;  // 60Hz cap
 
         // Pending snapshot (set on RX thread, applied on main thread).
         private readonly object _snapLock = new object();
@@ -89,6 +96,30 @@ namespace SFClientRecon
             catch (Exception e)
             {
                 Log.LogError($"UDP bind on {V26_LISTEN_PORT} failed: {e.Message}. Reconciliation disabled.");
+            }
+
+            // Phase 6.12 — server endpoint for outbound PktPlayerInput.
+            // Mirrors the patched DLL's CLI parsing: -address X -port Y.
+            string serverHost = "127.0.0.1";
+            int serverPort = 1337;
+            var args = Environment.GetCommandLineArgs();
+            for (int i = 0; i < args.Length - 1; i++)
+            {
+                if (args[i] == "-address") serverHost = args[i + 1];
+                else if (args[i] == "-port" && int.TryParse(args[i + 1], out var p)) serverPort = p;
+            }
+            try
+            {
+                IPAddress ip;
+                if (!IPAddress.TryParse(serverHost, out ip))
+                    ip = Dns.GetHostAddresses(serverHost)[0];
+                _serverEp = new IPEndPoint(ip, serverPort);
+                _txSocket = new UdpClient();
+                Log.LogInfo($"PlayerInput TX → {_serverEp} (msgType 40, 60Hz).");
+            }
+            catch (Exception e)
+            {
+                Log.LogError($"TX socket setup failed: {e.Message}. PlayerInput disabled.");
             }
         }
 
@@ -163,8 +194,79 @@ namespace SFClientRecon
                 tick = _pendingTick;
                 _pendingSnap = null;
             }
-            if (snap == null) return;
-            ApplySnapshot(snap, tick);
+            if (snap != null) ApplySnapshot(snap, tick);
+            // Phase 6.12 — send input packets at 60Hz once local slot is known.
+            if (_txSocket != null && Time.realtimeSinceStartup - _lastInputSendAt >= InputSendInterval)
+            {
+                _lastInputSendAt = Time.realtimeSinceStartup;
+                SendPlayerInputPacket();
+            }
+        }
+
+        // Phase 6.12 — pack and send a PktPlayerInput packet to the oracle.
+        // First cut: read raw keyboard state via UnityEngine.Input. Phase
+        // 6.12.1 will read from the SF Controller's CharacterActions so we
+        // catch gamepad input too and match exactly what the patched DLL's
+        // Movement.cs is reading for local prediction.
+        private void SendPlayerInputPacket()
+        {
+            int localSlot = FindLocalSlot();
+            if (localSlot < 0) return;
+
+            float sx = 0f, sy = 0f;
+            if (Input.GetKey(KeyCode.A) || Input.GetKey(KeyCode.LeftArrow))  sx -= 1f;
+            if (Input.GetKey(KeyCode.D) || Input.GetKey(KeyCode.RightArrow)) sx += 1f;
+            if (Input.GetKey(KeyCode.W) || Input.GetKey(KeyCode.UpArrow))    sy += 1f;
+            if (Input.GetKey(KeyCode.S) || Input.GetKey(KeyCode.DownArrow))  sy -= 1f;
+            float ax = 0f, ay = 0f;  // aim — placeholder until we read mouse properly
+            uint btns = 0;
+            if (Input.GetKey(KeyCode.Space) || Input.GetKey(KeyCode.W))      btns |= 1u << 0;  // jump
+            if (Input.GetMouseButton(0))                                     btns |= 1u << 1;  // fire
+            if (Input.GetMouseButton(1) || Input.GetKey(KeyCode.LeftShift))  btns |= 1u << 2;  // block
+            if (Input.GetKey(KeyCode.Q))                                     btns |= 1u << 3;  // throw
+
+            // Body: 25 bytes  (u32 seq + u8 slot + 4 floats + u32 buttons)
+            byte[] body = new byte[25];
+            _inputSeq++;
+            WriteU32LE(body, 0, _inputSeq);
+            body[4] = (byte)localSlot;
+            WriteF32LE(body, 5,  sx);
+            WriteF32LE(body, 9,  sy);
+            WriteF32LE(body, 13, ax);
+            WriteF32LE(body, 17, ay);
+            WriteU32LE(body, 21, btns);
+
+            // v25 envelope wrap.
+            int totalLen = 5 + body.Length + 9;
+            byte[] pkt = new byte[totalLen];
+            uint ts = (uint)(DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalSeconds;
+            WriteU32LE(pkt, 0, ts);
+            pkt[4] = 40;  // PktPlayerInput
+            Buffer.BlockCopy(body, 0, pkt, 5, body.Length);
+            // tail: u64 steamID (zero — server identifies by slot byte) + u8 channel
+            pkt[pkt.Length - 1] = 0;
+
+            try { _txSocket.Send(pkt, pkt.Length, _serverEp); }
+            catch (Exception e) { Log.LogWarning($"TX: {e.Message}"); }
+
+            if (_inputSeq == 1 || _inputSeq % 300 == 0)
+                Log.LogInfo($"[P6.12] Sent PlayerInput #{_inputSeq} slot={localSlot} stick=({sx:0.00},{sy:0.00}) btns=0x{btns:X}");
+        }
+
+        private static void WriteU32LE(byte[] b, int o, uint v)
+        {
+            b[o    ] = (byte)(v       & 0xFF);
+            b[o + 1] = (byte)(v >>  8 & 0xFF);
+            b[o + 2] = (byte)(v >> 16 & 0xFF);
+            b[o + 3] = (byte)(v >> 24 & 0xFF);
+        }
+        private static void WriteF32LE(byte[] b, int o, float v)
+        {
+            var bytes = BitConverter.GetBytes(v);
+            b[o    ] = bytes[0];
+            b[o + 1] = bytes[1];
+            b[o + 2] = bytes[2];
+            b[o + 3] = bytes[3];
         }
 
         private void ApplySnapshot(List<SnapshotEntry> snap, uint tick)

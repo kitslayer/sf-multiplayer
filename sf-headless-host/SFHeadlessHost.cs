@@ -1590,6 +1590,10 @@ namespace SFHeadlessHost
             public bool Accepted;
             public bool Initialized;
             public bool Spawned;
+            // Phase 6.12 — last PktPlayerInput sequence number consumed for
+            // this slot. Phase 6.12.2 will stamp this into outgoing snapshots
+            // so the client can do reconciliation replay.
+            public uint LastInputSeq;
         }
         private readonly Dictionary<string, SfClient> _sfClients = new Dictionary<string, SfClient>();
         private float _lastStateEmit;
@@ -1749,6 +1753,17 @@ namespace SFHeadlessHost
             // Verbose log every Nth packet so we can see what's happening.
             if (_sfPacketsRx == 1 || _sfPacketsRx % 30 == 0)
                 Log.LogInfo($"[SF] rx#{_sfPacketsRx} type={msgType} bodyLen={bodyLen} ch={channel} from={from} steamID={steamID}");
+
+            // Phase 6.12 — v26 PktPlayerInput is keyed by slot embedded in the
+            // body, not by source IP+port (the SFClientRecon plugin sends from
+            // its own ephemeral UDP socket, not the patched DLL's). Route it
+            // directly to the slot-based handler and skip the auto-add path
+            // below, which would create a phantom SfClient entry every time.
+            if (msgType == PktPlayerInput)
+            {
+                HandlePlayerInput(data, bodyOffset, bodyLen);
+                return;
+            }
 
             // Track client.
             string key = from.ToString();
@@ -2230,6 +2245,50 @@ namespace SFHeadlessHost
             // is treated as a fresh round-start rather than a respawn.
             foreach (var kv in _sfClients) kv.Value.Spawned = false;
             Log.LogInfo("[SF] Broadcast StartMatch");
+        }
+
+        // Phase 6.12 — inbound v26 PktPlayerInput from SFClientRecon plugin.
+        // Body layout:
+        //   u32 sequenceNum (LE)
+        //   u8  slot
+        //   f32 stickX (LE)
+        //   f32 stickY (LE)
+        //   f32 aimX (LE)
+        //   f32 aimY (LE)
+        //   u32 buttons (LE)  — bit0=jump, bit1=fire, bit2=block, bit3=throw
+        //
+        // We trust the slot byte for now (no anti-cheat enforcement). Phase
+        // 6.13+ will validate slot ↔ SteamID. Populated InputFrame feeds
+        // InjectInputPrefix → Movement.cs on the server-side authoritative
+        // rig, producing real authoritative motion that's then broadcast back
+        // via PktWorldStateSnapshot.
+        private uint _inputPacketsRx;
+        private void HandlePlayerInput(byte[] data, int off, int len)
+        {
+            if (len < 25) return;
+            uint seq    = (uint)(data[off] | (data[off + 1] << 8) | (data[off + 2] << 16) | (data[off + 3] << 24));
+            byte slot   = data[off + 4];
+            float sx    = BitConverter.ToSingle(data, off + 5);
+            float sy    = BitConverter.ToSingle(data, off + 9);
+            float ax    = BitConverter.ToSingle(data, off + 13);
+            float ay    = BitConverter.ToSingle(data, off + 17);
+            uint btns   = (uint)(data[off + 21] | (data[off + 22] << 8) | (data[off + 23] << 16) | (data[off + 24] << 24));
+            SlotInputs[slot] = new InputFrame
+            {
+                StickX  = sx,
+                StickY  = sy,
+                AimX    = ax,
+                AimY    = ay,
+                Buttons = (int)btns,
+            };
+            // Find the SfClient owning this slot to stamp LastInputSeq.
+            foreach (var kv in _sfClients)
+            {
+                if (kv.Value.Slot == slot) { kv.Value.LastInputSeq = seq; break; }
+            }
+            _inputPacketsRx++;
+            if (_inputPacketsRx == 1 || _inputPacketsRx % 300 == 0)
+                Log.LogInfo($"[P6.12] PlayerInput #{_inputPacketsRx} slot={slot} seq={seq} stick=({sx:0.00},{sy:0.00}) btns=0x{btns:X}");
         }
 
         // PlayerUpdate from client → broadcast to all OTHER clients.
