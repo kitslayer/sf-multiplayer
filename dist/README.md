@@ -1,51 +1,52 @@
 # sf-multiplayer client bundle
 
-**For comp players to join a Stick Fight server.**
+**For comp players: one click, you're in a lobby.**
 
-Everything you need is in this folder. Tested on Windows 10/11.
+## Windows
 
-## Two-step setup
+1. Download **`SFLauncher.exe`** from this folder.
+2. Double-click it. First run: it auto-installs BepInEx + plugins into your Steam Stick Fight install. Then the lobby browser window opens.
+3. Pick a lobby, click **Connect**. Launch options get copied to your clipboard. Steam opens.
+4. Right-click Stick Fight in Steam → Properties → Launch Options → paste → close.
+5. Click **Play**. You're in.
 
-### 1. First time only — install the mods
+Subsequent launches just open the lobby browser directly (install step is skipped if up to date).
 
-Double-click **`install-sf-client.bat`**. It will:
-- find your Stick Fight install automatically (Steam paths)
-- download BepInEx
-- copy the two plugin DLLs into the install
-- tell you what Steam launch options to set
+## Linux / macOS
 
-When it finishes, set those launch options in Steam:
-- Right-click **Stick Fight: The Game** → Properties → Launch Options
-- Paste:  `-address SERVER_IP -port 1337`  (replace SERVER_IP with what the host gives you, e.g. `192.168.1.115`)
-- Close the Properties window.
+1. Download **`sflauncher.sh`** from this folder.
+2. Make it executable: `chmod +x sflauncher.sh`
+3. Run it: `./sflauncher.sh`
+4. It downloads BepInEx + plugins, sets up your Steam Stick Fight install, opens a lobby-browser page in your default browser.
+5. Set Steam launch options (printed at end of script) and click Play.
 
-### 2. Every time — launch the lobby browser
+(No native GUI on Linux yet — the browser page is the GUI. Functionally identical, just opens in Firefox/Chrome instead of a window.)
 
-Double-click **`SFLauncher.exe`**. The window shows running lobbies on the server. Pick one, click **Connect** — it copies the launch options to your clipboard and opens Steam. Then click Play in Steam.
-
-If the connect string in your Steam launch options is already right (most cases), you don't even need SFLauncher — just hit Play.
-
-## Files in this folder
+## What's in this folder
 
 | File | Purpose |
 |---|---|
-| `install-sf-client.bat` | One-time setup. Detects SF install, installs BepInEx, copies plugins. |
-| `SFLauncher.exe` | Lobby browser GUI (Windows, single-file). |
-| `SFHeadlessHost.dll` | Server-side plugin (also gets deployed on the client; it self-disables in interactive mode). |
-| `SFClientRecon.dll` | Client-side plugin — handles the v26 reconciliation protocol. |
+| `SFLauncher.exe` | Windows one-click app. Auto-installs + lobby browser. |
+| `sflauncher.sh` | Linux/macOS one-click installer + browser launcher. |
+| `install-sf-client.bat` | (Optional Windows) install-only batch. SFLauncher.exe already does this; provided for users who want to install without the GUI. |
+| `install-sf-client.sh` | (Optional Linux) install-only script. Same as above. |
+| `SFHeadlessHost.dll` | Server-side plugin (auto-deployed by the installers). |
+| `SFClientRecon.dll` | Client-side plugin (auto-deployed by the installers). |
 
 ## Troubleshooting
 
-**"Couldn't find Stick Fight"** — drag the `StickFight.exe` file from your install into the .bat window, then press Enter.
+**Windows: SmartScreen blocks SFLauncher.exe** — the .exe isn't code-signed. Click "More info" → "Run anyway". One-time; it remembers.
 
-**Lobby browser says "Couldn't reach server"** — paste the server's HTTP endpoint URL into the box at the top, e.g. `http://192.168.1.115:8080/lobbies`. Click Refresh.
+**"Couldn't auto-find Stick Fight"** — point the launcher at your install via folder picker (Windows) or paste the path (Linux).
 
-**Steam launches the game but you don't connect** — your launch options are wrong. They should look exactly like `-address 192.168.1.115 -port 1337` (no quotes, no leading spaces).
+**Lobby browser says "Couldn't reach server"** — type the right `http://<server-ip>:8080/lobbies` URL into the address bar at the top. It saves to LocalAppData so it persists.
 
-**No lobbies showing** — ask the host whether their oracle is actually running. They can confirm with `bash list-lobbies.sh` on the server.
+**Game launches but doesn't connect** — Steam launch options are missing. They should look exactly like `-address 192.168.1.115 -port 1337` (no quotes, no leading spaces). Set them via right-click Stick Fight → Properties → Launch Options.
+
+**No lobbies showing** — ask the host whether their oracle is running. They can verify with `bash list-lobbies.sh` on the server.
 
 ## Where this came from
 
 - Source: https://github.com/kitslayer/sf-multiplayer
 - Bug? Open an issue on GitHub.
-- The plugins here match the latest `main` branch as of bundle time. Updates: re-download this folder.
+- Bundle matches the latest `main` branch as of build time. Re-download to update.

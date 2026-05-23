@@ -63,7 +63,18 @@ Updated continuously by Claude as work progresses. Latest commit at top. Check t
 - [ ] (optional) Document `install-sf-client.sh` usage in DEPLOY.md
 - [ ] (optional) Make `server-browser.html` discoverable via README
 
-## What you can do now
+## What comp players actually do (two clicks)
+
+Send them the `dist/` folder from this repo. Inside:
+- `install-sf-client.bat` — double-click ONCE to set up BepInEx + plugins
+- `SFLauncher.exe` — real Windows GUI lobby browser, double-click to launch
+- `README.md` — quickstart
+
+In SFLauncher: paste `http://192.168.1.115:8080/lobbies`, hit Refresh, pick a lobby, click Connect. The launch options get copied to clipboard and Steam opens. They click Play. Done.
+
+(They only need to redo the install-sf-client.bat step if plugins update — usually never.)
+
+## What you (the operator) can do now
 
 Open `deploy/server-browser.html` in any browser (save it locally first). Enter:
 ```

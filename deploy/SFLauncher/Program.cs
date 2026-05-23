@@ -1,8 +1,11 @@
-// SFLauncher — Windows lobby browser for sf-multiplayer.
+// SFLauncher — Windows one-click client + lobby browser for sf-multiplayer.
 //
-// Standalone single-file .exe. Run it, paste the server's HTTP endpoint
-// (e.g. http://192.168.1.115:8080), pick a lobby, click Connect. The
-// launch options get copied to your clipboard and Steam opens.
+// Standalone single-file .exe. First run: auto-installs BepInEx + plugins
+// into the user's Stick Fight Steam install (no .bat needed). Subsequent
+// runs: opens the lobby browser directly. Always idempotent — re-running
+// re-checks the install and updates plugins if needed.
+//
+// Plugin DLLs are bundled as embedded resources inside this .exe.
 //
 // Build:
 //   cd deploy/SFLauncher
@@ -15,10 +18,14 @@ using System;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.IO.Compression;
 using System.Net.Http;
+using System.Reflection;
+using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 namespace SFLauncher;
 
@@ -137,8 +144,218 @@ internal sealed class MainForm : Form
             _autoChk.Left = _refreshBtn.Right + 10;
         };
 
-        // Kick off an initial fetch on shown
-        Shown += async (_, _) => await RefreshAsync();
+        // First-run install check + initial lobby fetch
+        Shown += async (_, _) =>
+        {
+            await EnsureClientInstalledAsync();
+            await RefreshAsync();
+        };
+    }
+
+    // ============================================================
+    //  AUTO-INSTALLER — runs on first launch; idempotent on re-runs
+    // ============================================================
+    private const string BepInExUrl =
+        "https://github.com/BepInEx/BepInEx/releases/download/v5.4.23.5/BepInEx_x86_5.4.23.5.zip";
+    private const string ExpectedHeadlessResource = "SFLauncher.Resources.SFHeadlessHost.dll";
+    private const string ExpectedReconResource    = "SFLauncher.Resources.SFClientRecon.dll";
+
+    private async Task EnsureClientInstalledAsync()
+    {
+        var sf = FindStickFightInstall();
+        if (sf == null)
+        {
+            using var dlg = new FolderBrowserDialog
+            {
+                Description = "Couldn't auto-detect Stick Fight. Pick your install folder (the one with StickFight.exe in it).",
+                UseDescriptionForTitle = true
+            };
+            if (dlg.ShowDialog(this) != DialogResult.OK)
+            {
+                SetStatus("Skipped install. Lobby browser will work but you won't be able to connect.", Color.OrangeRed);
+                return;
+            }
+            sf = dlg.SelectedPath;
+            if (!File.Exists(Path.Combine(sf, "StickFight.exe")))
+            {
+                MessageBox.Show(this, "That folder doesn't contain StickFight.exe.", "Wrong folder",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+        }
+
+        var pluginsDir = Path.Combine(sf, "BepInEx", "plugins");
+        var ourHost = Path.Combine(pluginsDir, "SFHeadlessHost.dll");
+        var ourRecon = Path.Combine(pluginsDir, "SFClientRecon.dll");
+        var bundledHostMd5 = GetEmbeddedMd5(ExpectedHeadlessResource);
+        var bundledReconMd5 = GetEmbeddedMd5(ExpectedReconResource);
+
+        bool needBep = !File.Exists(Path.Combine(sf, "winhttp.dll"))
+                       || !Directory.Exists(Path.Combine(sf, "BepInEx"));
+        bool needPlugins = !File.Exists(ourHost) || !File.Exists(ourRecon)
+                          || FileMd5(ourHost)  != bundledHostMd5
+                          || FileMd5(ourRecon) != bundledReconMd5;
+
+        if (!needBep && !needPlugins)
+        {
+            SetStatus($"Install OK · plugins up to date · {Path.GetFileName(sf)}", Color.FromArgb(127, 255, 127));
+            return;
+        }
+
+        // Show a small progress dialog
+        using var progress = new InstallProgressForm(this);
+        progress.Show(this);
+        Application.DoEvents();
+
+        try
+        {
+            if (needBep)
+            {
+                progress.SetStatus("Downloading BepInEx 5.4.23.5...");
+                using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(2) };
+                using var resp = await http.GetAsync(BepInExUrl);
+                resp.EnsureSuccessStatusCode();
+                var bytes = await resp.Content.ReadAsByteArrayAsync();
+
+                progress.SetStatus("Installing BepInEx into Stick Fight...");
+                using var ms = new MemoryStream(bytes);
+                using var archive = new ZipArchive(ms, ZipArchiveMode.Read);
+                foreach (var entry in archive.Entries)
+                {
+                    if (string.IsNullOrEmpty(entry.Name)) continue; // skip directories
+                    var target = Path.Combine(sf, entry.FullName.Replace('/', Path.DirectorySeparatorChar));
+                    Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                    using var src = entry.Open();
+                    using var dst = File.Create(target);
+                    await src.CopyToAsync(dst);
+                }
+            }
+
+            Directory.CreateDirectory(pluginsDir);
+            progress.SetStatus("Installing plugin: SFHeadlessHost.dll");
+            ExtractEmbeddedTo(ExpectedHeadlessResource, ourHost);
+            progress.SetStatus("Installing plugin: SFClientRecon.dll");
+            ExtractEmbeddedTo(ExpectedReconResource, ourRecon);
+
+            // Try to set Steam launch options via registry (works if Steam is installed)
+            TrySetSteamLaunchOptions();
+
+            progress.SetStatus("Done.");
+            await Task.Delay(500);
+            progress.Close();
+            SetStatus($"Install complete · {Path.GetFileName(sf)}", Color.FromArgb(127, 255, 127));
+        }
+        catch (Exception ex)
+        {
+            progress.Close();
+            MessageBox.Show(this,
+                $"Install failed: {ex.Message}\n\nYou can still browse lobbies — but the game won't connect until plugins are installed.",
+                "Install error",
+                MessageBoxButtons.OK, MessageBoxIcon.Error);
+            SetStatus("Install failed — see error dialog", Color.OrangeRed);
+        }
+    }
+
+    // ---- find SF install ----
+    private static string? FindStickFightInstall()
+    {
+        string[] candidates =
+        {
+            // Standard Steam paths
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+                "Steam", "steamapps", "common", "StickFightTheGame"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                "Steam", "steamapps", "common", "StickFightTheGame"),
+            @"C:\Program Files (x86)\Steam\steamapps\common\StickFightTheGame",
+            @"C:\Program Files\Steam\steamapps\common\StickFightTheGame",
+        };
+        foreach (var c in candidates)
+            if (File.Exists(Path.Combine(c, "StickFight.exe")))
+                return c;
+
+        // Try Steam's libraryfolders.vdf to find non-default library paths
+        try
+        {
+            var steamPath = GetSteamInstallPath();
+            if (steamPath != null)
+            {
+                var vdf = Path.Combine(steamPath, "steamapps", "libraryfolders.vdf");
+                if (File.Exists(vdf))
+                {
+                    foreach (var line in File.ReadAllLines(vdf))
+                    {
+                        // crude vdf parse — look for "path" entries
+                        var m = System.Text.RegularExpressions.Regex.Match(line, @"""path""\s+""([^""]+)""");
+                        if (m.Success)
+                        {
+                            var lib = m.Groups[1].Value.Replace(@"\\", @"\");
+                            var sf = Path.Combine(lib, "steamapps", "common", "StickFightTheGame");
+                            if (File.Exists(Path.Combine(sf, "StickFight.exe"))) return sf;
+                        }
+                    }
+                }
+            }
+        }
+        catch { /* registry / vdf read can fail; user folder picker handles it */ }
+        return null;
+    }
+
+    private static string? GetSteamInstallPath()
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Valve\Steam");
+            return key?.GetValue("SteamPath") as string;
+        }
+        catch { return null; }
+    }
+
+    // ---- embedded resource extraction ----
+    private static void ExtractEmbeddedTo(string resourceName, string targetPath)
+    {
+        using var src = typeof(Program).Assembly.GetManifestResourceStream(resourceName)
+            ?? throw new InvalidOperationException(
+                $"Bundled resource not found: {resourceName}. " +
+                "The .exe was built without embedded plugins.");
+        Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+        using var dst = File.Create(targetPath);
+        src.CopyTo(dst);
+    }
+
+    private static string? GetEmbeddedMd5(string resourceName)
+    {
+        try
+        {
+            using var src = typeof(Program).Assembly.GetManifestResourceStream(resourceName);
+            if (src == null) return null;
+            using var md5 = System.Security.Cryptography.MD5.Create();
+            var hash = md5.ComputeHash(src);
+            return BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
+        }
+        catch { return null; }
+    }
+
+    private static string? FileMd5(string path)
+    {
+        try
+        {
+            using var fs = File.OpenRead(path);
+            using var md5 = System.Security.Cryptography.MD5.Create();
+            var hash = md5.ComputeHash(fs);
+            return BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
+        }
+        catch { return null; }
+    }
+
+    // ---- best-effort Steam launch options ----
+    // Steam stores per-app launch options in localconfig.vdf. We can offer
+    // to write them but Steam must be closed (it caches the file). For
+    // safety, we just hint to the user via the Connect dialog instead.
+    private static void TrySetSteamLaunchOptions()
+    {
+        // No-op for now — would require closing Steam + modifying localconfig.vdf
+        // which is risky. Instead, the Connect dialog copies launch options to
+        // the user's clipboard and tells them to paste in Properties.
     }
 
     // ---- settings persistence ----
@@ -288,5 +505,36 @@ Then click Play in Steam.
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         }
+    }
+}
+
+internal sealed class InstallProgressForm : Form
+{
+    private readonly Label _label = new() { AutoSize = false, TextAlign = ContentAlignment.MiddleLeft };
+
+    public InstallProgressForm(Form owner)
+    {
+        Text = "Setting up Stick Fight…";
+        Size = new Size(420, 130);
+        StartPosition = FormStartPosition.CenterParent;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false; MinimizeBox = false; ControlBox = false;
+        Owner = owner;
+        BackColor = Color.FromArgb(20, 20, 24);
+        ForeColor = Color.FromArgb(230, 230, 235);
+        Font = new Font("Segoe UI", 10f);
+
+        _label.Location = new Point(15, 30);
+        _label.Size = new Size(380, 50);
+        _label.ForeColor = ForeColor;
+        _label.Text = "Preparing…";
+
+        Controls.Add(_label);
+    }
+
+    public void SetStatus(string text)
+    {
+        _label.Text = text;
+        Application.DoEvents();
     }
 }

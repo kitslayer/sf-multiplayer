@@ -27,4 +27,11 @@
     <DebugType>embedded</DebugType>
   </PropertyGroup>
 
+  <!-- Bundle plugin DLLs as embedded resources so SFLauncher can auto-install
+       them on first run without needing separate files alongside the .exe. -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\sf-headless-host\bin\Release\SFHeadlessHost.dll" LogicalName="SFLauncher.Resources.SFHeadlessHost.dll" />
+    <EmbeddedResource Include="..\..\sf-client-recon\bin\Release\SFClientRecon.dll" LogicalName="SFLauncher.Resources.SFClientRecon.dll" />
+  </ItemGroup>
+
 </Project>
