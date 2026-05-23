@@ -41,12 +41,14 @@ namespace SFClientRecon
         public const string PluginVersion = "0.1.0";
 
         internal static ManualLogSource Log;
-        // Hardcoded for now; matches sf-headless-host V26_CLIENT_PORT. Env-var
-        // override comes when we add multi-client-on-same-host testing.
-        private const int V26_LISTEN_PORT = 1339;
+        // Default v26 listener port. Overridable via SFCLIENTRECON_PORT env
+        // var for multi-instance same-machine testing (each instance picks a
+        // different port). Server discovers the actual port from our PlayerInput
+        // packet source addr — no protocol change required for non-default ports.
+        private const int V26_DEFAULT_PORT = 1339;
 
-        private UdpClient _socket;       // RX: incoming snapshots from oracle
-        private UdpClient _txSocket;     // TX: outgoing PlayerInput to oracle
+        private int _listenPort;
+        private UdpClient _socket;       // bidirectional: RX snapshots + TX inputs
         private IPEndPoint _serverEp;    // oracle's address (read from -address/-port argv)
         private Thread _rxThread;
         private volatile bool _running;
@@ -98,18 +100,23 @@ namespace SFClientRecon
             QualitySettings.vSyncCount = 0;
             Application.targetFrameRate = -1;
 
-            Log.LogInfo($"{PluginName} {PluginVersion}: starting v26 snapshot listener on UDP :{V26_LISTEN_PORT}. vSync off, FPS uncapped.");
+            // Resolve listener port — env var override for multi-instance testing.
+            _listenPort = V26_DEFAULT_PORT;
+            var envPort = Environment.GetEnvironmentVariable("SFCLIENTRECON_PORT");
+            if (!string.IsNullOrEmpty(envPort) && int.TryParse(envPort, out var pp)) _listenPort = pp;
+
+            Log.LogInfo($"{PluginName} {PluginVersion}: starting v26 snapshot listener on UDP :{_listenPort}. vSync off, FPS uncapped.");
             try
             {
-                _socket = new UdpClient(V26_LISTEN_PORT);
+                _socket = new UdpClient(_listenPort);
                 _running = true;
                 _rxThread = new Thread(RxLoop) { IsBackground = true, Name = "SFClientRecon-RX" };
                 _rxThread.Start();
-                Log.LogInfo("RX thread started.");
+                Log.LogInfo("RX thread started (bidirectional — same socket also TXes PlayerInput).");
             }
             catch (Exception e)
             {
-                Log.LogError($"UDP bind on {V26_LISTEN_PORT} failed: {e.Message}. Reconciliation disabled.");
+                Log.LogError($"UDP bind on {_listenPort} failed: {e.Message}. Reconciliation disabled.");
             }
 
             // Phase 6.12 — server endpoint for outbound PktPlayerInput.
@@ -128,12 +135,11 @@ namespace SFClientRecon
                 if (!IPAddress.TryParse(serverHost, out ip))
                     ip = Dns.GetHostAddresses(serverHost)[0];
                 _serverEp = new IPEndPoint(ip, serverPort);
-                _txSocket = new UdpClient();
-                Log.LogInfo($"PlayerInput TX → {_serverEp} (msgType 40, 60Hz).");
+                Log.LogInfo($"PlayerInput TX → {_serverEp} via :{_listenPort} (msgType 40, 60Hz).");
             }
             catch (Exception e)
             {
-                Log.LogError($"TX socket setup failed: {e.Message}. PlayerInput disabled.");
+                Log.LogError($"Server addr parse failed: {e.Message}. PlayerInput disabled.");
             }
         }
 
@@ -244,7 +250,7 @@ namespace SFClientRecon
             SmoothTowardTargets();
 
             // Phase 6.12 — send input packets at 60Hz once local slot is known.
-            if (_txSocket != null && Time.realtimeSinceStartup - _lastInputSendAt >= InputSendInterval)
+            if (_socket != null && _serverEp != null && Time.realtimeSinceStartup - _lastInputSendAt >= InputSendInterval)
             {
                 _lastInputSendAt = Time.realtimeSinceStartup;
                 SendPlayerInputPacket();
@@ -416,7 +422,7 @@ namespace SFClientRecon
             // tail: u64 steamID (zero — server identifies by slot byte) + u8 channel
             pkt[pkt.Length - 1] = 0;
 
-            try { _txSocket.Send(pkt, pkt.Length, _serverEp); }
+            try { _socket.Send(pkt, pkt.Length, _serverEp); }
             catch (Exception e) { Log.LogWarning($"TX: {e.Message}"); }
 
             if (_inputSeq == 1 || _inputSeq % 300 == 0)

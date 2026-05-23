@@ -1790,7 +1790,7 @@ namespace SFHeadlessHost
             // below, which would create a phantom SfClient entry every time.
             if (msgType == PktPlayerInput)
             {
-                try { HandlePlayerInput(data, bodyOffset, bodyLen); }
+                try { HandlePlayerInput(data, bodyOffset, bodyLen, from); }
                 catch (Exception ex) { Log.LogWarning($"[SF] HandlePlayerInput threw: {ex.Message}"); }
                 return;
             }
@@ -2417,8 +2417,14 @@ namespace SFHeadlessHost
         // InjectInputPrefix → Movement.cs on the server-side authoritative
         // rig, producing real authoritative motion that's then broadcast back
         // via PktWorldStateSnapshot.
+        // Per-slot v26 endpoint — where to send WorldStateSnapshot. Discovered
+        // from the source IP+port of each client's first PlayerInput packet,
+        // so multi-instance same-machine testing works (no more hardcoded port
+        // collision when two clients on same host both want 1339).
+        private readonly Dictionary<int, IPEndPoint> _slotV26Endpoint = new Dictionary<int, IPEndPoint>();
+
         private uint _inputPacketsRx;
-        private void HandlePlayerInput(byte[] data, int off, int len)
+        private void HandlePlayerInput(byte[] data, int off, int len, IPEndPoint from)
         {
             if (len < 25) return;
             uint seq    = (uint)(data[off] | (data[off + 1] << 8) | (data[off + 2] << 16) | (data[off + 3] << 24));
@@ -2440,6 +2446,16 @@ namespace SFHeadlessHost
             foreach (var kv in _sfClients)
             {
                 if (kv.Value.Slot == slot) { kv.Value.LastInputSeq = seq; break; }
+            }
+            // Record this client's v26 source addr — server snapshots get sent
+            // back to this same IP:port (client uses single bidirectional socket).
+            if ((object)from != null)
+            {
+                if (!_slotV26Endpoint.TryGetValue(slot, out var existing) || !existing.Equals(from))
+                {
+                    _slotV26Endpoint[slot] = from;
+                    Log.LogInfo($"[P6.12] Slot {slot} v26 endpoint → {from}");
+                }
             }
             _inputPacketsRx++;
             if (_inputPacketsRx == 1 || _inputPacketsRx % 300 == 0)
@@ -2633,16 +2649,17 @@ namespace SFHeadlessHost
                     WriteF32LE(body, off, e.RotZ); off += 4;
                 }
 
-                // Broadcast to ALL spawned clients on their v26 listener port
-                // (NOT their v25 ephemeral source port). The Phase 6.11
-                // SFClientRecon plugin binds UDP on V26_CLIENT_PORT and
-                // applies these snapshots; stock clients without the plugin
-                // simply have nothing listening there, so this is a no-op
-                // for them.
+                // Broadcast to ALL spawned clients on their v26 endpoint. Once
+                // a client has sent a PlayerInput packet we know its actual
+                // v26 source addr (recorded in _slotV26Endpoint); before that
+                // we fall back to clientIP:V26_CLIENT_PORT. Lets two clients
+                // on the same machine use different v26 ports without colliding.
                 foreach (var kv in _sfClients)
                 {
                     if (!kv.Value.Spawned) continue;
-                    var v26Ep = new IPEndPoint(kv.Value.Addr.Address, V26_CLIENT_PORT);
+                    IPEndPoint v26Ep;
+                    if (!_slotV26Endpoint.TryGetValue(kv.Value.Slot, out v26Ep))
+                        v26Ep = new IPEndPoint(kv.Value.Addr.Address, V26_CLIENT_PORT);
                     SendSfPacket(v26Ep, PktWorldStateSnapshot, body, 0, 0);
                 }
                 if (_serverTick == 1 || _serverTick % 90 == 0)
