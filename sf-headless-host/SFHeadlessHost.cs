@@ -2732,13 +2732,18 @@ namespace SFHeadlessHost
                 Log.LogInfo($"[P6.12] PlayerInput #{_inputPacketsRx} slot={slot} seq={seq} stick=({sx:0.00},{sy:0.00}) btns=0x{btns:X}");
         }
 
-        // PlayerUpdate from client → broadcast to all OTHER clients.
-        // Phase 6.9+: this is now ONLY a relay between clients (so they see
-        // each other render correctly). The server's own authoritative rig
-        // for this client is driven by SlotInputs, not by the client's
-        // self-reported position. Phase 6.10 will flip this further so the
-        // server broadcasts ITS authoritative position back to all clients,
-        // and Phase 6.11/6.12 patch the client to reconcile against that.
+        // PlayerUpdate from client → broadcast to all OTHER clients (so they
+        // render this player) AND teleport this client's auth ghost rig to
+        // the reported position so it can physically push boxes server-side.
+        //
+        // The ghost rig is the auth NetworkPlayer in kinematic mode (see
+        // ConfigureAuthoritativeRig). MovePosition does swept collision so
+        // dynamic NSO bodies (boxes/crates) the rig overlaps get pushed
+        // server-side. Phase 6.14 NSO snapshots then broadcast the box
+        // positions consistently to all clients.
+        //
+        // Body format (from NetworkPlayer.SyncClientState): first 4 bytes
+        // are posY + posZ as int16 / 100.
         private void HandlePlayerUpdate(SfClient cli, byte[] data, int off, int len)
         {
             byte[] body = new byte[len];
@@ -2749,6 +2754,13 @@ namespace SFHeadlessHost
                 if (!kv.Value.Spawned) continue;
                 SendSfPacket(kv.Value.Addr, PktPlayerUpdate, body, cli.SteamID, 0);
             }
+
+            if (len < 4 || cli.Slot < 0) return;
+            short rawY = (short)(body[0] | (body[1] << 8));
+            short rawZ = (short)(body[2] | (body[3] << 8));
+            float py = rawY / 100f;
+            float pz = rawZ / 100f;
+            UpdateGhostRigPosition(cli.Slot, new Vector3(0f, py, pz));
         }
 
         // === Phase 6.9 — authoritative server-side player rigs ===
@@ -2805,10 +2817,20 @@ namespace SFHeadlessHost
         // Configure a freshly-spawned rig as the server's authoritative copy
         // of that player. Per-instance HasControl=true on the Controller so
         // SF's host-side gates (destructible piece OnCollisionEnter, etc.)
-        // accept this rig as a legitimate authority source. The static
-        // mHasControl is also forced true elsewhere via the Phase 6.5 NSO
-        // patch, but per-instance avoids any "did the static actually stick"
-        // surprises.
+        // accept this rig as a legitimate authority source.
+        //
+        // Also configure as a "physics ghost" — kinematic body parts that
+        // get teleported to client position each PlayerUpdate. The ghost
+        // pushes NSOs (boxes/crates) via kinematic sweep so box collisions
+        // happen server-side, then NSO snapshots broadcast box positions
+        // back to all clients. NSO components on the rig itself are
+        // disabled so they don't broadcast wrong indices.
+        //
+        // This is "mirror rig 2.0" — real NetworkPlayer with per-instance
+        // HasControl, behaving as a ghost until v26 PlayerInput properly
+        // drives Movement.cs. The transition will be: when inputs are
+        // verified flowing reliably, un-kinematic the root and the rig
+        // becomes input-driven (no more position-from-client mirror).
         private void ConfigureAuthoritativeRig(int slot)
         {
             if (!SlotToRig.TryGetValue(slot, out var rig) || (object)rig == null) return;
@@ -2828,8 +2850,67 @@ namespace SFHeadlessHost
                         }
                     }
                 }
+
+                // Make all body part rigidbodies kinematic — no gravity, no
+                // Movement-driven forces, just position-driven sweeps.
+                var rbs = rig.GetComponentsInChildren<Rigidbody>();
+                int kinSet = 0;
+                foreach (var rb in rbs)
+                {
+                    if ((object)rb == null) continue;
+                    rb.isKinematic = true;
+                    rb.velocity = Vector3.zero;
+                    rb.angularVelocity = Vector3.zero;
+                    kinSet++;
+                }
+
+                // Disable NSO components on the rig — they'd otherwise
+                // broadcast ObjectUpdate with whatever Index the rig parts
+                // carry, potentially corrupting scene-object indices on
+                // clients.
+                int nsoOff = 0;
+                var nsoType = AccessTools.TypeByName("NetworkSyncableObject");
+                if ((object)nsoType != null)
+                {
+                    var nsos = rig.GetComponentsInChildren(nsoType);
+                    foreach (var nso in nsos)
+                    {
+                        var beh = nso as Behaviour;
+                        if ((object)beh != null) { beh.enabled = false; nsoOff++; }
+                    }
+                }
+                Log.LogInfo($"[P6.9 ghost] Slot {slot}: {kinSet} rbs kinematic, {nsoOff} NSO components disabled.");
             }
             catch (Exception e) { Log.LogWarning($"[P6.9 ConfigureAuthoritativeRig] {e.Message}"); }
+        }
+
+        // Phase 6.9 ghost mode — teleport the auth rig to client position
+        // each PlayerUpdate. With body kinematic, Rigidbody.MovePosition does
+        // a swept collision check which can push dynamic rigidbodies (boxes/
+        // crates) it overlaps. The auth rig is invisible to clients (we
+        // don't broadcast ClientSpawned for it) so the player only sees
+        // their own player + others; the ghost is a server-side physical
+        // body for collision purposes only.
+        private static int _ghostMoveLogCount;
+        private void UpdateGhostRigPosition(int slot, Vector3 target)
+        {
+            if (!SlotToRig.TryGetValue(slot, out var rig) || (object)rig == null) return;
+            var rootPos = rig.transform.position;
+            var delta = target - rootPos;
+            if (delta.sqrMagnitude < 0.0001f) return;
+            rig.transform.position = target;
+            var rbs = rig.GetComponentsInChildren<Rigidbody>();
+            foreach (var rb in rbs)
+            {
+                if ((object)rb == null) continue;
+                if (rb.isKinematic)
+                    rb.MovePosition(rb.position + delta);
+                else
+                    rb.position += delta;
+            }
+            if (_ghostMoveLogCount < 5 || _ghostMoveLogCount % 600 == 0)
+                Log.LogInfo($"[P6.9 ghost] slot={slot} moved to {target} (delta={delta.magnitude:0.00})");
+            _ghostMoveLogCount++;
         }
 
         // === Phase 6.10 — server-authoritative snapshots ===
