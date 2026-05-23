@@ -49,6 +49,15 @@ namespace SFHeadlessHost
             Log = Logger;
             Instance = this;
 
+            // Phase 6.9 settle phase, re-introduced after the boxes-fix recon:
+            // ripping this dropped a load-bearing piece. Stock SF's
+            // PrepareMapForTravel coroutine freezes all map rigidbodies for ~1s
+            // on load so joints + constraints register at rest. Without it, the
+            // server's NSOs fall through the floor before physics settles and
+            // wind up at Y=-50, then broadcast that bad position to clients.
+            SceneManager.sceneLoaded -= OnAnySceneLoadedRunSettle;
+            SceneManager.sceneLoaded += OnAnySceneLoadedRunSettle;
+
             // Unity 5.6 doesn't have Application.isBatchMode — fall back to
             // checking the command-line for -batchmode.
             bool batchMode = false;
@@ -711,6 +720,85 @@ namespace SFHeadlessHost
             {
                 Log.LogError($"[P6.5] InvokeOracleStartCountDown threw: {e}");
             }
+        }
+
+        // Phase 6.9 settle phase, re-introduced 2026-05-23 for the boxes-fix
+        // second pass. Hooks SceneManager.sceneLoaded — on each non-MainScene
+        // load, freezes all rigidbodies for ~1.5s, then re-enables dynamic
+        // for the ones that should be (non-DestructiblePiece OR
+        // simple/event-destruction). DestructiblePieces with collision-only
+        // destruction stay kinematic until struck (chains, ice).
+        //
+        // Why this is necessary: without it, on each new map load the
+        // server's NSO rigidbodies start with gravity, joints haven't
+        // registered constraints yet, and stacks of crates tip and fall
+        // through the platform before physics settles. The fallen positions
+        // then broadcast to clients via host-side ObjectUpdate AND our v26
+        // snapshot, making boxes vanish off-screen on every client.
+        private void OnAnySceneLoadedRunSettle(Scene scene, LoadSceneMode mode)
+        {
+            if (scene.name == "MainScene" || string.IsNullOrEmpty(scene.name)) return;
+            Log.LogInfo($"[settle] Scene loaded: '{scene.name}'; freezing rigidbodies for 1.5s.");
+            StartCoroutine(SettlePhaseCoroutine(scene));
+        }
+
+        private System.Collections.IEnumerator SettlePhaseCoroutine(Scene scene)
+        {
+            yield return null;
+            var rootGOs = scene.GetRootGameObjects();
+            var allRBs = new List<Rigidbody>();
+            foreach (var go in rootGOs)
+            {
+                if ((object)go == null) continue;
+                allRBs.AddRange(go.GetComponentsInChildren<Rigidbody>(true));
+            }
+            int n = allRBs.Count;
+            Log.LogInfo($"[settle] Scene '{scene.name}': freezing {n} rigidbodies.");
+            bool[] wasKinematic = new bool[n];
+            for (int i = 0; i < n; i++)
+            {
+                var rb = allRBs[i];
+                if ((object)rb == null) continue;
+                wasKinematic[i] = rb.isKinematic;
+                rb.isKinematic = true;
+                rb.velocity = Vector3.zero;
+                rb.angularVelocity = Vector3.zero;
+            }
+            yield return new WaitForSecondsRealtime(1.5f);
+
+            // Re-enable kinematic=false only for bodies that should be dynamic:
+            //   - not a DestructiblePiece OR
+            //   - DestructiblePiece with simpleDestruction or eventDestruction
+            //   - AND no DontEnableRig marker
+            var dpType        = AccessTools.TypeByName("DestructiblePiece");
+            var dontEnableT   = AccessTools.TypeByName("DontEnableRig");
+            FieldInfo simpleF = (object)dpType != null ? AccessTools.Field(dpType, "simpleDestruction") : null;
+            FieldInfo eventF  = (object)dpType != null ? AccessTools.Field(dpType, "eventDestruction")  : null;
+            int reEnabled = 0;
+            for (int i = 0; i < n; i++)
+            {
+                var rb = allRBs[i];
+                if ((object)rb == null) continue;
+                if (wasKinematic[i]) continue;
+                bool stayKin = false;
+                if ((object)dpType != null)
+                {
+                    var dp = rb.GetComponent(dpType);
+                    if ((object)dp != null)
+                    {
+                        bool simple = (object)simpleF != null && (bool)simpleF.GetValue(dp);
+                        bool ev     = (object)eventF  != null && (bool)eventF.GetValue(dp);
+                        if (!simple && !ev) stayKin = true;
+                    }
+                }
+                if ((object)dontEnableT != null && rb.GetComponent(dontEnableT) != null) stayKin = true;
+                if (!stayKin)
+                {
+                    rb.isKinematic = false;
+                    reEnabled++;
+                }
+            }
+            Log.LogInfo($"[settle] Done '{scene.name}': {reEnabled}/{n} re-enabled dynamic; rest stay kinematic until struck.");
         }
 
         // Phase 6.9 — manual invoke of MultiplayerManager.InitMapDataObjects +
@@ -3310,6 +3398,13 @@ namespace SFHeadlessHost
 
                     var p = comp.transform.position;
                     var rb = comp.GetComponent<Rigidbody>();
+
+                    // BOXES FIX (2nd pass): mirror the v25 forward-skip filter.
+                    // The server's own NSOs can fall through the floor on map
+                    // load (no settle phase, joints/constraints not yet
+                    // registered). Broadcasting those positions to clients
+                    // makes their local copies vanish off-screen.
+                    if (p.y < -30f) continue;
 
                     // Case 1: non-kinematic w/ active motion.
                     bool dynamicMoving = (object)rb != null && !rb.isKinematic
