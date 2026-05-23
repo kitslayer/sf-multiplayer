@@ -526,18 +526,43 @@ namespace SFClientRecon
                     var target = new Vector3(entry.X, entry.Y, entry.Z);
                     _playerTargets[entry.Slot] = target;
                     if (isLocal) _serverLastAckedSeq = entry.LastInputSeq;
-                    // Phase 6.12.2 (in-progress) — divergence detection. Look up
-                    // local-predicted position at the same seq the server is
-                    // reporting and warn if it drifted significantly. Full
-                    // input-replay rollback comes next; this is the floor.
-                    if (_historyLookup.TryGetValue(entry.LastInputSeq, out var predictedAtSeq))
+                    // Phase 6.12.2 — divergence detection + hard snap.
+                    // Look up local-predicted position at the same seq the
+                    // server is reporting. If drift > tolerance, hard-snap
+                    // the rigidbody to server position (overriding the
+                    // gentle SmoothTowardTargets lerp). Full input-replay
+                    // rollback (re-running Movement.cs from snapped seq to
+                    // current) is next; this is the corrective floor.
+                    if (isLocal && _historyLookup.TryGetValue(entry.LastInputSeq, out var predictedAtSeq))
                     {
                         float drift = Vector3.Distance(predictedAtSeq, target);
-                        if (drift > 1.0f)  // 1 SF-unit ≈ ~visible-divergence threshold
+                        const float HardSnapThreshold = 2.5f;  // hard-snap above 2.5u
+                        const float SoftSnapThreshold = 1.0f;  // log + smooth above 1.0u
+                        if (drift > SoftSnapThreshold)
                         {
                             _divergenceLogged++;
                             if (_divergenceLogged == 1 || _divergenceLogged % 30 == 0)
                                 Log.LogWarning($"[P6.12.2 divergence] seq={entry.LastInputSeq} predicted={predictedAtSeq} server={target} drift={drift:0.00}u — total events {_divergenceLogged}");
+
+                            if (drift > HardSnapThreshold)
+                            {
+                                // Hard snap — find local player's rigidbody and slam it.
+                                // Bypasses the lerp so correction is instant when drift
+                                // is bad (player in wall, fell through platform, etc.).
+                                // npType / nps are already in scope from the enclosing
+                                // ApplySnapshot lookup.
+                                foreach (var np2 in nps)
+                                {
+                                    var pidObj2 = pidField.GetValue(np2);
+                                    if (!(pidObj2 is int pi2) || pi2 != localSlot) continue;
+                                    var npComp2 = np2 as Component;
+                                    var rb2 = npComp2.GetComponent<Rigidbody>() ?? npComp2.GetComponentInChildren<Rigidbody>();
+                                    if ((object)rb2 != null) { rb2.position = target; rb2.velocity = Vector3.zero; }
+                                    else npComp2.transform.position = target;
+                                    Log.LogWarning($"[P6.12.2 HARD SNAP] drift {drift:0.00}u > {HardSnapThreshold}u — snapped to {target}");
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
