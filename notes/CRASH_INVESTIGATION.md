@@ -93,6 +93,113 @@ Our `SendBroadcastPrefix` runs on Unity main thread. SF's Lidgren receive thread
 - Don't add a Harmony patch to the suspected SF function — we don't know which function it is.
 - Don't revert recent changes hoping it fixes itself — the crash pattern was present BEFORE the recent feature work (the 13:14:40 crash predates Phase 6.19 work).
 
+## Update 2026-05-23 night — disassembly identifies the function
+
+`objdump -d -M intel` on StickFight.exe pinned the crash function:
+
+```
+Function starts at 0x0057ec60:
+  57ec60: push ebp                          ; function prologue
+  57ec61: mov  ebp,esp
+  57ec63: sub  esp,0xb0                     ; 176 bytes of locals
+  ...
+  57ec92: call 0xc841d0                     ; some helper
+  57ece1: call 0xaebb20                     ; ← bump allocator (~5KB slab)
+  57ecef: call 0x57be40                     ; ← constructor (zeroes 3 fields, sets self-ptr)
+  ...
+  57ed14: mov  eax,[ebp+0x14+0x7c]          ; ← load arg4 -> [0x7c]   (pointer to sub-object)
+  57ed1a: test eax,eax                      ;   null check
+  57ed1c: je   0x57ed2a                     ;   skip if null
+  57ed1e: add  eax,0x4                      ;   eax = sub-object + 0x4 (sync block / refcount slot)
+  57ed21: mov  ecx,0x1                      ;   ecx = 1
+  57ed26: lock xadd [eax],ecx               ; *** CRASH: atomic_inc(sync_block)
+```
+
+`add esi,0x94 ; push esi ; call 0x57ec60` from caller `0x55b8e2` shows arg4 is
+`this + 0x94`, so the crash chain dereferences `this->[0x94 + 0x7c] = this->[0x110]`
+then `+0x4`.
+
+**Key context clue — the string at `0x12427a8` (referenced repeatedly near the
+crash region) is `"// Dump is not supported for this joint"`.** This is
+Unity/PhysX joint-debug code. The 6 callers of `0x57ec60` are all in the
+0x55b8xx - 0x55fxxx range, consistent with a tight cluster of joint event
+handlers (joint break, joint anchor sync, joint dump, etc.).
+
+## What this strongly suggests
+
+The crash is in **PhysX's joint-debug "dump" code path**, fired when a joint
+is in an unrecoverable state (PhysX runs an assert → calls the dump → dump
+chases a pointer chain → one of those pointers is `0x7f800000` → crash on the
+sync-block refcount increment).
+
+`0x7f800000` is the IEEE-754 bit pattern for **positive infinity** as float32.
+That's not a coincidence — it strongly suggests a `Vector3` field's component
+got reinterpreted as a pointer somewhere. Specifically: a joint's anchor
+position or relative-orientation field went to `Inf`, was later interpreted
+by another code path as a `void*` (perhaps via a union or unsafe cast in
+PhysX's internal joint data layout), then dereferenced.
+
+## Probable trigger (still uncertain)
+
+The chain leading to `Inf` in a joint anchor is most likely:
+
+1. Our auth rig (one per slot, multi-bone with ConfigurableJoints) is
+   driven by `UpdateGhostRigPosition` — each PlayerUpdate teleports all
+   the rig's rigidbodies by the same delta.
+2. Across rounds (`BroadcastStartMatch` resets state but auth rigs persist
+   via `_authSpawnDone` gate), the joint constraint solver may accumulate
+   drift in joint anchors.
+3. Eventually a joint anchor reaches `Inf` (constraint violation under
+   continuous teleport-then-physics-tick).
+4. PhysX detects → calls dump → dump's stale ref → crash.
+
+Alternative: ragdoll spawn/teardown when a player dies. Stock SF creates +
+destroys many joints during the death-ragdoll-respawn cycle. If our code
+keeps a reference to a joint after SF destroyed it (via `_authSpawnDone =
+true` blocking re-spawn), the next physics tick hits the stale joint.
+
+## Less-certain but interesting
+
+The 5 callers besides the one we traced are likely:
+- joint break event handler
+- joint anchor update
+- joint motor target update
+- joint validation pass
+- joint serialization
+
+All routes through `0x57ec60` which constructs a "joint snapshot for logging"
+(matching the 5KB slab alloc + the dump string nearby). So crashes ALWAYS
+happen during JOINT LOGGING — meaning PhysX's internal assert path. Whatever
+caused the original assert is the upstream root cause.
+
+## What I would test next (not patching yet — needs your call)
+
+1. **Disable auth-rig spawn entirely** — set `_authSpawnDone = true` at boot
+   so `SpawnAuthoritativePlayersForAllClients` never runs. If no crash for
+   30 min, auth rigs are the trigger.
+2. **Make auth rigs kinematic in ALL their rigidbodies** (currently mixed
+   per `MakeRigKinematicMirror`). Kinematic joints don't run the constraint
+   solver → no anchor drift → no PhysX assert → no dump crash.
+3. **Add a per-frame NaN/Inf check on every rig's transforms** (in our
+   Update hook). If any becomes Inf, log + reset to last known good
+   position. Tells us EXACTLY when the corruption starts.
+
+Option 3 is the most diagnostic. Options 1 and 2 are workarounds that
+might mask the underlying issue but would let comp matches run without
+crashes while we fix the root cause.
+
+## Confidence
+
+| Claim | Confidence |
+|---|---|
+| Crash is in PhysX joint-debug "dump" code | **High** (string reference + call pattern) |
+| Root cause is a `void*` field reinterpreted from a `Vector3.x = Inf` | High |
+| Our auth-rig multi-rigidbody MovePosition is involved | Medium |
+| Specific fix without testing | **NOT confident yet** |
+
+Per the goal directive, **no patches.** Documenting for tomorrow's session
+to pick a test approach.
+
 ## Side note — log flood bug from commit `bce8bcc` (FIXED)
 
 The per-lobby log listener used `lock (_lock)` which the C# compiler emits as `Monitor.Enter(obj, ref bool)` (2-arg overload added in .NET 4.0). SF's Mono 2.0 runtime doesn't have that overload. Every log event threw `MissingMethodException`, which BepInEx logged, which fired the listener again, which threw → infinite recursion → 400MB/oracle log floods in ~10 min.
