@@ -756,6 +756,22 @@ namespace SFHeadlessHost
                     try { initSynced.Invoke(mmInst, null); Log.LogInfo("[P6.9] InitSyncedObjects invoked manually — NSOs should now be fully networked."); }
                     catch (Exception e) { Log.LogError($"[P6.9] InitSyncedObjects threw: {e.InnerException?.Message ?? e.Message}"); }
                 }
+
+                // Phase 6.8 — CheckForGroundWeapons broadcasts the map's
+                // pre-placed weapons (the ones in level geometry, registered
+                // via InitWeaponPickUpOnAwake → AddPreSpawnedWeapon). Stock SF
+                // calls this from GameManager.StartMapSequence after the map
+                // loads + IsNetworkMatch is true. On our oracle that coroutine
+                // chain doesn't fire; manually invoking ensures clients get
+                // GroundWeaponsInit (msgType 31) so map-preset weapons appear
+                // at their fixed spots. Addresses user-reported "I cant grab
+                // guns that spawn on some maps."
+                var checkGround = AccessTools.Method(mmType, "CheckForGroundWeapons");
+                if ((object)checkGround != null)
+                {
+                    try { checkGround.Invoke(mmInst, null); Log.LogInfo("[P6.8] CheckForGroundWeapons invoked manually — map-preset weapons broadcast."); }
+                    catch (Exception e) { Log.LogError($"[P6.8] CheckForGroundWeapons threw: {e.InnerException?.Message ?? e.Message}"); }
+                }
             }
             catch (Exception e)
             {
