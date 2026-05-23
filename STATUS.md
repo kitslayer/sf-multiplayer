@@ -37,16 +37,21 @@ Updated continuously by Claude as work progresses. Latest commit at top. Check t
 - [x] Confirm crash mechanism (instruction-level)
 - [x] Fix PerLobbyLogListener Monitor.Enter bug
 - [x] Write CRASH_INVESTIGATION.md
-- [ ] Commit + push status doc + listener fix + crash investigation
-- [ ] Test SSH to .115 (`ssh miles@192.168.1.115`)
-- [ ] Inventory existing state on .115 (SF install? BepInEx? plugins? Proton?)
-- [ ] Sync project files to .115 (`scp` or `rsync`)
-- [ ] Configure .115 systemd unit for oracle auto-restart
-- [ ] Validate oracle boots cleanly on .115
-- [ ] Validate UDP port reachability from outside (port forwarding / firewall)
-- [ ] Build end-user installer script (`install-sf-client.sh` for Linux/macOS + `install-sf-client.bat` for Windows)
-- [ ] Build GUI server browser (Python/Tk or Electron-lite over the `/lobbies` HTTP endpoint)
-- [ ] Document the deploy + installer in a `notes/DEPLOY.md`
+- [x] Commit + push status doc + listener fix + crash investigation (commit `a38e3ed`)
+- [x] Test SSH to .115 (key auth works, hostname `ubuntu-i7`)
+- [x] Inventory existing state on .115 (Ubuntu 6.14, 15GB RAM, no SF/Proton, OLD Go sfdsrv running on 1337)
+- [x] Stop + remove sfdsrv on .115 (systemd unit + /opt/sfdsrv gone)
+- [x] Sync SF install to .115 (`~/sf-oracle/install`, 398M, plugins md5 verified)
+- [x] Sync project to .115 (`~/sf-multiplayer`, 19M)
+- [⏳] Sync Proton to .115 (~/sf-oracle/proton, in progress 886/1400 MB)
+- [x] Write `deploy/start-oracle-server.sh` (server-bundled launcher)
+- [x] Write `deploy/sf-oracle.service` (systemd unit)
+- [x] Write `deploy/install-sf-client.sh` (client installer)
+- [x] Write `deploy/server-browser.html` (standalone GUI browser)
+- [ ] Install systemd unit on .115 + start
+- [ ] Validate oracle boots cleanly on .115 (Proton path issues likely)
+- [ ] Document `notes/DEPLOY.md` for future-self
+- [ ] Commit + push all deploy files
 
 ## Known open issues (carried from earlier)
 

@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>sf-multiplayer · server browser</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{
+  --bg:#0e0e10; --fg:#e1e1e6; --muted:#888; --card:#1a1a1f; --card-border:#2a2a30;
+  --accent:#7fff7f; --code-bg:#0a0a0c; --code-fg:#a8c5ff; --warn:#ffb84d;
+}
+*{box-sizing:border-box}
+body{
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  background:var(--bg);color:var(--fg);padding:1.5em;margin:0;line-height:1.45;
+}
+header{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.6em;margin-bottom:1em}
+h1{font-weight:600;font-size:1.4em;margin:0;color:#fff}
+header small{color:var(--muted);font-size:.85em}
+.controls{display:flex;gap:.5em;align-items:center;margin-bottom:1em;flex-wrap:wrap}
+.controls label{color:var(--muted);font-size:.9em}
+.controls input{
+  background:var(--card);color:var(--fg);border:1px solid var(--card-border);
+  padding:.4em .6em;border-radius:4px;font-family:inherit;font-size:.9em;min-width:280px;
+}
+.controls button{
+  background:var(--card-border);color:var(--fg);border:1px solid #3a3a40;
+  padding:.4em .9em;border-radius:4px;cursor:pointer;font-family:inherit;font-size:.9em;
+}
+.controls button:hover{background:#3a3a40}
+#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:1em}
+.lobby{
+  background:var(--card);border:1px solid var(--card-border);border-radius:8px;
+  padding:1em;display:flex;flex-direction:column;gap:.5em;
+}
+.lobby h2{margin:0;font-size:1.8em;font-weight:700;letter-spacing:.1em;color:var(--accent);font-family:inherit}
+.lobby .meta{color:var(--muted);font-size:.85em}
+.lobby .meta span{margin-right:1em}
+.connect-string{display:flex;gap:.4em;align-items:center;margin-top:.3em}
+.connect-string code{
+  background:var(--code-bg);border:1px solid var(--card-border);padding:.4em .6em;
+  border-radius:4px;flex:1;overflow-x:auto;white-space:nowrap;color:var(--code-fg);font-size:.78em;
+}
+.connect-string button{
+  background:var(--card-border);color:var(--fg);border:1px solid #3a3a40;
+  padding:.4em .8em;border-radius:4px;cursor:pointer;font-family:inherit;font-size:.78em;
+}
+.connect-string button:hover{background:#3a3a40}
+.connect-string button.copied{background:var(--accent);color:#000}
+.empty,.error{
+  color:var(--muted);text-align:center;padding:2em;border:1px dashed #333;border-radius:8px;
+  grid-column:1/-1;
+}
+.error{color:var(--warn);border-color:#553}
+.legend{margin-top:2em;color:var(--muted);font-size:.85em;border-top:1px solid var(--card-border);padding-top:1em}
+.legend code{background:var(--card);padding:.1em .3em;border-radius:3px;color:var(--code-fg)}
+.legend kbd{background:var(--code-bg);border:1px solid var(--card-border);padding:.1em .3em;border-radius:3px;font-size:.85em}
+</style>
+</head>
+<body>
+<header>
+  <h1>sf-multiplayer · server browser</h1>
+  <small id="ts">loading…</small>
+</header>
+
+<div class="controls">
+  <label for="url">Lobby endpoint:</label>
+  <input id="url" type="text" placeholder="http://server-ip:8080/lobbies" autocomplete="on">
+  <button onclick="refresh()">refresh</button>
+  <button onclick="toggleAuto()" id="autoBtn">auto-refresh: off</button>
+</div>
+
+<div id="grid">
+  <div class="empty">Enter a lobby endpoint URL above and hit refresh.</div>
+</div>
+
+<div class="legend">
+  <strong>How to connect:</strong>
+  Click <kbd>copy</kbd> next to a lobby's connect string. Then in Steam:<br>
+  &nbsp;&nbsp;Right-click <em>Stick Fight: The Game</em> → Properties → Launch Options → paste → save → click Play.
+  <p>
+  For <strong>Linux/Proton</strong>, prepend <code>WINEDLLOVERRIDES="winhttp=n,b" %command%</code> (so BepInEx loads).<br>
+  For <strong>Windows</strong>, just paste as-is.
+  <p>
+  Default lobby browser endpoint is <code>http://YOUR-SERVER-IP:8080/lobbies</code> (set up via
+  <code>python3 serve-lobbies.py</code> on the server).
+  Your laptop's history is saved in localStorage so the URL persists across reloads.
+</div>
+
+<script>
+const URL_KEY = "sf-mp-browser-url";
+const urlInput = document.getElementById("url");
+const grid = document.getElementById("grid");
+const tsEl = document.getElementById("ts");
+const autoBtn = document.getElementById("autoBtn");
+
+// Restore last URL
+urlInput.value = localStorage.getItem(URL_KEY) || "http://127.0.0.1:8080/lobbies";
+
+let autoTimer = null;
+
+function toggleAuto() {
+  if (autoTimer) {
+    clearInterval(autoTimer);
+    autoTimer = null;
+    autoBtn.textContent = "auto-refresh: off";
+  } else {
+    refresh();
+    autoTimer = setInterval(refresh, 10_000);
+    autoBtn.textContent = "auto-refresh: 10s";
+  }
+}
+
+function copyToClipboard(text, btn) {
+  navigator.clipboard.writeText(text).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = "copied";
+    btn.classList.add("copied");
+    setTimeout(() => { btn.textContent = orig; btn.classList.remove("copied"); }, 1500);
+  });
+}
+
+function buildConnectCmd(host, port, platform) {
+  if (platform === "linux") {
+    return `WINEDLLOVERRIDES="winhttp=n,b" %command% -address ${host} -port ${port}`;
+  }
+  return `-address ${host} -port ${port}`;
+}
+
+async function refresh() {
+  const url = urlInput.value.trim();
+  if (!url) {
+    grid.innerHTML = '<div class="empty">Enter a URL.</div>';
+    return;
+  }
+  localStorage.setItem(URL_KEY, url);
+
+  try {
+    const r = await fetch(url, { cache: "no-store" });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+
+    tsEl.textContent = `updated ${(d.generatedAt || "").slice(11, 19) || "?"} UTC · ${(d.lobbies || []).length} lobbies`;
+
+    if (!d.lobbies || !d.lobbies.length) {
+      grid.innerHTML = '<div class="empty">No lobbies running. Operator: <code>bash launch-lobby.sh CODE</code> on the server.</div>';
+      return;
+    }
+
+    // Server hostname from the URL the user typed (strip the path)
+    let host = "127.0.0.1";
+    try { host = new URL(url).hostname; } catch {}
+
+    grid.innerHTML = d.lobbies.map(l => {
+      const code = l.code || "?";
+      const port = l.port || "?";
+      const linuxCmd = buildConnectCmd(host, port, "linux");
+      const winCmd = buildConnectCmd(host, port, "windows");
+      const startedShort = (l.started || "").slice(11, 19);
+      return `<div class="lobby">
+        <h2>${escapeHtml(code)}</h2>
+        <div class="meta">
+          <span>port ${escapeHtml(port)}</span>
+          ${l.pid ? `<span>pid ${escapeHtml(l.pid)}</span>` : ""}
+          ${startedShort ? `<span>since ${escapeHtml(startedShort)}</span>` : ""}
+        </div>
+        <div class="connect-string">
+          <code>${escapeHtml(linuxCmd)}</code>
+          <button onclick="copyToClipboard(${JSON.stringify(linuxCmd)}, this)">copy linux</button>
+        </div>
+        <div class="connect-string">
+          <code>${escapeHtml(winCmd)}</code>
+          <button onclick="copyToClipboard(${JSON.stringify(winCmd)}, this)">copy windows</button>
+        </div>
+      </div>`;
+    }).join("");
+  } catch (err) {
+    grid.innerHTML = `<div class="error">Couldn't fetch lobbies from <code>${escapeHtml(url)}</code><br>${escapeHtml(String(err))}<br><br>Check the URL is reachable + serves <code>/lobbies</code> JSON.</div>`;
+    tsEl.textContent = "fetch failed";
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+  })[c]);
+}
+
+// Initial load
+refresh();
+</script>
+</body>
+</html>

@@ -1,0 +1,44 @@
+[Unit]
+Description=Stick Fight headless oracle (Phase 6)
+Documentation=https://github.com/kitslayer/sf-multiplayer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=miles
+Group=miles
+WorkingDirectory=/home/miles/sf-oracle/install
+
+# Environment — change SFHEADLESS_PORT here to host on a different port.
+Environment=SF_ORACLE_ROOT=/home/miles/sf-oracle
+Environment=SFHEADLESS_PORT=1337
+Environment=SFHEADLESS_BRIDGEPORT=11337
+Environment=SF_LOBBY_CODE=MAIN
+Environment=SFHEADLESS_DEBUG=1
+Environment=SF_ANTICHEAT_ENFORCE=0
+# Round pacing
+Environment=SF_ROUND_END_DELAY=0.5
+Environment=SF_NEXT_MATCH_DELAY=2.0
+# Per-lobby log
+Environment=SFHEADLESS_LOGFILE=/var/log/sf-oracle-plugin-11337.log
+
+# Launcher
+ExecStart=/home/miles/sf-multiplayer/deploy/start-oracle-server.sh
+
+# Native SF crashes a lot under Proton — auto-restart on failure with backoff
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+# Logging (journalctl -u sf-oracle.service)
+StandardOutput=journal
+StandardError=journal
+
+# Resource limits (loose — adjust if other tenants share the box)
+MemoryMax=2G
+TasksMax=512
+
+[Install]
+WantedBy=multi-user.target
