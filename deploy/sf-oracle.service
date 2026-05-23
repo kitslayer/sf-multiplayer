@@ -20,8 +20,10 @@ Environment=SF_ANTICHEAT_ENFORCE=0
 # Round pacing
 Environment=SF_ROUND_END_DELAY=0.5
 Environment=SF_NEXT_MATCH_DELAY=2.0
-# Per-lobby log
-Environment=SFHEADLESS_LOGFILE=/var/log/sf-oracle-plugin-11337.log
+# Per-lobby log — /tmp by default (writable by the user without sudo).
+# Move to /var/log/sf-oracle/ if you want persistent + log-rotated history;
+# requires sudo to create + chown the dir first.
+Environment=SFHEADLESS_LOGFILE=/tmp/sf-oracle-plugin-11337.log
 
 # Launcher
 ExecStart=/home/miles/sf-multiplayer/deploy/start-oracle-server.sh
