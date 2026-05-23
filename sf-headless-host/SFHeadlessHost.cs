@@ -1113,32 +1113,27 @@ namespace SFHeadlessHost
                 var nsoType = AccessTools.TypeByName("NetworkSyncableObject");
                 if ((object)nsoType == null) { Log.LogWarning("[CLIENT] NetworkSyncableObject type not found."); return; }
 
-                // Patch 1: skip DisableAllRigidBodies. Stops the client from
-                // setting every NSO's rigidbody to kinematic on Init. Crates
-                // remain dynamic → local physics works → pushing them moves
-                // them visually on the user's screen.
-                var dis = AccessTools.Method(nsoType, "DisableAllRigidBodies");
-                if ((object)dis != null)
-                {
-                    harmony.Patch(dis, prefix: new HarmonyMethod(AccessTools.Method(typeof(Plugin), nameof(SkipPrefix))));
-                    Log.LogInfo("[CLIENT] Patched NetworkSyncableObject.DisableAllRigidBodies (skip).");
-                }
-                else Log.LogWarning("[CLIENT] DisableAllRigidBodies method not found.");
-
-                // Patch 2: NSO.Start postfix to force static mHasControl=true.
-                // Allows the client's NSO.LateUpdate to broadcast position
-                // updates so a future multi-player setup would work too.
-                // (Single-player: the local push is already visible without
-                // any broadcast — this is just for forward compatibility.)
-                var startM = AccessTools.Method(nsoType, "Start");
-                if ((object)startM != null)
-                {
-                    harmony.Patch(startM, postfix: new HarmonyMethod(AccessTools.Method(typeof(Plugin), nameof(NsoStartPostfix_Client))));
-                    Log.LogInfo("[CLIENT] Patched NetworkSyncableObject.Start (postfix → mHasControl=true).");
-                }
-                else Log.LogWarning("[CLIENT] NetworkSyncableObject.Start method not found.");
-
-                Log.LogInfo("[CLIENT] Client-mode shim installed. Crates should be dynamic + locally pushable.");
+                // Server-authority architecture: do NOT patch client-side NSO
+                // behavior. Stock SF makes non-host NSOs kinematic + sets
+                // mHasControl=false, so they don't run local physics and
+                // don't broadcast. They receive ObjectUpdate from the host
+                // (our oracle) and apply incoming positions.
+                //
+                // Previously we forced mHasControl=true + skipped
+                // DisableAllRigidBodies on every client. With multiple
+                // clients connected, EVERY client claimed authority over
+                // every NSO — they fought each other (each broadcasting
+                // their own physics result, each running local destruction-
+                // collision logic) → boxes desync'd between clients and
+                // randomly vanished from spurious local destruction events.
+                //
+                // Pure server authority means: oracle's NSOs are dynamic +
+                // mHasControl=true, oracle's ghost rig sweeps physically
+                // push boxes, oracle's NSO.TickSyncPos broadcasts positions,
+                // clients receive + apply. The cost is local-push latency
+                // (~RTT to feel a box move) but cross-client consistency is
+                // perfect because only one source of truth exists.
+                Log.LogInfo("[CLIENT] No client NSO patches — pure server-authority for NSOs.");
             }
             catch (Exception e)
             {
