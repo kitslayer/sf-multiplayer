@@ -12,22 +12,32 @@ Live server end-to-end. Steam Stick Fight (Windows or Linux/Proton) connects to 
 - Death + kill propagation + round advance, full 123-map rotation
 - Box pushing — via the Phase 6.7 *mirror rig* (a kinematic player rig per client that the oracle teleports to the client's reported position so it can collide with `NetworkSyncableObject`s)
 
-**Known broken / partial / untested-live (as of 2026-05-23 night, post-Phase 6.19):**
-- Hard-snap on big divergence is implemented but never live-tested — could be too aggressive (snap thrashing) or too lenient
-- Per-map weapon allow-lists still ignored beyond what SF natively does — every map gets random-from-global, plus pre-placed weapons from `CheckForGroundWeapons` (Phase 6.8 pending)
-- Workshop maps not supported at runtime (just the 123 pre-dumped Landfall scenes)
-- Full input-replay rollback (Phase 6.12.2 v1.0) — currently only hard-snap on divergence; replay loop needs SF Movement state restore
-- Projectile particles in server-side hit damage (v0.3) — current v0.2 hit reg emits damage but skips particle direction bytes for visual feedback
-- Server-side projectile occlusion (v0.3) — bullets currently pass through walls
+**Known broken / partial / untested-live (as of end-of-session 2026-05-23, commit `39f4c56`):**
 
-**Shipped this session (Phase 6.19, commits `c6e9797`, `7b5a037`, `8fa0f20`):**
-- ✅ P0-11 — Y-aware destruction filter (drops killbox-fall destructions, forwards legit ones)
-- ✅ P0-12 — `MapInfoSync` Vector2 key quantization to 0.01 precision
-- ✅ P0-13 — full-keyframe snapshot to each new v26 endpoint
-- ✅ P0-14 — v26.5 `WorldStateSnapshot` carries authoritative `MapInfoSyncableBase` positions; clients kinematic-flip on first sight
-- ✅ P0-15 — `DestructiblePiece.OnCollisionEnter` guard suppresses spurious post-large-lerp destructions
-- ✅ P1-8 — `ValidateDamagePacket` rejects attacker-slot spoofing
-- ✅ Phase 6.17 v0.2 — server-side projectile hit registration (swept sphere check, server-authoritative damage emit)
+See [`notes/SESSION_2026-05-23.md`](notes/SESSION_2026-05-23.md) for the full session handoff. Open items to verify on next-session resume:
+
+- **OPEN-1..OPEN-6** — user-reported bugs from live testing. Some likely fixed by the reverts in `4affabc` (void/lava damage, chains/ice/boxes random break) but UNTESTED on current build. See [`notes/BUGS_BACKLOG.md`](notes/BUGS_BACKLOG.md) "Open — needs verification" section for the test plan.
+- Hard-snap on big divergence — Phase 6.12.2 v1.0 shipped (shift correction) but the >2.5u WARN-log path needs live exercise to confirm threshold is right
+- Per-map weapon allow-lists from actual map data — `/weapons` chat command works for manual control, but no automatic per-map presets
+- Workshop maps not supported at runtime (just the 123 pre-dumped Landfall scenes)
+- Phase 6.17 v0.4 polish ideas — projectile occlusion against NSOs (currently only static scene), per-weapon damage values
+
+**Shipped this session (active, not reverted):**
+- ✅ P0-12 — `MapInfoSync` Vector2 key quantization (silent platform desync from ULP drift)
+- ✅ P0-13 — full-keyframe snapshot to new v26 endpoints (late-joiners get at-rest box positions)
+- ✅ P0-14 — v26.5 `WorldStateSnapshot` carries authoritative `MapInfoSyncableBase` positions
+- ✅ P0-15 — `DestructiblePiece` guard suppresses post-large-lerp swept-collision destructions
+- ✅ Phase 6.12.2 v1.0 — Shift-correction reconciliation (CSGO model: server corrections applied as offset to current local pos)
+- ✅ Phase 6.17 v0.2 — Server-side projectile hit registration (swept sphere check)
+- ✅ Phase 6.17 v0.3 — Particle direction bytes + wall occlusion via Linecast
+- ✅ Phase 6.20 — Chat command admin suite (`/weapons`, `/kick`, `/anticheat`, `/map`, `/listmaps`)
+- ✅ serve-lobbies.py polish — card layout, copy-to-clipboard, `/healthz`
+- ✅ Deploy fix — `setup-all.sh` now deploys `SFHeadlessHost.dll` to BOTH oracle and Steam installs
+
+**Reverted this session (tried, broke things, rolled back in `4affabc`):**
+- ❌ P0-11 Y-aware destruction filter — forwarded chain stress-breaks. Back to drop-all.
+- ❌ P1-8 attacker-slot anti-spoof — blocked all player-on-player damage. Removed.
+- ❌ Dynamic-NSO client patch — caused spurious NSO-on-NSO destructions. Back to stock kinematic.
 
 ## End-state goal — CONFIRMED 2026-05-23
 

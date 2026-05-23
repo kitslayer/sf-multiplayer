@@ -57,3 +57,4 @@ account_name.txt
 user_steam_id.txt
 legacy/StickFightDedicatedSrv/smoke-test
 smoke-test
+__pycache__/

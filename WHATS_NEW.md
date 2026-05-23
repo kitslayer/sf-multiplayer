@@ -1,6 +1,21 @@
 # What's new — 2026-05-23 session
 
-**60+ commits** landed in one day. Running tally so visitors can scan the deltas without scrolling git log. See [`notes/ARCHITECTURE.md`](notes/ARCHITECTURE.md) for the system overview, [`notes/PROTOCOL.md`](notes/PROTOCOL.md) for the wire-format spec, [`notes/BUGS_BACKLOG.md`](notes/BUGS_BACKLOG.md) for the bug incident log, [`notes/AUDIT_2026-05-23.md`](notes/AUDIT_2026-05-23.md) for the end-of-session deep audit.
+**60+ commits** landed in one day. Running tally so visitors can scan the deltas without scrolling git log.
+
+**Session handoff: see [`notes/SESSION_2026-05-23.md`](notes/SESSION_2026-05-23.md)** for the complete pickup-point doc — what shipped, what got reverted, what's still open, and the test plan to verify the current build on next-session resume.
+
+Other key references:
+- [`notes/ARCHITECTURE.md`](notes/ARCHITECTURE.md) — system overview
+- [`notes/PROTOCOL.md`](notes/PROTOCOL.md) — wire-format spec (currently v26.5)
+- [`notes/OBJECT_SYNC.md`](notes/OBJECT_SYNC.md) — how SF's three world-object sync mechanisms interact
+- [`notes/BUGS_BACKLOG.md`](notes/BUGS_BACKLOG.md) — bug incident log with the new "Open — needs verification" section
+- [`notes/AUDIT_2026-05-23.md`](notes/AUDIT_2026-05-23.md) — deep audit with 8 findings
+
+## End-of-session state (commit `39f4c56`)
+
+Three things were attempted then reverted after live testing exposed regressions: **P1-8** (attacker-slot identity check — broke ALL player-on-player damage), **P0-11 Y-aware destruction filter** (forwarded chain stress-breaks), and the **dynamic-NSO client patch** (let local box→ice collisions fire spurious destructions). All reverts are in commit `4affabc`. The session ended after fixing a long-standing deploy-mismatch where `setup-all.sh` wasn't copying `SFHeadlessHost.dll` to the Steam install — which had been silently causing inconsistent client-mode behavior on player1 for ~5 hours.
+
+Net shipped (still active): P0-12 platform-key quantization, P0-13 keyframe snapshot, P0-14 v26.5 platform sync, P0-15 destruction guard, Phase 6.12.2 v1.0 shift-correction reconciliation, Phase 6.17 v0.2/v0.3 server-side hit reg, full chat-command admin suite (Phase 6.20), lobby browser polish, comprehensive docs.
 
 ## Phase 6.19 — five P0s + one P1 + projectile hit reg shipped (2026-05-23 night)
 
