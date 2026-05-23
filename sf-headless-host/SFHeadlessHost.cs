@@ -1535,6 +1535,8 @@ namespace SFHeadlessHost
                     }
                     // Phase 6.5 — periodic state probe (only after match has started).
                     if (_matchStarted) { StateProbe(); TickNsoProbe(); TickStaleNsoFreezer(); }
+                    // Phase 6.17 — advance virtual projectiles each frame.
+                    TickProjectiles();
                     // Phase 6.10 — 30Hz authoritative-state broadcast (msgType 39).
                     TickWorldStateSnapshot();
                     return;
@@ -1609,6 +1611,7 @@ namespace SFHeadlessHost
         // in P2PPackageHandler.CheckMessageType.
         private const byte PktWorldStateSnapshot            = 39;  // server → all clients, 30Hz
         private const byte PktPlayerInput                   = 40;  // client → server, 60Hz (Phase 6.12)
+        private const byte PktClientFireWeapon              = 41;  // client → server, on Weapon.ActuallyShoot (Phase 6.17)
         // === Patched-DLL extensions (kit's patched Assembly-CSharp.dll has
         // these beyond stock SF's 0-38 range). We don't synthesize them, but
         // we relay so peer clients see each other. From ALKA's
@@ -1812,6 +1815,12 @@ namespace SFHeadlessHost
             {
                 try { HandlePlayerInput(data, bodyOffset, bodyLen, from); }
                 catch (Exception ex) { Log.LogWarning($"[SF] HandlePlayerInput threw: {ex.Message}"); }
+                return;
+            }
+            if (msgType == PktClientFireWeapon)
+            {
+                try { HandleClientFireWeapon(data, bodyOffset, bodyLen, from); }
+                catch (Exception ex) { Log.LogWarning($"[SF] HandleClientFireWeapon threw: {ex.Message}"); }
                 return;
             }
 
@@ -2939,6 +2948,90 @@ namespace SFHeadlessHost
         private float _lastSnapshotAt = -1f;
         private uint  _serverTick;
 
+        // === Phase 6.17 v0.1 — server-side projectile registry ===
+        // When a client fires (Weapon.ActuallyShoot on their side), the
+        // SFClientRecon plugin emits PktClientFireWeapon (41). We register
+        // a virtual projectile, advance it each frame, expire after a
+        // configured lifetime, and broadcast positions in the snapshot.
+        // Hit registration is v0.2 — for now this is observability +
+        // visual consistency (all clients see the same bullet trajectory).
+        private class Projectile
+        {
+            public uint     Id;
+            public byte     OwnerSlot;
+            public byte     WeaponType;     // 0=generic, 1=pistol, … (TBD)
+            public Vector3  Position;
+            public Vector3  Velocity;
+            public float    BornAt;
+            public float    LifetimeSec;    // max time of flight before expire
+        }
+        private readonly List<Projectile> _projectiles = new List<Projectile>();
+        private uint _nextProjId = 1;
+        private const float DefaultProjectileSpeed = 60f;     // SF-units/s for pistol
+        private const float DefaultProjectileLifetime = 3f;   // 3s before expire
+
+        // PktClientFireWeapon body (v26.3 — client → server):
+        //   u8  ownerSlot
+        //   u8  weaponType  (passthrough byte; meaning is whatever the client sends)
+        //   f32 originX     (world position of muzzle)
+        //   f32 originY
+        //   f32 originZ
+        //   f32 dirX        (normalized direction)
+        //   f32 dirY
+        //   f32 dirZ
+        //   f32 speed       (units/sec — 0 → use DefaultProjectileSpeed)
+        // Total: 2 + 24 + 4 = 30 bytes.
+        private void HandleClientFireWeapon(byte[] data, int off, int len, IPEndPoint from)
+        {
+            if (len < 30) return;
+            byte ownerSlot  = data[off];
+            byte weaponType = data[off + 1];
+            float ox = BitConverter.ToSingle(data, off + 2);
+            float oy = BitConverter.ToSingle(data, off + 6);
+            float oz = BitConverter.ToSingle(data, off + 10);
+            float dx = BitConverter.ToSingle(data, off + 14);
+            float dy = BitConverter.ToSingle(data, off + 18);
+            float dz = BitConverter.ToSingle(data, off + 22);
+            float speed = BitConverter.ToSingle(data, off + 26);
+            if (ownerSlot > 3) { Log.LogWarning($"[P6.17] Fire reject — bad slot {ownerSlot}"); return; }
+            if (speed <= 0f || float.IsNaN(speed) || float.IsInfinity(speed)) speed = DefaultProjectileSpeed;
+            var dir = new Vector3(dx, dy, dz);
+            if (dir.sqrMagnitude < 0.01f) { Log.LogWarning($"[P6.17] Fire reject — zero/NaN direction"); return; }
+            dir.Normalize();
+            var p = new Projectile
+            {
+                Id          = _nextProjId++,
+                OwnerSlot   = ownerSlot,
+                WeaponType  = weaponType,
+                Position    = new Vector3(ox, oy, oz),
+                Velocity    = dir * speed,
+                BornAt      = Time.realtimeSinceStartup,
+                LifetimeSec = DefaultProjectileLifetime,
+            };
+            _projectiles.Add(p);
+            Log.LogInfo($"[P6.17] Fire registered: id={p.Id} slot={ownerSlot} w={weaponType} pos={p.Position} vel={p.Velocity.magnitude:0.0}u/s");
+        }
+
+        // Advance every live projectile each frame. Expires by age.
+        // Hit registration is v0.2: when projectile passes within ~1u of a
+        // player rig (excluding owner), emit a PktPlayerTookDamage.
+        private void TickProjectiles()
+        {
+            if (_projectiles.Count == 0) return;
+            float now = Time.realtimeSinceStartup;
+            float dt = Time.deltaTime;
+            for (int i = _projectiles.Count - 1; i >= 0; i--)
+            {
+                var p = _projectiles[i];
+                if (now - p.BornAt > p.LifetimeSec)
+                {
+                    _projectiles.RemoveAt(i);
+                    continue;
+                }
+                p.Position += p.Velocity * dt;
+            }
+        }
+
         // Phase 6.14.5 — tick-history ring buffer for lag-comp.
         // Records per-slot positions at each server tick so a future damage-
         // event handler can rewind to validate. We just RECORD here; the
@@ -3010,19 +3103,18 @@ namespace SFHeadlessHost
 
                 if (n == 0 && nsoEntries.Count == 0) return;
 
-                // Body layout v26.2:
+                // Body layout v26.3:
                 //   u32 serverTick
                 //   u8  playerCount
                 //   players: [u8 slot, f32 x, f32 y, f32 z, u32 lastInputSeq] × n  (17/each)
                 //   u16 nsoCount
                 //   NSOs:    [u16 id, f32 x, f32 y, f32 z, f32 rotZ]         × m  (18/each)
+                //   u16 projCount                                                  (NEW v26.3)
+                //   projs:   [u32 id, u8 slot, u8 weaponType, f32 x, f32 y, f32 z] × k  (22/each)
                 //
-                // lastInputSeq is the latest PktPlayerInput sequence the server
-                // has consumed for this slot — foundation for Phase 6.12.2 input
-                // replay rollback (client compares local-predicted position at
-                // sequence N to server's reported position at N; if divergent,
-                // snap + replay buffered inputs from N to current).
-                int bodyLen = 4 + 1 + n * 17 + 2 + nsoEntries.Count * 18;
+                // Projectiles are simple linear-motion server-tracked bullets;
+                // clients render them at the broadcast position. Hit reg is v0.2.
+                int bodyLen = 4 + 1 + n * 17 + 2 + nsoEntries.Count * 18 + 2 + _projectiles.Count * 22;
                 byte[] body = new byte[bodyLen];
                 int off = 0;
                 WriteU32LE(body, off, _serverTick); off += 4;
@@ -3049,6 +3141,17 @@ namespace SFHeadlessHost
                     WriteF32LE(body, off, e.Y); off += 4;
                     WriteF32LE(body, off, e.Z); off += 4;
                     WriteF32LE(body, off, e.RotZ); off += 4;
+                }
+                // Phase 6.17 — projectile entries.
+                WriteU16LE(body, off, (ushort)_projectiles.Count); off += 2;
+                foreach (var p in _projectiles)
+                {
+                    WriteU32LE(body, off, p.Id); off += 4;
+                    body[off++] = p.OwnerSlot;
+                    body[off++] = p.WeaponType;
+                    WriteF32LE(body, off, p.Position.x); off += 4;
+                    WriteF32LE(body, off, p.Position.y); off += 4;
+                    WriteF32LE(body, off, p.Position.z); off += 4;
                 }
 
                 // Broadcast to ALL spawned clients on their v26 endpoint. Once

@@ -97,6 +97,7 @@ namespace SFClientRecon
         private void Awake()
         {
             Log = Logger;
+            Instance = this;
             foreach (var arg in Environment.GetCommandLineArgs())
             {
                 if (arg == "-batchmode" || arg == "-nographics")
@@ -116,6 +117,26 @@ namespace SFClientRecon
             _listenPort = V26_DEFAULT_PORT;
             var envPort = Environment.GetEnvironmentVariable("SFCLIENTRECON_PORT");
             if (!string.IsNullOrEmpty(envPort) && int.TryParse(envPort, out var pp)) _listenPort = pp;
+
+            // Phase 6.17 v0.1 — hook Weapon.ActuallyShoot so we know when the
+            // local player fires. Send PktClientFireWeapon to the oracle so it
+            // can register + simulate a server-side projectile.
+            try
+            {
+                var weaponType = AccessTools.TypeByName("Weapon");
+                if ((object)weaponType != null)
+                {
+                    var actuallyShoot = AccessTools.Method(weaponType, "ActuallyShoot");
+                    if ((object)actuallyShoot != null)
+                    {
+                        var harmony = new Harmony(PluginGuid + ".weapon-shoot");
+                        var postfix = AccessTools.Method(typeof(Plugin), nameof(WeaponShootPostfix));
+                        harmony.Patch(actuallyShoot, postfix: new HarmonyMethod(postfix));
+                        Log.LogInfo("Patched Weapon.ActuallyShoot postfix → emits PktClientFireWeapon.");
+                    }
+                }
+            }
+            catch (Exception e) { Log.LogWarning($"Weapon.ActuallyShoot patch failed: {e.Message}"); }
 
             Log.LogInfo($"{PluginName} {PluginVersion}: starting v26 snapshot listener on UDP :{_listenPort}. vSync off, FPS uncapped.");
             try
@@ -480,6 +501,78 @@ namespace SFClientRecon
             if (_inputSeq == 1 || _inputSeq % 300 == 0)
                 Log.LogInfo($"[P6.12] Sent PlayerInput #{_inputSeq} slot={localSlot} stick=({sx:0.00},{sy:0.00}) btns=0x{btns:X} hist={_historySeq.Count}");
         }
+
+        // Phase 6.17 v0.1 — Harmony postfix on Weapon.ActuallyShoot.
+        // Fires after the local Shoot ran. We capture the muzzle position +
+        // forward direction from the Weapon instance and send a
+        // PktClientFireWeapon (msgType 41) to the oracle. Server simulates
+        // the projectile + broadcasts to all clients in WorldStateSnapshot.
+        //
+        // Only sends for the LOCAL player's weapon (HasControl=true on the
+        // Controller holding this weapon) — remote players' Shoot postfix
+        // also fires when their player rig replays the action, and we don't
+        // want to double-emit.
+        private static void WeaponShootPostfix(object __instance,
+            bool networkForce,
+            Vector3 shootVectorOverride,
+            Vector3 shootPositionOverride)
+        {
+            try
+            {
+                if (Instance == null || Instance._socket == null || Instance._serverEp == null) return;
+
+                var weaponComp = __instance as Component;
+                if ((object)weaponComp == null) return;
+
+                // Find owning Controller — Weapon is a child of the player rig.
+                var ctrlType = AccessTools.TypeByName("Controller");
+                if ((object)ctrlType == null) return;
+                var ctrl = weaponComp.GetComponentInParent(ctrlType);
+                if ((object)ctrl == null) return;
+                var hasCtrlF = AccessTools.Field(ctrlType, "mHasControl");
+                if ((object)hasCtrlF != null && !(bool)hasCtrlF.GetValue(ctrl)) return;  // not the local player
+                var pidF = AccessTools.Field(ctrlType, "playerID");
+                byte slot = 0;
+                if ((object)pidF != null) slot = (byte)(int)pidF.GetValue(ctrl);
+
+                // Origin = shootPositionOverride if set, else weapon's shootPosition.position
+                Vector3 origin = networkForce ? shootPositionOverride : weaponComp.transform.position;
+                Vector3 dir    = networkForce ? shootVectorOverride   : weaponComp.transform.forward;
+                if (dir.sqrMagnitude < 0.001f) return;
+                dir.Normalize();
+
+                Instance.SendFireWeaponPacket(slot, 0 /*weaponType placeholder*/, origin, dir, 0f);
+            }
+            catch (Exception e) { Log.LogWarning($"WeaponShootPostfix: {e.Message}"); }
+        }
+
+        private void SendFireWeaponPacket(byte slot, byte weaponType, Vector3 origin, Vector3 dir, float speed)
+        {
+            // Body 30 bytes: u8 slot, u8 wType, 3×f32 origin, 3×f32 dir, f32 speed
+            byte[] body = new byte[30];
+            body[0] = slot;
+            body[1] = weaponType;
+            WriteF32LE(body, 2,  origin.x);
+            WriteF32LE(body, 6,  origin.y);
+            WriteF32LE(body, 10, origin.z);
+            WriteF32LE(body, 14, dir.x);
+            WriteF32LE(body, 18, dir.y);
+            WriteF32LE(body, 22, dir.z);
+            WriteF32LE(body, 26, speed);
+
+            int totalLen = 5 + body.Length + 9;
+            byte[] pkt = new byte[totalLen];
+            uint ts = (uint)(DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalSeconds;
+            WriteU32LE(pkt, 0, ts);
+            pkt[4] = 41;  // PktClientFireWeapon
+            Buffer.BlockCopy(body, 0, pkt, 5, body.Length);
+            try { _socket.Send(pkt, pkt.Length, _serverEp); }
+            catch (Exception e) { Log.LogWarning($"SendFireWeaponPacket: {e.Message}"); }
+            Log.LogInfo($"[P6.17] Sent FireWeapon slot={slot} w={weaponType} origin={origin} dir={dir}");
+        }
+
+        // Plugin instance accessor for static Harmony postfixes.
+        internal static Plugin Instance { get; private set; }
 
         private static void WriteU32LE(byte[] b, int o, uint v)
         {
