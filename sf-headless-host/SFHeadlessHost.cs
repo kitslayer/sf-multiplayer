@@ -1504,6 +1504,8 @@ namespace SFHeadlessHost
                     }
                     // Phase 6.5 — periodic state probe (only after match has started).
                     if (_matchStarted) { StateProbe(); TickNsoProbe(); TickStaleNsoFreezer(); }
+                    // Phase 6.10 — 30Hz authoritative-state broadcast (msgType 39).
+                    TickWorldStateSnapshot();
                     return;
             }
         }
@@ -1569,6 +1571,13 @@ namespace SFHeadlessHost
         private const byte PktObjectHello                   = 36;
         private const byte PktOptionsChanged                = 37;
         private const byte PktKickPlayer                    = 38;
+        // === v26 extension (Phase 6.10+) — server-authoritative protocol ===
+        // Stock SF's MsgType enum stops at KickPlayer=38. We extend with new
+        // types for the prediction+reconciliation architecture. Stock clients
+        // (no v26 plugin loaded) receive these and ignore via default case
+        // in P2PPackageHandler.CheckMessageType.
+        private const byte PktWorldStateSnapshot            = 39;  // server → all clients, 30Hz
+        private const byte PktPlayerInput                   = 40;  // client → server, 60Hz (Phase 6.12)
 
         // Per-client connection state. Keyed by remote address:port string so
         // the same SF instance keeps its slot/SteamID across packets.
@@ -2323,6 +2332,74 @@ namespace SFHeadlessHost
             catch (Exception e) { Log.LogWarning($"[P6.9 ConfigureAuthoritativeRig] {e.Message}"); }
         }
 
+        // === Phase 6.10 — server-authoritative snapshots ===
+        // 30Hz broadcast of the oracle's view of every authoritative player rig's
+        // position. The wire format is intentionally simple for now — Phase 6.11
+        // will ship the client-side reconciliation plugin that consumes these,
+        // and Phase 6.12 adds the playerInput inbound side + tighter packing
+        // (compressed int16 + delta encoding + the lastInputSeq field that drives
+        // reconciliation rollback).
+        //
+        // Body (v26 draft):
+        //   u32 serverTick (LE)
+        //   u8  playerCount
+        //   for each player:
+        //     u8  slot
+        //     f32 posX (LE)
+        //     f32 posY (LE)
+        //     f32 posZ (LE)
+        //
+        // Stock clients ignore msgType 39 (their MsgType enum stops at 38) so
+        // this is wire-safe to broadcast even before the client plugin lands.
+        private float _lastSnapshotAt = -1f;
+        private uint  _serverTick;
+        private void TickWorldStateSnapshot()
+        {
+            if (!_matchStarted) return;
+            if (_sfClients.Count == 0) return;
+            if (Time.realtimeSinceStartup - _lastSnapshotAt < (1.0f / 30.0f)) return;
+            _lastSnapshotAt = Time.realtimeSinceStartup;
+            _serverTick++;
+            BroadcastWorldStateSnapshot();
+        }
+
+        private void BroadcastWorldStateSnapshot()
+        {
+            try
+            {
+                int n = 0;
+                foreach (var kv in SlotToRig) if ((object)kv.Value != null) n++;
+                if (n == 0) return;
+
+                int bodyLen = 4 + 1 + n * (1 + 12);
+                byte[] body = new byte[bodyLen];
+                int off = 0;
+                WriteU32LE(body, off, _serverTick); off += 4;
+                body[off++] = (byte)n;
+                foreach (var kv in SlotToRig)
+                {
+                    var rig = kv.Value;
+                    if ((object)rig == null) continue;
+                    body[off++] = (byte)kv.Key;
+                    Vector3 p = rig.transform.position;
+                    WriteF32LE(body, off, p.x); off += 4;
+                    WriteF32LE(body, off, p.y); off += 4;
+                    WriteF32LE(body, off, p.z); off += 4;
+                }
+                // Broadcast to ALL spawned clients (including the originator —
+                // they get their own authoritative position back, which Phase
+                // 6.11's client plugin will use to drive reconciliation).
+                foreach (var kv in _sfClients)
+                {
+                    if (!kv.Value.Spawned) continue;
+                    SendSfPacket(kv.Value.Addr, PktWorldStateSnapshot, body, 0, 0);
+                }
+                if (_serverTick == 1 || _serverTick % 90 == 0)
+                    Log.LogInfo($"[P6.10] Snapshot tick={_serverTick} n={n} bytes={bodyLen}");
+            }
+            catch (Exception e) { Log.LogWarning($"[P6.10] {e.Message}"); }
+        }
+
         // Freeze NSO rigidbodies that fell out of the playable area.
         // Stock SF's host kills crates that cross the killbox (Y<-50);
         // we don't have that cleanup, so falling crates accelerate
@@ -2418,6 +2495,18 @@ namespace SFHeadlessHost
             buf[off + 1] = (byte)(v >>  8 & 0xFF);
             buf[off + 2] = (byte)(v >> 16 & 0xFF);
             buf[off + 3] = (byte)(v >> 24 & 0xFF);
+        }
+
+        private static void WriteF32LE(byte[] buf, int off, float v)
+        {
+            // BitConverter.GetBytes is little-endian on x86/x64. We target
+            // x64 Linux/Windows for the oracle; if we ever support PowerPC
+            // or BE clients this needs an endian guard.
+            var bytes = System.BitConverter.GetBytes(v);
+            buf[off    ] = bytes[0];
+            buf[off + 1] = bytes[1];
+            buf[off + 2] = bytes[2];
+            buf[off + 3] = bytes[3];
         }
         private static void WriteU64LE(byte[] buf, int off, ulong v)
         {
