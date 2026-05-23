@@ -284,9 +284,12 @@ namespace SFClientRecon
             float t = 1f - Mathf.Exp(-SmoothRate * Time.deltaTime);
             try
             {
-                // Players: only smooth the local player (others come from forwarded PlayerUpdate)
-                int localSlot = FindLocalSlot();
-                if (localSlot >= 0 && _playerTargets.TryGetValue(localSlot, out var target))
+                // Players: smooth every slot that has a target recorded.
+                // _playerTargets is filtered at ApplySnapshot time per the
+                // SFCLIENTRECON_SMOOTH_REMOTE env var — so iterating all here
+                // is correct whether the user enabled remote-player smoothing
+                // or not.
+                if (_playerTargets.Count > 0)
                 {
                     var npType = AccessTools.TypeByName("NetworkPlayer");
                     if ((object)npType != null)
@@ -298,12 +301,12 @@ namespace SFClientRecon
                             foreach (var np in nps)
                             {
                                 var pidObj = pidField.GetValue(np);
-                                if (!(pidObj is int pi) || pi != localSlot) continue;
+                                if (!(pidObj is int pi)) continue;
+                                if (!_playerTargets.TryGetValue(pi, out var target)) continue;
                                 var npComp = np as Component;
                                 var rb = npComp.GetComponent<Rigidbody>() ?? npComp.GetComponentInChildren<Rigidbody>();
                                 if ((object)rb != null) rb.position = Vector3.Lerp(rb.position, target, t);
                                 else npComp.transform.position = Vector3.Lerp(npComp.transform.position, target, t);
-                                break;
                             }
                         }
                     }
@@ -508,15 +511,21 @@ namespace SFClientRecon
                 var pidField = AccessTools.Field(npType, "playerID");
                 if ((object)pidField == null) return;
 
+                bool smoothRemote = Environment.GetEnvironmentVariable("SFCLIENTRECON_SMOOTH_REMOTE") == "1";
                 foreach (var entry in snap)
                 {
-                    // Phase 6.11 minimum: only correct LOCAL player. Other
-                    // players continue rendering from forwarded PlayerUpdate.
-                    if (entry.Slot != localSlot) continue;
-                    // Phase 6.11.2 — record target; SmoothTowardTargets lerps each frame.
+                    bool isLocal = entry.Slot == localSlot;
+                    // Phase 6.11 default: only correct LOCAL player. Other
+                    // players come from forwarded PlayerUpdate (msgType 10).
+                    // Opt-in via SFCLIENTRECON_SMOOTH_REMOTE=1 to also apply
+                    // server positions for remote slots — fully server-
+                    // authoritative view, more consistent across clients, but
+                    // depends on server having accurate positions (gated until
+                    // server-side simulation is rock solid).
+                    if (!isLocal && !smoothRemote) continue;
                     var target = new Vector3(entry.X, entry.Y, entry.Z);
                     _playerTargets[entry.Slot] = target;
-                    _serverLastAckedSeq = entry.LastInputSeq;
+                    if (isLocal) _serverLastAckedSeq = entry.LastInputSeq;
                     // Phase 6.12.2 (in-progress) — divergence detection. Look up
                     // local-predicted position at the same seq the server is
                     // reporting and warn if it drifted significantly. Full
