@@ -3072,11 +3072,23 @@ namespace SFHeadlessHost
 
         private struct NsoSnap { public ushort Id; public float X, Y, Z, RotZ; }
 
-        // Gather active (non-kinematic) NSOs in the scene as snapshot entries.
-        // Skips kinematic NSOs (static crates/chains) to keep packet size down
-        // — those don't move so clients can keep their local position. Phase
-        // 6.14.1 will add per-NSO active-flag tracking so a recently-moved NSO
-        // stays in the snapshot for a few seconds after it settles.
+        // Gather NSOs that need broadcasting this tick. Three include cases:
+        //   1. Non-kinematic NSO with current velocity (boxes being pushed,
+        //      crates falling).
+        //   2. Kinematic NSO whose position changed since last snapshot
+        //      (moving platforms, animator-driven kinematic bodies — these
+        //      have isKinematic=true but their transform is being driven by
+        //      Animator/script).
+        //   3. NSO that was in case 1 or 2 within the last ~1s ("keepalive"
+        //      so smoothing on the client catches the final settle frame
+        //      after motion stops, not a stale snap from 33ms ago).
+        //
+        // Static crates that haven't moved skip — saves bandwidth.
+        private readonly Dictionary<ushort, Vector3> _nsoLastBroadcastPos = new Dictionary<ushort, Vector3>();
+        private readonly Dictionary<ushort, float>   _nsoLastMovedAt      = new Dictionary<ushort, float>();
+        private const float NsoPosDeltaThreshold = 0.01f;   // ~1 cm
+        private const float NsoKeepaliveSec      = 1.0f;
+
         private List<NsoSnap> CollectActiveNsoSnapshot()
         {
             var result = new List<NsoSnap>();
@@ -3091,13 +3103,11 @@ namespace SFHeadlessHost
                 }
                 var all = UnityEngine.Object.FindObjectsOfType(_nsoType);
                 if (all == null) return result;
+                float now = Time.realtimeSinceStartup;
                 foreach (var nso in all)
                 {
                     var comp = nso as Component;
                     if ((object)comp == null) continue;
-                    var rb = comp.GetComponent<Rigidbody>();
-                    if ((object)rb == null) continue;
-                    if (rb.isKinematic) continue;
 
                     ushort id = 0;
                     if ((object)_nsoIndexProp != null)
@@ -3106,6 +3116,27 @@ namespace SFHeadlessHost
                         id = (ushort)_nsoIndexField.GetValue(nso);
 
                     var p = comp.transform.position;
+                    var rb = comp.GetComponent<Rigidbody>();
+
+                    // Case 1: non-kinematic w/ active motion.
+                    bool dynamicMoving = (object)rb != null && !rb.isKinematic
+                        && (rb.velocity.sqrMagnitude > 0.0001f || rb.angularVelocity.sqrMagnitude > 0.0001f);
+
+                    // Case 2: position drifted since last broadcast (covers
+                    // kinematic Animator-driven moving platforms, but ALSO
+                    // catches the final-settle frame of dynamic bodies).
+                    bool positionDrifted = !_nsoLastBroadcastPos.TryGetValue(id, out var lastPos)
+                        || Vector3.Distance(p, lastPos) > NsoPosDeltaThreshold;
+
+                    // Case 3: recently moved (keepalive).
+                    bool recentlyActive = _nsoLastMovedAt.TryGetValue(id, out var lastMovedAt)
+                        && (now - lastMovedAt) < NsoKeepaliveSec;
+
+                    if (!dynamicMoving && !positionDrifted && !recentlyActive) continue;
+
+                    if (dynamicMoving || positionDrifted) _nsoLastMovedAt[id] = now;
+                    _nsoLastBroadcastPos[id] = p;
+
                     var e = comp.transform.eulerAngles;
                     result.Add(new NsoSnap { Id = id, X = p.x, Y = p.y, Z = p.z, RotZ = e.z });
                 }
