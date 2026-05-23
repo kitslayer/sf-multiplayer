@@ -63,13 +63,30 @@ The current "mirror rig that teleports to client position" approach is acknowled
 - v1.5 (shipped 2026-05-23): lobby browser endpoint — [`serve-lobbies.py`](serve-lobbies.py) exposes the registry as JSON at `GET /lobbies`. Any server browser (in-game mod, web UI) can poll. Filters out stale entries.
 - v2 (design only): in-process — N additive scenes at Z-offset in one SF process, per-shard state isolation, Harmony dispatch on SF singletons. See [`notes/phase6/12-PHASE6.13-sharding.md`](notes/phase6/12-PHASE6.13-sharding.md) for the design + roadmap.
 
-### Phase 6.14+ — broader authority
-- Server-authoritative damage / hit registration
-- Server-authoritative destructibles (ice, chains) so they only break when the server says so
-- Server-authoritative weapon spawns including map-presets + per-map allow-lists (the still-pending Phase 6.8 work folds in here)
-- Server-side rewind buffer for lag-comp hit registration (CSGO-style 100ms rewind on hit detection)
-- Anticheat module — per-client packet rate limits, plausibility checks, slot ↔ SteamID validation
+### Phase 6.14 — Server-authoritative NSO positions ✅ (v0.1)
+- Server includes NSO positions in `WorldStateSnapshot` (msgType 39)
+- Client snaps local NSO transforms to server values
+- Next: smoothing/interpolation between snapshots (6.14.1)
+
+### Phase 6.14.5 — Server rewind buffer (lag-comp) — design only
+- See [`notes/phase6/13-rewind-buffer.md`](notes/phase6/13-rewind-buffer.md)
+- CSGO-style 100ms tick history; server rewinds positions to validate damage events
+- Gated behind anticheat-lite (slot↔SteamID validation, weapon plausibility) shipping first
+
+### Phase 6.15 — Chat-command admin interface — design only
+- See [`notes/phase6/14-chat-commands.md`](notes/phase6/14-chat-commands.md)
+- Patched DLL already emits `/start`, `/code`, `/newlobby`, etc. as `PktPlayerTalked` on owner-channel `(slot*2)+3`
+- Server side: parse → dispatch → send chat response
+- Half-day effort for v1 commands (`/start`, `/code`, `/newlobby`); `/join` waits on v2 in-process sharding
+
+### Phase 6.16+ — broader authority
+- Server-authoritative damage / hit registration (server validates damage events vs position+weapon)
+- Server-authoritative destructibles full-physics (server simulates shards too, not just NSO parents)
+- Server-authoritative weapon spawns with map-preset weapons + per-map allow-lists (Phase 6.8 task #34)
+- Anticheat — promote observer to actively rate-limit + slot ↔ SteamID validation
 - Workshop maps loaded at runtime (not just pre-dumped Landfall maps)
+- Client-side smooth interpolation on snapshot apply (Phase 6.11.2)
+- Input prediction replay rollback (Phase 6.12.2)
 
 ## Where to start reading
 
