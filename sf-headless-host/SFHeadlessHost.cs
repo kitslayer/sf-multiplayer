@@ -1306,6 +1306,11 @@ namespace SFHeadlessHost
         private int _settleFrames;
         private int _heartbeatTicks;
         private float _lastHeartbeat;
+        // Rolling counters for the heartbeat status line — diffed against
+        // current totals each interval to compute per-second rates.
+        private long  _heartbeatLastPkt;
+        private uint  _heartbeatLastSnap;
+        private uint  _heartbeatLastInput;
 
         private int _updateErrorTicks;
         private void Update()
@@ -1514,9 +1519,19 @@ namespace SFHeadlessHost
                     var interval = Verbose ? 5.0f : 30.0f;
                     if (Time.realtimeSinceStartup - _lastHeartbeat >= interval)
                     {
+                        float elapsed = Time.realtimeSinceStartup - _lastHeartbeat;
                         _lastHeartbeat = Time.realtimeSinceStartup;
                         _heartbeatTicks++;
-                        Log.LogInfo($"heartbeat: scene={SceneManager.GetActiveScene().name} tick={_heartbeatTicks}");
+                        // Rates over the interval window.
+                        float pktRate   = (_sfPacketsRx        - _heartbeatLastPkt)   / elapsed;
+                        float snapRate  = (_serverTick         - _heartbeatLastSnap)  / elapsed;
+                        float inputRate = (_inputPacketsRx     - _heartbeatLastInput) / elapsed;
+                        _heartbeatLastPkt   = _sfPacketsRx;
+                        _heartbeatLastSnap  = _serverTick;
+                        _heartbeatLastInput = _inputPacketsRx;
+                        int spawned = 0, connected = 0;
+                        foreach (var kv in _sfClients) { connected++; if (kv.Value.Spawned) spawned++; }
+                        Log.LogInfo($"heartbeat: scene={SceneManager.GetActiveScene().name} tick={_heartbeatTicks} | clients={connected} spawned={spawned} | rx={pktRate:0.0}/s snap={snapRate:0.0}/s input={inputRate:0.0}/s | rigs={SlotToRig.Count} matchStarted={_matchStarted}");
                     }
                     // Phase 6.5 — periodic state probe (only after match has started).
                     if (_matchStarted) { StateProbe(); TickNsoProbe(); TickStaleNsoFreezer(); }
