@@ -33,26 +33,35 @@ The current "mirror rig that teleports to client position" approach is acknowled
 
 ## Roadmap
 
-### Phase 6.9 — real authoritative NetworkPlayer per client (next up)
-- **Rip** the mirror rig (`SpawnMirrorRigsForAllClients`, `UpdateMirrorRigPosition`, `MakeRigKinematicMirror`) and the just-shipped settle-phase coroutine
-- **Spawn** a real NetworkPlayer per connected client on the oracle via `Instantiate(playerPrefab)` (`TrySpawnPlayer` is a starting point — it already binds CharacterActions via `TakeLocalControl`, but needs adjusting to behave as the server-authoritative copy)
-- **Patch** `Controller.HasControl` / `NetworkPlayer.IsLocallyControlled` → `true` for all oracle-side rigs via Harmony postfix
-- **Drive** each rig's Movement.cs from a per-slot input buffer — the `SlotInputs` infrastructure + `InjectInputPrefix` on `Controller.Update` already exist in the plugin
+### Phase 6.9 — real authoritative NetworkPlayer per client ✅
+- Ripped the Phase 6.7 mirror rig (`SpawnMirrorRigsForAllClients`, `UpdateMirrorRigPosition`, `MakeRigKinematicMirror`) and the settle-phase coroutine
+- Renamed → `SpawnAuthoritativePlayersForAllClients` + `ConfigureAuthoritativeRig`
+- Per-instance `Controller.mHasControl = true` on each spawned rig (server-side authority)
+- `HandlePlayerUpdate` is now pure relay; no longer drives anything server-side
 
-### Phase 6.10 — server snapshots
-- Server broadcasts authoritative position/velocity for every entity (players + NSOs) at ~30Hz
-- Reuse existing `PlayerUpdate` (msgType 10) carrier for player positions; broadcast to **all** clients including sender (not just others, as currently)
-- Existing NSO `ObjectUpdate` (msgType 26) broadcast already covers boxes/barrels
+### Phase 6.10 — server snapshots ✅
+- New v26 msgType `PktWorldStateSnapshot` (39)
+- Server broadcasts at 30Hz to all spawned clients on v26 port (1339)
+- Wire format: `u32 serverTick, u8 playerCount, [u8 slot, f32 x, f32 y, f32 z] × N`
+- Stock clients ignore msgType 39 (their `MsgType` enum stops at 38) — safe to ship before client plugin lands
 
-### Phase 6.11 — client reconciliation
-- Client-side Harmony patch (extend the patched `Assembly-CSharp.dll` or add a small new BepInEx plugin shipped alongside): on incoming `PlayerUpdate` for the client's *own* slot, snap-correct local position smoothly over ~100ms
-- Local player keeps running Movement (= prediction); server's position is final
+### Phase 6.11 — client reconciliation ✅ (snap, no smoothing yet)
+- New BepInEx plugin: [`sf-client-recon/`](sf-client-recon/) shipped to each player's `<SF install>/BepInEx/plugins/`
+- Binds UDP 1339, parses incoming `PktWorldStateSnapshot`, snap-corrects local `NetworkPlayer` position to server's authoritative view
+- Phase 6.11.2 (next): replace instant snap with smooth interpolation over ~100ms
+- Phase 6.11.3 (later): also correct OTHER players' positions (currently they're still driven by forwarded `PlayerUpdate`)
 
-### Phase 6.12 — input prediction + reconciliation replay
-- Define v26 `playerInput` msgType: `{ u32 sequenceNum, float stickX, float stickY, float aimX, float aimY, u32 buttons }`
-- Client sends every fixed-update tick
-- Server processes inputs in order; tags each outgoing snapshot with the last-acked sequence
-- Client maintains an input ring buffer; on snapshot arrival, if local position at sequence N differs from server position at sequence N beyond tolerance, replay buffered inputs from N to current
+### Phase 6.12 — input prediction + reconciliation replay (next up)
+- Define v26 `PktPlayerInput` (msgType 40): `{ u32 sequenceNum, f32 stickX, f32 stickY, f32 aimX, f32 aimY, u32 buttons }`
+- Client `SFClientRecon` plugin sends every fixed-update tick (or on input change) to the oracle on its v26 port
+- Oracle parses inbound `PktPlayerInput`, populates the existing `SlotInputs` buffer — at which point the spawned authoritative rig's Movement.cs starts producing real authoritative positions instead of staying at spawn
+- Oracle tags each outgoing snapshot with `lastInputSeq` (last sequence number consumed for that slot)
+- Client maintains a sequence-tagged input ring buffer; on snapshot arrival, if local predicted position at sequence N differs from server position at sequence N beyond a tolerance, the client replays buffered inputs from N to current — the canonical CSGO rollback model
+
+### Phase 6.13+ — broader authority
+- Server-authoritative damage / hit registration
+- Server-authoritative destructibles (ice, chains) so they only break when the server says so
+- Server-authoritative weapon spawns including map-presets + per-map allow-lists (the still-pending Phase 6.8 work folds in here)
 
 ## Where to start reading
 

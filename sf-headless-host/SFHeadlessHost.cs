@@ -2351,6 +2351,10 @@ namespace SFHeadlessHost
         //
         // Stock clients ignore msgType 39 (their MsgType enum stops at 38) so
         // this is wire-safe to broadcast even before the client plugin lands.
+        // Port the v26 client plugin (SFClientRecon) binds on. Hardcoded for
+        // now; env-var override comes when we add multi-client-on-same-host
+        // testing (e.g. two SF instances on the dev machine).
+        private const int V26_CLIENT_PORT = 1339;
         private float _lastSnapshotAt = -1f;
         private uint  _serverTick;
         private void TickWorldStateSnapshot()
@@ -2386,13 +2390,17 @@ namespace SFHeadlessHost
                     WriteF32LE(body, off, p.y); off += 4;
                     WriteF32LE(body, off, p.z); off += 4;
                 }
-                // Broadcast to ALL spawned clients (including the originator —
-                // they get their own authoritative position back, which Phase
-                // 6.11's client plugin will use to drive reconciliation).
+                // Broadcast to ALL spawned clients on their v26 listener port
+                // (NOT their v25 ephemeral source port). The Phase 6.11
+                // SFClientRecon plugin binds UDP on V26_CLIENT_PORT and
+                // applies these snapshots; stock clients without the plugin
+                // simply have nothing listening there, so this is a no-op
+                // for them.
                 foreach (var kv in _sfClients)
                 {
                     if (!kv.Value.Spawned) continue;
-                    SendSfPacket(kv.Value.Addr, PktWorldStateSnapshot, body, 0, 0);
+                    var v26Ep = new IPEndPoint(kv.Value.Addr.Address, V26_CLIENT_PORT);
+                    SendSfPacket(v26Ep, PktWorldStateSnapshot, body, 0, 0);
                 }
                 if (_serverTick == 1 || _serverTick % 90 == 0)
                     Log.LogInfo($"[P6.10] Snapshot tick={_serverTick} n={n} bytes={bodyLen}");

@@ -7,6 +7,8 @@
 refs/
 */refs/
 **/refs/
+# explicit: symlinked refs/ (sf-client-recon/refs -> sf-headless-host/refs)
+sf-client-recon/refs
 
 # ---- Build output ----
 bin/
