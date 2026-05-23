@@ -237,12 +237,80 @@ namespace SFClientRecon
             }
             if (snap != null)    ApplySnapshot(snap, tick);
             if (nsoSnap != null) ApplyNsoSnapshot(nsoSnap, tick);
+
+            // Phase 6.11.2 — between snapshots, exponentially lerp current
+            // positions toward latest targets so the visual feel is smooth
+            // instead of teleporting every 33ms (30Hz snapshot rate).
+            SmoothTowardTargets();
+
             // Phase 6.12 — send input packets at 60Hz once local slot is known.
             if (_txSocket != null && Time.realtimeSinceStartup - _lastInputSendAt >= InputSendInterval)
             {
                 _lastInputSendAt = Time.realtimeSinceStartup;
                 SendPlayerInputPacket();
             }
+        }
+
+        // Smoothing targets — apply each frame in Update via exponential lerp.
+        // Higher SmoothRate = snappier (less lag, more jitter).
+        // Lower = smoother (more lag, less jitter). 15/s is a reasonable middle
+        // ground at 30Hz snapshot rate (settles ~95% of error in 200ms).
+        private const float SmoothRate = 15f;
+        private readonly Dictionary<int, Vector3> _playerTargets = new Dictionary<int, Vector3>();
+        private struct PoseTarget { public Vector3 Pos; public Quaternion Rot; }
+        private readonly Dictionary<ushort, PoseTarget> _nsoTargets = new Dictionary<ushort, PoseTarget>();
+        private void SmoothTowardTargets()
+        {
+            if (_playerTargets.Count == 0 && _nsoTargets.Count == 0) return;
+            float t = 1f - Mathf.Exp(-SmoothRate * Time.deltaTime);
+            try
+            {
+                // Players: only smooth the local player (others come from forwarded PlayerUpdate)
+                int localSlot = FindLocalSlot();
+                if (localSlot >= 0 && _playerTargets.TryGetValue(localSlot, out var target))
+                {
+                    var npType = AccessTools.TypeByName("NetworkPlayer");
+                    if ((object)npType != null)
+                    {
+                        var nps = UnityEngine.Object.FindObjectsOfType(npType);
+                        var pidField = AccessTools.Field(npType, "playerID");
+                        if (nps != null && (object)pidField != null)
+                        {
+                            foreach (var np in nps)
+                            {
+                                var pidObj = pidField.GetValue(np);
+                                if (!(pidObj is int pi) || pi != localSlot) continue;
+                                var npComp = np as Component;
+                                var rb = npComp.GetComponent<Rigidbody>() ?? npComp.GetComponentInChildren<Rigidbody>();
+                                if ((object)rb != null) rb.position = Vector3.Lerp(rb.position, target, t);
+                                else npComp.transform.position = Vector3.Lerp(npComp.transform.position, target, t);
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // NSOs: smooth all entries in the target dict against cached refs.
+                if (_nsoTargets.Count > 0 && _nsoCache.Count > 0)
+                {
+                    foreach (var kv in _nsoTargets)
+                    {
+                        if (!_nsoCache.TryGetValue(kv.Key, out var comp) || (object)comp == null) continue;
+                        var rb = comp.GetComponent<Rigidbody>();
+                        if ((object)rb != null)
+                        {
+                            rb.position = Vector3.Lerp(rb.position, kv.Value.Pos, t);
+                            rb.rotation = Quaternion.Slerp(rb.rotation, kv.Value.Rot, t);
+                        }
+                        else
+                        {
+                            comp.transform.position = Vector3.Lerp(comp.transform.position, kv.Value.Pos, t);
+                            comp.transform.rotation = Quaternion.Slerp(comp.transform.rotation, kv.Value.Rot, t);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex) { Log.LogWarning($"[P6.11.2 smooth] {ex.Message}"); }
         }
 
         // Phase 6.14 — apply server-authoritative NSO positions (boxes,
@@ -294,26 +362,13 @@ namespace SFClientRecon
                 int applied = 0;
                 foreach (var e in snap)
                 {
-                    if (!_nsoCache.TryGetValue(e.Id, out var comp)) continue;
-                    if ((object)comp == null) continue;
-                    var target = new Vector3(e.X, e.Y, e.Z);
-                    var rb = comp.GetComponent<Rigidbody>();
-                    if ((object)rb != null)
-                    {
-                        rb.position = target;
-                        rb.rotation = Quaternion.Euler(0f, 0f, e.RotZ);
-                        // Don't zero velocity — let local prediction continue
-                        // between snapshots so motion stays smooth.
-                    }
-                    else
-                    {
-                        comp.transform.position = target;
-                        comp.transform.rotation = Quaternion.Euler(0f, 0f, e.RotZ);
-                    }
+                    if (!_nsoCache.ContainsKey(e.Id)) continue;
+                    // Phase 6.11.2 — record target; SmoothTowardTargets lerps each frame.
+                    _nsoTargets[e.Id] = new PoseTarget { Pos = new Vector3(e.X, e.Y, e.Z), Rot = Quaternion.Euler(0f, 0f, e.RotZ) };
                     applied++;
                 }
                 if (_snapsApplied == 1 || _snapsApplied % 90 == 0)
-                    Log.LogInfo($"[P6.14] NSO snap tick={tick} applied {applied}/{snap.Count}");
+                    Log.LogInfo($"[P6.14] NSO snap tick={tick} targeted {applied}/{snap.Count}");
             }
             catch (Exception ex) { Log.LogWarning($"[P6.14 NSO apply] {ex.Message}"); }
         }
@@ -403,24 +458,8 @@ namespace SFClientRecon
                     // Phase 6.11 minimum: only correct LOCAL player. Other
                     // players continue rendering from forwarded PlayerUpdate.
                     if (entry.Slot != localSlot) continue;
-
-                    UnityEngine.Object matched = null;
-                    foreach (var np in nps)
-                    {
-                        var pidObj = pidField.GetValue(np);
-                        if (pidObj is int pi && pi == entry.Slot) { matched = np; break; }
-                    }
-                    if ((object)matched == null) continue;
-
-                    var npComp = matched as Component;
-                    if ((object)npComp == null) continue;
-
-                    var target = new Vector3(entry.X, entry.Y, entry.Z);
-                    // Snap the root rigidbody (and transform fallback).
-                    var rb = npComp.GetComponent<Rigidbody>();
-                    if ((object)rb == null) rb = npComp.GetComponentInChildren<Rigidbody>();
-                    if ((object)rb != null) rb.position = target;
-                    npComp.transform.position = target;
+                    // Phase 6.11.2 — record target; SmoothTowardTargets lerps each frame.
+                    _playerTargets[entry.Slot] = new Vector3(entry.X, entry.Y, entry.Z);
                 }
                 _snapsApplied++;
                 if (_snapsApplied == 1 || _snapsApplied % 90 == 0)
