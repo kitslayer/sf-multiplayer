@@ -2,9 +2,11 @@
 
 Centralized dedicated-server revival for **Stick Fight: The Game** (Steam app 674940), built for the competitive scene to replace stock P2P with an authoritative server. Goal: fix rubber-banding, host-migration drops, and the long-standing physics divergence between clients.
 
-> **Status: alpha.** Real Stick Fight (Windows or Linux/Proton) connects directly to `SFHeadlessHost.dll` running inside a headless instance of the game on UDP 1337. The host-side gameplay loop — physics, killboxes, weapon spawn timers — runs through SF's own code, with the headless host plugin driving it via Harmony patches.
+> **Status: alpha, active development.** Real Stick Fight (Windows or Linux/Proton) connects directly to `SFHeadlessHost.dll` running inside a headless instance of the game on UDP 1337. The host-side gameplay loop — physics, killboxes, weapon spawn timers, pickup/throw/drop, destruction, scene transitions — runs through SF's own code, with the headless host plugin driving it via Harmony patches. We extended SF's stock wire protocol (v25) with a v26 channel for server-authoritative state snapshots and client inputs.
 >
-> The end-state goal is full client-side prediction + server reconciliation: client predicts locally, sends inputs to the server, server runs the authoritative simulation, broadcasts snapshots, client snap-corrects when its prediction diverged.
+> **What works today:** end-to-end connection + handshake + spawn + match flow, weapon pickup/throw/drop, death + round advance + 123-map rotation, ice/crate/chain destruction broadcast to all clients including the breaker (fixes "ice doesn't break on my screen"), server-side NSO position snapshots so boxes and moving platforms occupy the same place on every client, server-side projectile registration on fire, server-side damage validation (range + magnitude), multi-lobby on one host (multi-process), in-game chat commands (`/code`, `/start`, `/players`, etc.), client-side snapshot smoothing + divergence-snap, anticheat rate observer.
+>
+> **End-state goal:** full client-side prediction + server reconciliation. Client predicts movement locally for input responsiveness, sends inputs to the server, server runs the authoritative simulation, broadcasts snapshots, client snap-corrects when its prediction diverged. We have the wire protocol shipped (v26.3) and the foundations of all the pieces — what's still rough is the actual replay-rollback loop and hit-registration on server-side projectiles. See [`NEXT_STEPS.md`](NEXT_STEPS.md) for the roadmap and [`WHATS_NEW.md`](WHATS_NEW.md) for the running session log.
 
 ## What's in this repo
 
@@ -29,17 +31,29 @@ Centralized dedicated-server revival for **Stick Fight: The Game** (Steam app 67
 ## Architecture
 
 ```
-SF clients (Windows or Linux/Proton)
-   │  UDP v25 — [u32 ts][u8 msgType][N body][u64 steamID][u8 channel]
+SF clients (Windows or Linux/Proton, patched Assembly-CSharp.dll + SFClientRecon.dll)
+   │  UDP v25 (msgTypes 0-38)  ── stock SF gameplay packets
+   │       to :1337
+   │  UDP v26 (msgType 40 PlayerInput, 41 ClientFireWeapon)
+   │       to :1337
    ▼
 Headless Stick Fight (Proton + Goldberg, BepInEx + SFHeadlessHost.dll)
-   • Raw-UDP v25 server on :1337
+   • Raw-UDP server on :1337 — speaks v25 + v26 on same socket
    • Drives SF's own MultiplayerManager / GameManager via Harmony patches
      — IsServer=true, IsNetworkMatch pinned true, SpawnRandomWeapon replaced
-   • Forwards intercepted SendMessageToAllClients broadcasts to v25 clients
+   • Per-client auth NetworkPlayer "ghost rig" mirrors client position so
+     server-side physics (box pushing, NSO interaction) works
+   • Tick history ring buffer (~2s @ 30Hz) for lag-comp damage validation
+   • Per-client packet rate observer (anticheat)
+   ▼  UDP v26 msgType 39 WorldStateSnapshot — 30Hz
+   ▼  to each client's recorded v26 endpoint (default :1339)
+SF clients
+   • SFClientRecon parses snapshots: snaps + smoothes local player to
+     server position, applies NSO positions, detects + hard-snaps on
+     prediction divergence > 2.5u
 ```
 
-Real Stick Fight runs in `-batchmode -nographics`. It hosts the match using its own gameplay code; `SFHeadlessHost.dll` makes that code think it's a multiplayer host. Clients connect on raw UDP. See [`notes/phase6/10-PHASE6.5-host-side-gameplay.md`](notes/phase6/10-PHASE6.5-host-side-gameplay.md) for the current state.
+Real Stick Fight runs in `-batchmode -nographics` on the server. It hosts the match using its own gameplay code; `SFHeadlessHost.dll` makes that code think it's a multiplayer host. Clients run their own SF normally + a small companion plugin (`SFClientRecon.dll`) that handles the v26 channel. See [`notes/PROTOCOL.md`](notes/PROTOCOL.md) for the wire-format spec, [`notes/phase6/`](notes/phase6/) for design docs.
 
 ## Quickstart
 
@@ -80,22 +94,62 @@ dotnet build -c Release
 
 Deploy to `<SF install>/BepInEx/plugins/SFHeadlessHost.dll`.
 
-## Wire protocol (v25)
+## Wire protocol
 
-Every packet wraps the SF MsgType body in a 14-byte envelope: `[u32 timestamp LE][u8 msgType][N body][u64 steamID LE][u8 channel]`. SF's `P2PPackageHandler.MsgType` enum (38 entries from `Ping=0` ... `KickPlayer=38`) defines the dispatch.
+Two interleaved layers on the same 14-byte envelope: `[u32 timestamp LE][u8 msgType][N body][u64 steamID LE][u8 channel]`.
 
-Implementation lives in [`sf-headless-host/SFHeadlessHost.cs`](sf-headless-host/SFHeadlessHost.cs). The handshake (`ClientRequestingAccepting` → `ClientAccepted` → `ClientRequestingIndex` → `ClientInit` → `ClientRequestingToSpawn` → `ClientSpawned`) is implemented in the `Handle*` methods; the v25 wrapper codec is in `SendSfPacket`. Byte layouts for the 50-byte `ClientInit` body are documented in [`notes/recon/`](notes/recon/).
+**v25 (stock SF):** `P2PPackageHandler.MsgType` 0..38 — handshake, player update, weapon pickup/throw/drop, object spawn/update/destruction, map change, etc. Implementation in [`sf-headless-host/SFHeadlessHost.cs`](sf-headless-host/SFHeadlessHost.cs) `Handle*` methods. The handshake (`ClientRequestingAccepting` → `ClientAccepted` → `ClientRequestingIndex` → `ClientInit` → `ClientRequestingToSpawn` → `ClientSpawned`) closely follows stock SF.
 
-A future v26 protocol — adding `playerInput` (client→server inputs with sequence numbers) and `worldStateSnapshot` (server→client authoritative state) — is the foundation for the prediction+reconciliation end-state.
+**Patched-DLL extensions:** msgTypes 56 (`LerpPlayer`) + 57 (`ColorChanged`). Emitted by kit's patched `Assembly-CSharp.dll` for remote-lerp triggers + player color sync. Blind-relayed to peers.
+
+**v26 (this repo):** msgTypes 39+ for the prediction+reconciliation architecture.
+
+| ID | Name | Direction | Purpose |
+|----|------|-----------|---------|
+| 39 | `WorldStateSnapshot` | server → all clients, 30Hz | Authoritative player + NSO + projectile positions, with `lastInputSeq` per player for reconciliation |
+| 40 | `PlayerInput`         | client → server, 60Hz     | stick/aim/buttons + sequence number; server validates + clamps, feeds Movement.cs on the auth rig |
+| 41 | `ClientFireWeapon`    | client → server, event    | Emitted on `Weapon.ActuallyShoot`; server registers a virtual projectile, simulates trajectory |
+
+Full byte layouts + version history in [`notes/PROTOCOL.md`](notes/PROTOCOL.md).
+
+## In-game admin
+
+Chat commands (type into chat with `/` prefix, response comes back as a thought bubble from the server):
+
+| Command | Effect |
+|---------|--------|
+| `/help`     | List available commands |
+| `/code`     | Show the current lobby's code |
+| `/players`  | Show client/spawn/rig counts |
+| `/lobbies`  | List other running lobbies on this host |
+| `/start`    | Force-start the current lobby's match |
+| `/restart`, `/next` | Schedule a map advance |
+| `/ping`     | Server replies `pong` |
+| `/version`  | Show plugin version |
+
+Server emits a welcome message ("Welcome to lobby {code}. Type /help for commands.") on first spawn.
+
+## Ops + monitoring
+
+| Tool | What it does |
+|---|---|
+| [`healthcheck.py`](healthcheck.py) | UDP Ping to an oracle; exits 0/1 for liveness probes. |
+| [`serve-lobbies.py`](serve-lobbies.py) | HTTP `GET /lobbies` JSON + tiny HTML viewer at `/`. Reads `/tmp/sf-lobbies/`. |
+| [`stress-test-anticheat.py`](stress-test-anticheat.py) | Fires fake `PlayerInput` packets at a configurable pps to verify anticheat thresholds fire. Dev tool — don't aim at prod. |
+| BepInEx log heartbeat | Every 30s the oracle logs `clients=N spawned=M rx=X/s snap=Y/s input=Z/s rigs=K matchStarted=...` for instant ops visibility. |
+| `SF_ANTICHEAT_ENFORCE=1` env var | Promotes anticheat observer to actually drop packets when thresholds exceeded. Off by default. |
+
+VPS deployment guide: [`notes/VPS.md`](notes/VPS.md) — Proton + BepInEx + Goldberg + systemd template + firewall rules.
 
 ## Development status
 
 Roadmap, current bugs, and design docs live in [`notes/`](notes/). Most useful entries:
 
-- [`notes/README.md`](notes/README.md) — index
-- [`notes/SUMMARY.md`](notes/SUMMARY.md) — latest one-paragraph status
 - [`NEXT_STEPS.md`](NEXT_STEPS.md) — current state + roadmap toward client-prediction / server-reconciliation
-- [`notes/phase6/`](notes/phase6/) — current architecture work (host-side gameplay, physics, pickup forwarding)
+- [`WHATS_NEW.md`](WHATS_NEW.md) — running session log (what shipped today)
+- [`notes/PROTOCOL.md`](notes/PROTOCOL.md) — wire-format spec for every msgType in use
+- [`notes/VPS.md`](notes/VPS.md) — Path A deploy guide
+- [`notes/phase6/`](notes/phase6/) — phase-by-phase design notes (sharding v2, rewind buffer, chat-command parser, etc.)
 
 Issues and PRs welcome.
 
