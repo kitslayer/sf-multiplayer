@@ -3110,15 +3110,19 @@ namespace SFHeadlessHost
                 //   u16 nsoCount
                 //   NSOs:    [u16 id, f32 x, f32 y, f32 z, f32 rotZ]         × m  (18/each)
                 //   u16 projCount                                                  (NEW v26.3)
-                //   projs:   [u32 id, u8 slot, u8 weaponType, f32 x, f32 y, f32 z] × k  (22/each)
+                //   projs:   [u32 id, u8 slot, u8 weaponType, f32 x, f32 y, f32 z] × k  (18/each)
                 //
                 // Projectiles are simple linear-motion server-tracked bullets;
                 // clients render them at the broadcast position. Hit reg is v0.2.
-                int bodyLen = 4 + 1 + n * 17 + 2 + nsoEntries.Count * 18 + 2 + _projectiles.Count * 22;
+                int bodyLen = 4 + 1 + n * 17 + 2 + nsoEntries.Count * 18 + 2 + _projectiles.Count * 18;
                 byte[] body = new byte[bodyLen];
                 int off = 0;
                 WriteU32LE(body, off, _serverTick); off += 4;
                 body[off++] = (byte)n;
+                // Build a slot → LastInputSeq lookup once instead of an
+                // O(n) scan of _sfClients per player (was O(n²) overall).
+                var slotSeq = new Dictionary<int, uint>(_sfClients.Count);
+                foreach (var ckv in _sfClients) if (ckv.Value.Slot >= 0) slotSeq[ckv.Value.Slot] = ckv.Value.LastInputSeq;
                 foreach (var kv in SlotToRig)
                 {
                     var rig = kv.Value;
@@ -3128,9 +3132,8 @@ namespace SFHeadlessHost
                     WriteF32LE(body, off, p.x); off += 4;
                     WriteF32LE(body, off, p.y); off += 4;
                     WriteF32LE(body, off, p.z); off += 4;
-                    // Look up the SfClient owning this slot for its LastInputSeq.
                     uint lastSeq = 0;
-                    foreach (var ckv in _sfClients) { if (ckv.Value.Slot == kv.Key) { lastSeq = ckv.Value.LastInputSeq; break; } }
+                    slotSeq.TryGetValue(kv.Key, out lastSeq);
                     WriteU32LE(body, off, lastSeq); off += 4;
                 }
                 WriteU16LE(body, off, (ushort)nsoEntries.Count); off += 2;

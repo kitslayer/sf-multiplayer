@@ -1,6 +1,6 @@
 # Next steps
 
-Where the project is and what's coming next. Last refreshed at commit `1e702b5`.
+Where the project is and what's coming next. Refreshed continuously — see [`WHATS_NEW.md`](WHATS_NEW.md) for the running session log, [`notes/PROTOCOL.md`](notes/PROTOCOL.md) for the wire-format spec.
 
 ## Current state
 
@@ -12,12 +12,11 @@ Live server end-to-end. Steam Stick Fight (Windows or Linux/Proton) connects to 
 - Death + kill propagation + round advance, full 123-map rotation
 - Box pushing — via the Phase 6.7 *mirror rig* (a kinematic player rig per client that the oracle teleports to the client's reported position so it can collide with `NetworkSyncableObject`s)
 
-**Known broken / partial:**
-- Chains break with no input (runaway-fall crates from off-map hitting them; partial mitigation via NSO Y-cutoff freezer)
-- Ice doesn't break from gunshots
-- Boxes sometimes missing from spawn stacks (settle-phase coroutine just shipped in `1e702b5` but **untested live** — needs a reconnect)
-- Per-map weapon allow-lists ignored — every map gets random-from-global
-- Map-preset weapons (the ones placed in level geometry by Landfall) not synced
+**Known broken / partial / untested-live (as of 2026-05-23 evening):**
+- Hard-snap on big divergence is implemented but never live-tested — could be too aggressive (snap thrashing) or too lenient
+- Server-side projectile sim is observability-only (v0.1) — clients still run their own raycasts for visuals; server-side hit registration (v0.2) is the next step
+- Per-map weapon allow-lists still ignored beyond what SF natively does — every map gets random-from-global, plus pre-placed weapons from `CheckForGroundWeapons`
+- Workshop maps not supported at runtime (just the 123 pre-dumped Landfall scenes)
 
 ## End-state goal
 

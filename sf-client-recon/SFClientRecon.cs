@@ -252,6 +252,21 @@ namespace SFClientRecon
                 }
             }
 
+            // v26.3 (Phase 6.17): projectile entries follow the NSO section.
+            // We don't yet RENDER them client-side (local raycast still draws
+            // the bullet); just skip past so the offset stays aligned for any
+            // future sections appended after.
+            if (o + 2 <= bodyOff + bodyLen)
+            {
+                ushort projCount = (ushort)(pkt[o] | (pkt[o + 1] << 8));
+                o += 2;
+                int projEntrySize = 4 + 1 + 1 + 12;  // u32 id, u8 slot, u8 wType, 3×f32 pos
+                int wanted = projCount * projEntrySize;
+                if (o + wanted <= bodyOff + bodyLen) o += wanted;
+                // else: malformed snapshot — silently stop here. Counters
+                // already recorded via _snapsReceived in HandlePacket.
+            }
+
             lock (_snapLock)
             {
                 _pendingSnap = list;

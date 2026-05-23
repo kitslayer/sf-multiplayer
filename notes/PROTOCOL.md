@@ -72,9 +72,20 @@ Total = 5 (prefix) + N (body) + 9 (suffix) = **N + 14**. Minimum packet = 14 byt
 | 56 | LerpPlayer | client → server | empty | Triggers remote-lerp on NetworkPlayer. Blind-relay to others. |
 | 57 | ColorChanged | client → server | HTML color string (4-64 bytes) | Player color change. Blind-relay to others. |
 
+## v26 wire-format version history
+
+| Version | Snapshot shape change | Shipped |
+|---------|----------------------|---------|
+| v26.0 | initial — players-only snapshot | Phase 6.10 |
+| v26.1 | + NSO section | Phase 6.14 |
+| v26.2 | + `lastInputSeq` per player | Phase 6.12.2 prep |
+| v26.3 | + projectile section + kinematic NSO position-delta detection | Phase 6.14.1 + 6.17 |
+
 ## v26 extensions (this repo, added 2026-05-23)
 
 ### msgType 39 — `WorldStateSnapshot` (server → all clients, 30Hz)
+
+Current format is v26.3 (after Phase 6.17 added projectile section). Backward-incompatible with earlier client builds.
 
 ```
 u32 serverTick (LE)
@@ -92,12 +103,20 @@ for each NSO (18 bytes):
   f32 posY (LE)
   f32 posZ (LE)
   f32 rotZ (LE)             -- transform.eulerAngles.z; pitch+yaw are zero in SF
+u16 projCount (LE)                                                    (Phase 6.17 +)
+for each projectile (18 bytes):
+  u32 id (LE)
+  u8  ownerSlot
+  u8  weaponType
+  f32 posX (LE)
+  f32 posY (LE)
+  f32 posZ (LE)
 ```
 
 - Sent to each spawned client's recorded v26 endpoint (discovered from their PlayerInput source addr).
-- Only includes NSOs whose Rigidbody is non-kinematic — static crates/chains skipped.
+- NSO entries are included for: dynamic bodies with non-zero velocity, kinematic bodies whose position changed since last snapshot (Phase 6.14.1 moving platforms), and 1s keepalive after motion stops. Static crates skip.
 - Snapshot only fires when `_matchStarted == true` and at least one client is connected.
-- Total typical size: 4 players × 17 + 50 NSOs × 18 + headers ≈ 1 KB.
+- Total typical size: 4 players × 17 + 50 NSOs × 18 + headers + projectile section ≈ 1 KB.
 
 ### msgType 40 — `PlayerInput` (client → server, up to 60Hz)
 
@@ -116,6 +135,25 @@ u32 buttons                 -- bit 0: jump / bit 1: fire / bit 2: block / bit 3:
 - Server clamps stick/aim to [-1, 1] before feeding into `SlotInputs`; rejects NaN/Inf or |v| > 1.5 entirely.
 - v25 envelope `steamID` is `0` (server identifies by slot byte in body).
 
+### msgType 41 — `ClientFireWeapon` (client → server, event-driven)
+
+Sent by `SFClientRecon`'s Harmony postfix on `Weapon.ActuallyShoot` when the local player fires. Server registers a virtual projectile + simulates it.
+
+```
+u8  ownerSlot               (0-3)
+u8  weaponType              (passthrough byte; not yet interpreted)
+f32 originX                 (muzzle world position)
+f32 originY
+f32 originZ
+f32 dirX                    (normalized forward)
+f32 dirY
+f32 dirZ
+f32 speed                   (units/sec; 0 → server uses default 60 u/s)
+```
+
+- Total body = 30 bytes.
+- Only emitted for local player (HasControl=true on the parent Controller).
+
 ## Channel encoding
 
 The `u8 channel` byte at the end of the envelope has gameplay meaning for some msgTypes:
@@ -133,9 +171,9 @@ The `u8 channel` byte at the end of the envelope has gameplay meaning for some m
 
 | ID | Tentative name | Status |
 |----|----------------|--------|
-| 41 | ServerEvent (reliable event channel) | Reserved — for damage events, kill confirms, etc. when we move off PlayerTookDamage |
-| 42 | ClientHello (with v26 capabilities) | Reserved — pre-handshake to advertise plugin version |
-| 43 | ServerStatus (heartbeat + lobby info) | Reserved — for in-band lobby browser without HTTP |
+| 42 | ServerEvent (reliable event channel) | Reserved — for damage events, kill confirms, etc. when we move off PlayerTookDamage |
+| 43 | ClientHello (with v26 capabilities) | Reserved — pre-handshake to advertise plugin version |
+| 44 | ServerStatus (heartbeat + lobby info) | Reserved — for in-band lobby browser without HTTP |
 
 ## Compatibility
 

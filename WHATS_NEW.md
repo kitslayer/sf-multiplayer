@@ -1,6 +1,6 @@
 # What's new — 2026-05-23 session
 
-Roughly 16 commits landed in one day. This file's a running tally so visitors and contributors can scan the deltas without scrolling git log. Headline items below; commit messages have the detail.
+Roughly **40+ commits** landed in one day. This file's a running tally so visitors and contributors can scan the deltas without scrolling git log. Headline items below; commit messages have the detail. See [`notes/PROTOCOL.md`](notes/PROTOCOL.md) for the wire-format spec.
 
 ## Architecture additions
 
@@ -36,6 +36,24 @@ Roughly 16 commits landed in one day. This file's a running tally so visitors an
 
 - **Phase 6.15.1 — Welcome chat on spawn**
   Server emits "Welcome to lobby {code}. Type /help for commands." once per SfClient when they first hit `ClientRequestingToSpawn`. Mirrors ALKA's `sendJoinHelpMessages` UX.
+
+- **Phase 6.9.5 — Ghost-rig box pushing (`UpdateGhostRigPosition`)**
+  After the mirror rig was ripped in Phase 6.9, boxes stopped getting physically pushed server-side because the auth `NetworkPlayer` had no inputs driving it. Restored the position-sync behavior on the auth rig itself: all body rigidbodies set kinematic, NSO components disabled to prevent index collisions, `HandlePlayerUpdate` calls `Rigidbody.MovePosition` to sweep through boxes. Same effect as the mirror rig but on a real authoritative `NetworkPlayer` so destructible / pickup gates accept it.
+
+- **Phase 6.14.1 — Moving platforms snapshot**
+  `CollectActiveNsoSnapshot` no longer skips kinematic NSOs. Instead it includes any NSO whose `transform.position` drifted > 1cm since last snapshot, or that had motion within the last 1s (keepalive). Catches Landfall's animator-driven moving platforms.
+
+- **Phase 6.14.5 v0.1 + v0.2 — Tick history rewind buffer + damage range validation**
+  Server records `{tick → per-slot position + alive}` ring buffer (60 entries ≈ 2s @ 30Hz). Damage validation now looks up positions at T-2 ticks (~66ms ago, lag-comp approximation) for the attacker↔victim distance check. Falls back to current positions when history unavailable.
+
+- **Phase 6.16 v0.1 / v0.2 — Damage validation**
+  Reject damage > 1000 / negative / NaN / Inf / attacker idx > 3 (except 255 = environment). Reject when attacker-victim distance > 50u (using rewind buffer when available).
+
+- **Phase 6.17 v0.1 — Server-side projectile registry + simulation**
+  New msgType 41 `PktClientFireWeapon` — client emits via Harmony postfix on `Weapon.ActuallyShoot` when local player fires. Server registers a virtual projectile (origin, dir, speed, lifetime), advances per frame, expires after 3s. Snapshot wire format bumped to v26.3 with new projectile section. v0.1 is observability/wire-protocol foundation — hit registration (v0.2) is next.
+
+- **Phase 6.12.2 v0.1 + v0.2 — Divergence detection + hard snap**
+  Client maintains a `seq → predicted position` ring buffer (240 entries ≈ 4s @ 60Hz input). On snapshot apply for own slot, looks up predicted position at server's `lastInputSeq` and compares. Drift > 1.0u logs warning; drift > 2.5u hard-snaps `rb.position` to server value + zeros velocity. Foundation for full replay rollback (Phase 6.12.2 v1.0).
 
 - **Phase 6.16 v0.1 — Damage validation**
   Reject damage > 1000 / negative / NaN / Inf / attacker idx > 3 (except 255 = environment). First defensive floor; full rewind-buffer authority gated on Phase 6.14.5.
