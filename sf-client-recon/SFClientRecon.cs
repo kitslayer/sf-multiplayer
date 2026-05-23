@@ -73,6 +73,7 @@ namespace SFClientRecon
         private readonly object _snapLock = new object();
         private List<SnapshotEntry> _pendingSnap;
         private List<NsoSnapEntry>  _pendingNsoSnap;
+        private List<MapSyncSnapEntry> _pendingMapSyncSnap;
         private uint _pendingTick;
         private uint _snapsReceived;
         private uint _snapsApplied;
@@ -86,6 +87,15 @@ namespace SFClientRecon
             public int Slot;
             public float X, Y, Z;
             public uint LastInputSeq;  // v26.2 — server's last-acked input seq for this slot
+        }
+
+        // P0-14 v26.5 — MapInfoSyncableBase position entry.
+        // Identified by its m_StartPos Vector2 (stock SF's stable cross-
+        // machine key for MapInfoSync). 20 bytes wire size.
+        private struct MapSyncSnapEntry
+        {
+            public float StartX, StartY;
+            public float X, Y, Z;
         }
 
         private struct NsoSnapEntry
@@ -302,10 +312,38 @@ namespace SFClientRecon
                 // already recorded via _snapsReceived in HandlePacket.
             }
 
+            // P0-14 v26.5: MapInfoSyncableBase positions for moving platforms,
+            // pressure pillars, ghost platforms. Section is optional (older
+            // servers won't write it; we tolerate truncated buffer).
+            // Entry: [f32 startX, f32 startY, f32 x, f32 y, f32 z] = 20 bytes.
+            // startX/Y is the stock MapInfoSyncableBase.m_StartPos key.
+            List<MapSyncSnapEntry> mapSyncList = null;
+            if (o + 2 <= bodyOff + bodyLen)
+            {
+                ushort mapSyncCount = (ushort)(pkt[o] | (pkt[o + 1] << 8));
+                o += 2;
+                int mapSyncEntrySize = 20;
+                mapSyncList = new List<MapSyncSnapEntry>(mapSyncCount);
+                for (int i = 0; i < mapSyncCount; i++)
+                {
+                    if (o + mapSyncEntrySize > bodyOff + bodyLen) break;
+                    mapSyncList.Add(new MapSyncSnapEntry
+                    {
+                        StartX = BitConverter.ToSingle(pkt, o),
+                        StartY = BitConverter.ToSingle(pkt, o + 4),
+                        X      = BitConverter.ToSingle(pkt, o + 8),
+                        Y      = BitConverter.ToSingle(pkt, o + 12),
+                        Z      = BitConverter.ToSingle(pkt, o + 16),
+                    });
+                    o += mapSyncEntrySize;
+                }
+            }
+
             lock (_snapLock)
             {
                 _pendingSnap = list;
                 _pendingNsoSnap = nsoList;
+                _pendingMapSyncSnap = mapSyncList;
                 _pendingTick = tick;
                 _snapsReceived++;
             }
@@ -316,17 +354,21 @@ namespace SFClientRecon
             if (!_running) return;
             List<SnapshotEntry> snap;
             List<NsoSnapEntry>  nsoSnap;
+            List<MapSyncSnapEntry> mapSyncSnap;
             uint tick;
             lock (_snapLock)
             {
                 snap    = _pendingSnap;
                 nsoSnap = _pendingNsoSnap;
+                mapSyncSnap = _pendingMapSyncSnap;
                 tick    = _pendingTick;
                 _pendingSnap    = null;
                 _pendingNsoSnap = null;
+                _pendingMapSyncSnap = null;
             }
             if (snap != null)    ApplySnapshot(snap, tick);
             if (nsoSnap != null) ApplyNsoSnapshot(nsoSnap, tick);
+            if (mapSyncSnap != null) ApplyMapSyncSnapshot(mapSyncSnap, tick);
 
             // Phase 6.11.2 — between snapshots, exponentially lerp current
             // positions toward latest targets so the visual feel is smooth
@@ -351,7 +393,7 @@ namespace SFClientRecon
         private readonly Dictionary<ushort, PoseTarget> _nsoTargets = new Dictionary<ushort, PoseTarget>();
         private void SmoothTowardTargets()
         {
-            if (_playerTargets.Count == 0 && _nsoTargets.Count == 0) return;
+            if (_playerTargets.Count == 0 && _nsoTargets.Count == 0 && _mapSyncTargets.Count == 0) return;
             float t = 1f - Mathf.Exp(-SmoothRate * Time.deltaTime);
             try
             {
@@ -386,7 +428,6 @@ namespace SFClientRecon
                 // NSOs: smooth all entries in the target dict against cached refs.
                 if (_nsoTargets.Count > 0 && _nsoCache.Count > 0)
                 {
-                    float now = Time.realtimeSinceStartup;
                     foreach (var kv in _nsoTargets)
                     {
                         if (!_nsoCache.TryGetValue(kv.Key, out var comp) || (object)comp == null) continue;
@@ -401,12 +442,26 @@ namespace SFClientRecon
                             comp.transform.position = Vector3.Lerp(comp.transform.position, kv.Value.Pos, t);
                             comp.transform.rotation = Quaternion.Slerp(comp.transform.rotation, kv.Value.Rot, t);
                         }
-                        // P0-15 — mark root-transform as recently lerped so
-                        // the DestructiblePiece guard can suppress spurious
-                        // post-lerp destruction broadcasts.
-                        var rootT = comp.transform.root;
-                        if ((object)rootT != null)
-                            _recentLerpAt[rootT.GetInstanceID()] = now;
+                        // P0-15 — moved to ApplyNsoSnapshot below; only mark
+                        // recentLerpAt when a snapshot delivers a LARGE
+                        // position delta (the actual "teleport-into-ice"
+                        // case). Marking every frame here suppressed
+                        // legitimate kick-into-ice destructions too.
+                    }
+                }
+
+                // P0-14 — smooth MapInfoSyncableBase positions toward server
+                // targets. Same exponential lerp as NSOs. Rigidbodies for
+                // these were already made kinematic at first sight, so
+                // setting transform.position here doesn't fight physics.
+                if (_mapSyncTargets.Count > 0 && _mapSyncCache.Count > 0)
+                {
+                    foreach (var kv in _mapSyncTargets)
+                    {
+                        if (!_mapSyncCache.TryGetValue(kv.Key, out var comp) || (object)comp == null) continue;
+                        var rb = comp.GetComponent<Rigidbody>();
+                        if ((object)rb != null) rb.position = Vector3.Lerp(rb.position, kv.Value, t);
+                        else comp.transform.position = Vector3.Lerp(comp.transform.position, kv.Value, t);
                     }
                 }
             }
@@ -460,17 +515,97 @@ namespace SFClientRecon
                 _nsoCacheRebuildAt--;
 
                 int applied = 0;
+                float nowTs = Time.realtimeSinceStartup;
                 foreach (var e in snap)
                 {
-                    if (!_nsoCache.ContainsKey(e.Id)) continue;
-                    // Phase 6.11.2 — record target; SmoothTowardTargets lerps each frame.
-                    _nsoTargets[e.Id] = new PoseTarget { Pos = new Vector3(e.X, e.Y, e.Z), Rot = Quaternion.Euler(0f, 0f, e.RotZ) };
+                    if (!_nsoCache.TryGetValue(e.Id, out var nsoComp) || (object)nsoComp == null) continue;
+                    Vector3 newTarget = new Vector3(e.X, e.Y, e.Z);
+                    // P0-15 — only flag for destruction-suppression when the
+                    // snapshot delivered a LARGE position jump. The
+                    // exponential lerp covers the jump over the next few
+                    // frames; during those frames the body sweeps through
+                    // adjacent geometry. Threshold (0.3u) is large enough to
+                    // not catch normal active-push deltas (which arrive in
+                    // ~0.05u increments between 30Hz snapshots) but small
+                    // enough to catch the "teleport across map after a
+                    // missed snapshot or scene reload" case that produces
+                    // spurious destructions.
+                    Vector3 currentPos = (nsoComp.GetComponent<Rigidbody>() is Rigidbody nsoRb && (object)nsoRb != null)
+                        ? nsoRb.position : nsoComp.transform.position;
+                    if (Vector3.Distance(currentPos, newTarget) > NsoLargeLerpThreshold)
+                    {
+                        var rootT = nsoComp.transform.root;
+                        if ((object)rootT != null) _recentLerpAt[rootT.GetInstanceID()] = nowTs;
+                    }
+                    _nsoTargets[e.Id] = new PoseTarget { Pos = newTarget, Rot = Quaternion.Euler(0f, 0f, e.RotZ) };
                     applied++;
                 }
                 if (_snapsApplied == 1 || _snapsApplied % 90 == 0)
                     Log.LogInfo($"[P6.14] NSO snap tick={tick} targeted {applied}/{snap.Count}");
             }
             catch (Exception ex) { Log.LogWarning($"[P6.14 NSO apply] {ex.Message}"); }
+        }
+
+        // P0-14 — apply MapInfoSyncableBase positions. Cache by m_StartPos
+        // Vector2 (stock SF's stable cross-machine key, quantized by P0-12).
+        // Make their rigidbodies kinematic on first sight so local AddForce
+        // (MoveAlongPathUsingForce) / spring integrator (PillarHandler)
+        // doesn't fight the snapshot stream.
+        private readonly Dictionary<Vector2, Component> _mapSyncCache = new Dictionary<Vector2, Component>();
+        private readonly Dictionary<Vector2, Vector3> _mapSyncTargets = new Dictionary<Vector2, Vector3>();
+        private int _mapSyncCacheRebuildAt;
+        private Type _mapSyncBaseType;
+        private System.Reflection.FieldInfo _mapSyncStartPosField;
+        private void ApplyMapSyncSnapshot(List<MapSyncSnapEntry> snap, uint tick)
+        {
+            if (snap.Count == 0) return;
+            try
+            {
+                if ((object)_mapSyncBaseType == null)
+                {
+                    _mapSyncBaseType = AccessTools.TypeByName("MapInfoSyncableBase");
+                    if ((object)_mapSyncBaseType == null) return;
+                    _mapSyncStartPosField = AccessTools.Field(_mapSyncBaseType, "m_StartPos");
+                }
+                if ((object)_mapSyncStartPosField == null) return;
+                // Rebuild cache every 60 ticks (~2s at 30Hz) or on first run.
+                if (_mapSyncCache.Count == 0 || _mapSyncCacheRebuildAt <= 0)
+                {
+                    _mapSyncCache.Clear();
+                    var all = UnityEngine.Object.FindObjectsOfType(_mapSyncBaseType);
+                    if (all != null)
+                    {
+                        foreach (var obj in all)
+                        {
+                            var c = obj as Component;
+                            if ((object)c == null) continue;
+                            Vector2 key = (Vector2)_mapSyncStartPosField.GetValue(obj);
+                            _mapSyncCache[key] = c;
+                            // First-sight: force the rigidbody kinematic so local
+                            // physics (AddForce in MoveAlongPathUsingForce; spring
+                            // in PillarHandler) doesn't fight the snapshot stream.
+                            // GhostPlatform doesn't have a Rigidbody so this is a
+                            // no-op for it.
+                            var rb = c.GetComponent<Rigidbody>();
+                            if ((object)rb != null && !rb.isKinematic) rb.isKinematic = true;
+                        }
+                    }
+                    _mapSyncCacheRebuildAt = 60;
+                }
+                _mapSyncCacheRebuildAt--;
+
+                int applied = 0;
+                foreach (var e in snap)
+                {
+                    Vector2 key = new Vector2(e.StartX, e.StartY);
+                    if (!_mapSyncCache.ContainsKey(key)) continue;
+                    _mapSyncTargets[key] = new Vector3(e.X, e.Y, e.Z);
+                    applied++;
+                }
+                if (_snapsApplied == 1 || _snapsApplied % 90 == 0)
+                    Log.LogInfo($"[P0-14] MapSync snap tick={tick} targeted {applied}/{snap.Count} (cache={_mapSyncCache.Count})");
+            }
+            catch (Exception ex) { Log.LogWarning($"[P0-14 MapSync apply] {ex.Message}"); }
         }
 
         // Phase 6.12 — pack and send a PktPlayerInput packet to the oracle.
@@ -566,6 +701,11 @@ namespace SFClientRecon
         // pruned lazily by the prefix to avoid unbounded growth.
         private static readonly Dictionary<int, float> _recentLerpAt = new Dictionary<int, float>();
         private const float LerpSuppressWindowSec = 0.15f;
+        // P0-15 — only flag NSOs whose snapshot target arrived more than
+        // this far from the local position. Below this threshold the lerp
+        // motion is gentle enough that the resulting OnCollisionEnter has
+        // low relativeVelocity (force < threshold) anyway.
+        private const float NsoLargeLerpThreshold = 0.3f;
 
         // Harmony prefix on DestructiblePiece.OnCollisionEnter — returns false
         // (skip stock) when the colliding rigidbody's root was snapshot-lerped

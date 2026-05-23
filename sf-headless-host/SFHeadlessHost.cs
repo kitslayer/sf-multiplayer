@@ -3390,20 +3390,29 @@ namespace SFHeadlessHost
                 // and don't need bandwidth.
                 var nsoEntries = CollectActiveNsoSnapshot();
 
-                if (n == 0 && nsoEntries.Count == 0) return;
+                // P0-14 — also pack MapInfoSyncableBase positions (moving
+                // platforms, pressure pillars, ghost platforms) so the
+                // oracle is authoritative for these too. Without this they
+                // drift independently on each client.
+                var mapSyncEntries = CollectMapSyncSnapshot();
 
-                // Body layout v26.3:
+                if (n == 0 && nsoEntries.Count == 0 && mapSyncEntries.Count == 0) return;
+
+                // Body layout v26.5 (was v26.3):
                 //   u32 serverTick
                 //   u8  playerCount
                 //   players: [u8 slot, f32 x, f32 y, f32 z, u32 lastInputSeq] × n  (17/each)
                 //   u16 nsoCount
                 //   NSOs:    [u16 id, f32 x, f32 y, f32 z, f32 rotZ]         × m  (18/each)
-                //   u16 projCount                                                  (NEW v26.3)
-                //   projs:   [u32 id, u8 slot, u8 weaponType, f32 x, f32 y, f32 z] × k  (18/each)
-                //
-                // Projectiles are simple linear-motion server-tracked bullets;
-                // clients render them at the broadcast position. Hit reg is v0.2.
-                int bodyLen = 4 + 1 + n * 17 + 2 + nsoEntries.Count * 18 + 2 + _projectiles.Count * 18;
+                //   u16 projCount                                                  (added v26.3)
+                //   projs:   [u32 id, u8 slot, u8 wType, f32 x, f32 y, f32 z] × k  (18/each)
+                //   u16 mapSyncCount                                              (NEW v26.5)
+                //   mapSync: [f32 startX, f32 startY, f32 x, f32 y, f32 z]    × j  (20/each)
+                //     startX/Y identify the object via its m_StartPos (same
+                //     key stock SF uses for MapInfoSync dispatch). Quantized
+                //     by P0-12 so server + client agree bit-exactly.
+                int bodyLen = 4 + 1 + n * 17 + 2 + nsoEntries.Count * 18 + 2 + _projectiles.Count * 18
+                              + 2 + mapSyncEntries.Count * 20;
                 byte[] body = new byte[bodyLen];
                 int off = 0;
                 WriteU32LE(body, off, _serverTick); off += 4;
@@ -3445,6 +3454,16 @@ namespace SFHeadlessHost
                     WriteF32LE(body, off, p.Position.y); off += 4;
                     WriteF32LE(body, off, p.Position.z); off += 4;
                 }
+                // P0-14 — MapInfoSyncableBase entries (v26.5 section).
+                WriteU16LE(body, off, (ushort)mapSyncEntries.Count); off += 2;
+                foreach (var m in mapSyncEntries)
+                {
+                    WriteF32LE(body, off, m.StartX); off += 4;
+                    WriteF32LE(body, off, m.StartY); off += 4;
+                    WriteF32LE(body, off, m.X); off += 4;
+                    WriteF32LE(body, off, m.Y); off += 4;
+                    WriteF32LE(body, off, m.Z); off += 4;
+                }
 
                 // Broadcast to ALL spawned clients on their v26 endpoint. Once
                 // a client has sent a PlayerInput packet we know its actual
@@ -3466,6 +3485,50 @@ namespace SFHeadlessHost
         }
 
         private struct NsoSnap { public ushort Id; public float X, Y, Z, RotZ; }
+
+        // P0-14 — MapInfoSyncableBase position snapshot entry.
+        // Identified by Vector2 startPos (same key stock SF uses in its
+        // mMapDataObjectToSync dictionary). We can't use transform.GetInstanceID()
+        // because Unity assigns those per-process — server's IDs never
+        // match client's. With P0-12 active, both sides quantize the
+        // startPos to 0.01 precision so the Vector2 keys ARE stable
+        // cross-process.
+        private struct MapSyncSnap { public float StartX, StartY, X, Y, Z; }
+
+        // P0-14 — collect every active MapInfoSyncableBase's transform
+        // position keyed by its m_StartPos. These objects (GhostPlatform,
+        // MoveAlongPathUsingForce, PillarHandler, PlayMoveAnimations) drift
+        // across clients because each runs its own physics. v26.5 snapshot
+        // section makes the oracle authoritative.
+        private Type _mapSyncBaseType;
+        private FieldInfo _mapSyncStartPosField;
+        private List<MapSyncSnap> CollectMapSyncSnapshot()
+        {
+            var result = new List<MapSyncSnap>();
+            try
+            {
+                if ((object)_mapSyncBaseType == null)
+                {
+                    _mapSyncBaseType = AccessTools.TypeByName("MapInfoSyncableBase");
+                    if ((object)_mapSyncBaseType == null) return result;
+                    _mapSyncStartPosField = AccessTools.Field(_mapSyncBaseType, "m_StartPos");
+                }
+                if ((object)_mapSyncStartPosField == null) return result;
+                var all = UnityEngine.Object.FindObjectsOfType(_mapSyncBaseType);
+                if (all == null) return result;
+                foreach (var obj in all)
+                {
+                    var comp = obj as Component;
+                    if ((object)comp == null) continue;
+                    var p = comp.transform.position;
+                    if (p.y < -30f) continue;   // killbox-fall — skip
+                    Vector2 startPos = (Vector2)_mapSyncStartPosField.GetValue(obj);
+                    result.Add(new MapSyncSnap { StartX = startPos.x, StartY = startPos.y, X = p.x, Y = p.y, Z = p.z });
+                }
+            }
+            catch (Exception ex) { Log.LogWarning($"[P0-14 mapSync collect] {ex.Message}"); }
+            return result;
+        }
 
         // P0-13 — full-keyframe variant of CollectActiveNsoSnapshot that
         // includes every NSO regardless of position-delta / activity. Used
@@ -3512,7 +3575,9 @@ namespace SFHeadlessHost
             int n = 0;
             foreach (var kv in SlotToRig) if ((object)kv.Value != null) n++;
             var nsoEntries = CollectAllNsoSnapshot();
-            int bodyLen = 4 + 1 + n * 17 + 2 + nsoEntries.Count * 18 + 2 + _projectiles.Count * 18;
+            var mapSyncEntries = CollectMapSyncSnapshot();
+            int bodyLen = 4 + 1 + n * 17 + 2 + nsoEntries.Count * 18 + 2 + _projectiles.Count * 18
+                          + 2 + mapSyncEntries.Count * 20;
             byte[] body = new byte[bodyLen];
             int off = 0;
             WriteU32LE(body, off, _serverTick); off += 4;
@@ -3551,8 +3616,17 @@ namespace SFHeadlessHost
                 WriteF32LE(body, off, p.Position.y); off += 4;
                 WriteF32LE(body, off, p.Position.z); off += 4;
             }
+            WriteU16LE(body, off, (ushort)mapSyncEntries.Count); off += 2;
+            foreach (var m in mapSyncEntries)
+            {
+                WriteF32LE(body, off, m.StartX); off += 4;
+                WriteF32LE(body, off, m.StartY); off += 4;
+                WriteF32LE(body, off, m.X); off += 4;
+                WriteF32LE(body, off, m.Y); off += 4;
+                WriteF32LE(body, off, m.Z); off += 4;
+            }
             SendSfPacket(target, PktWorldStateSnapshot, body, 0, 0);
-            Log.LogInfo($"[P0-13] Sent keyframe snapshot to {target} — players={n} nsos={nsoEntries.Count} bytes={bodyLen}");
+            Log.LogInfo($"[P0-13] Sent keyframe snapshot to {target} — players={n} nsos={nsoEntries.Count} mapSync={mapSyncEntries.Count} bytes={bodyLen}");
         }
 
         // Apply an incoming PktObjectUpdate (msgType 26) to the server's

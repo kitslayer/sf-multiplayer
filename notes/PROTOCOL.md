@@ -80,6 +80,7 @@ Total = 5 (prefix) + N (body) + 9 (suffix) = **N + 14**. Minimum packet = 14 byt
 | v26.1 | + NSO section | Phase 6.14 |
 | v26.2 | + `lastInputSeq` per player | Phase 6.12.2 prep |
 | v26.3 | + projectile section + kinematic NSO position-delta detection | Phase 6.14.1 + 6.17 |
+| v26.5 | + MapInfoSyncable section (server-authoritative platform / pillar positions) | Phase 6.19 (P0-14 fix) |
 
 ## v26 extensions (this repo, added 2026-05-23)
 
