@@ -501,8 +501,9 @@ namespace SFHeadlessHost
                     rwcField.SetValue(__instance, newWait);
                 }
 
-                // Pick a weapon index (cycled via our other prefix).
-                int weaponIdx = _srwCallCount % 8;
+                // Pick a weapon index. Honors the /weapons chat allow-list
+                // if set, otherwise round-robin 0..7.
+                int weaponIdx = PickWeaponId(_srwCallCount);
 
                 // Spawn position mirroring original: Y=11*scale, Z=Random(-8,8).
                 float zOff = UnityEngine.Random.Range(0f, 8f);
@@ -555,11 +556,34 @@ namespace SFHeadlessHost
         {
             _grwiCallCount++;
             weaponObject = null;
-            // Cycle through a few weapon IDs for variety. 0..7 are stock SF weapons.
-            __result = _grwiCallCount % 8;
+            __result = PickWeaponId(_grwiCallCount);
             if (_grwiCallCount <= 3 || _grwiCallCount % 5 == 0)
                 Log.LogInfo($"[P6.5] GetRandomWeaponIndexPrefix call#{_grwiCallCount} → returning {__result}");
             return false; // skip original
+        }
+
+        // Phase 6.8 — chat-driven weapon allow-list. When empty, picks
+        // from a round-robin 0..7 (stock SF's first 8 weapons — pistol
+        // through shotgun in stock id order). When set via /weapons
+        // chat command, picks uniformly from the allow-list.
+        // Static so /weapons handler (instance method) and the static
+        // GRWI/SRW prefixes share state.
+        internal static readonly System.Collections.Generic.HashSet<int> _allowedWeaponIds = new System.Collections.Generic.HashSet<int>();
+        private static int _allowedWeaponCycleIdx;
+        internal static int PickWeaponId(int seed)
+        {
+            if (_allowedWeaponIds.Count > 0)
+            {
+                // Round-robin across the allow-list. Could randomize but
+                // deterministic order makes tournaments more predictable.
+                var arr = new int[_allowedWeaponIds.Count];
+                _allowedWeaponIds.CopyTo(arr);
+                System.Array.Sort(arr);
+                int pick = arr[_allowedWeaponCycleIdx % arr.Length];
+                _allowedWeaponCycleIdx++;
+                return pick;
+            }
+            return seed % 8;
         }
 
         // Phase 6.5 Step 1 — log host broadcasts. Observe-only: return true so the
@@ -2331,6 +2355,91 @@ namespace SFHeadlessHost
                     case "/lobbies":
                         SendChatToPlayer(sender, ListOtherLobbiesFromRegistry());
                         break;
+                    case "/kick":
+                    {
+                        string arg = (space < 0 ? "" : text.Substring(space + 1).Trim());
+                        if (string.IsNullOrEmpty(arg) || !int.TryParse(arg, out int targetSlot) || targetSlot < 0 || targetSlot > 3)
+                        {
+                            SendChatToPlayer(sender, "Usage: /kick <slot 0-3>. Use /players to see slots.");
+                            break;
+                        }
+                        if (targetSlot == sender.Slot)
+                        {
+                            SendChatToPlayer(sender, "Can't kick yourself. Use Steam's Disconnect.");
+                            break;
+                        }
+                        // Send PktKickPlayer to everyone (including the victim, who'll
+                        // disconnect on receipt). Body = single byte slot.
+                        byte[] kickBody = new byte[1] { (byte)targetSlot };
+                        BroadcastSfPacket(PktKickPlayer, kickBody, 0uL, 0);
+                        Log.LogInfo($"[chat] /kick slot={targetSlot} by slot={sender.Slot}");
+                        SendChatToPlayer(sender, $"Kicked slot {targetSlot}.");
+                        break;
+                    }
+                    case "/anticheat":
+                    {
+                        string arg = (space < 0 ? "" : text.Substring(space + 1).Trim()).ToLowerInvariant();
+                        if (arg == "on" || arg == "1" || arg == "true" || arg == "enforce")
+                        {
+                            AnticheatEnforce = true;
+                            SendChatToPlayer(sender, "Anticheat: ENFORCE (rate-limited packets will be dropped)");
+                        }
+                        else if (arg == "off" || arg == "0" || arg == "false" || arg == "observe")
+                        {
+                            AnticheatEnforce = false;
+                            SendChatToPlayer(sender, "Anticheat: observe-only (offending packets logged, not dropped)");
+                        }
+                        else
+                        {
+                            SendChatToPlayer(sender, $"Anticheat: {(AnticheatEnforce ? "ENFORCE" : "observe-only")}. Toggle: /anticheat on|off");
+                        }
+                        break;
+                    }
+                    case "/weapons":
+                    {
+                        string arg = (space < 0 ? "" : text.Substring(space + 1).Trim()).ToLowerInvariant();
+                        if (string.IsNullOrEmpty(arg))
+                        {
+                            if (_allowedWeaponIds.Count == 0)
+                            {
+                                SendChatToPlayer(sender, "Weapons: all (default 0-7 round-robin). Set: /weapons 0,1,3");
+                            }
+                            else
+                            {
+                                var arr = new int[_allowedWeaponIds.Count];
+                                _allowedWeaponIds.CopyTo(arr);
+                                System.Array.Sort(arr);
+                                SendChatToPlayer(sender, $"Weapons allow-list: {string.Join(",", System.Array.ConvertAll(arr, i => i.ToString()))}");
+                            }
+                        }
+                        else if (arg == "all" || arg == "clear" || arg == "default")
+                        {
+                            _allowedWeaponIds.Clear();
+                            _allowedWeaponCycleIdx = 0;
+                            SendChatToPlayer(sender, "Weapons reset to default (all).");
+                        }
+                        else
+                        {
+                            var parts = arg.Split(',');
+                            var newList = new System.Collections.Generic.List<int>();
+                            foreach (var part in parts)
+                            {
+                                if (int.TryParse(part.Trim(), out int idx) && idx >= 0 && idx <= 31) newList.Add(idx);
+                            }
+                            if (newList.Count == 0)
+                            {
+                                SendChatToPlayer(sender, "Usage: /weapons <0-31 comma list> | all");
+                            }
+                            else
+                            {
+                                _allowedWeaponIds.Clear();
+                                foreach (var i in newList) _allowedWeaponIds.Add(i);
+                                _allowedWeaponCycleIdx = 0;
+                                SendChatToPlayer(sender, $"Weapons set to: {string.Join(",", newList.ConvertAll(i => i.ToString()).ToArray())}");
+                            }
+                        }
+                        break;
+                    }
                     case "/tickrate":
                     case "/tick":
                     {
@@ -2360,7 +2469,7 @@ namespace SFHeadlessHost
                         break;
                     }
                     case "/help":
-                        SendChatToPlayer(sender, "Commands: /code /ping /start /restart /next /players /lobbies /tickrate /version /help");
+                        SendChatToPlayer(sender, "Commands: /code /ping /start /restart /next /players /lobbies /tickrate /weapons /kick /anticheat /version /help");
                         break;
                     default:
                         SendChatToPlayer(sender, "Unknown command. Type /help");
@@ -2412,6 +2521,7 @@ namespace SFHeadlessHost
                 _enforceCache = Environment.GetEnvironmentVariable("SF_ANTICHEAT_ENFORCE") == "1";
                 return _enforceCache.Value;
             }
+            set { _enforceCache = value; }  // /anticheat chat command writes here
         }
         private class RateGuard
         {
