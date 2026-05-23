@@ -62,9 +62,19 @@ if [ -d "$STEAM/BepInEx/plugins" ]; then
   cp "$CLIENT_DLL" "$STEAM/BepInEx/plugins/SFClientRecon.dll"
   echo "  Installed: $STEAM/BepInEx/plugins/SFClientRecon.dll"
   md5sum "$STEAM/BepInEx/plugins/SFClientRecon.dll"
+  # ALSO deploy SFHeadlessHost.dll to the Steam install. It runs the
+  # client-mode shim (NSO kinematic config, MapInfoSync quantize) in
+  # interactive mode (its Awake auto-detects and routes to the right
+  # branch). Without this the Steam player would run an outdated client-
+  # mode shim and the in-game behavior wouldn't match what the oracle
+  # expects. Also delete any inactive .parked / .disabled copies so they
+  # don't accidentally load if BepInEx changes its scan rules.
+  cp "$SERVER_DLL" "$STEAM/BepInEx/plugins/SFHeadlessHost.dll"
+  echo "  Installed: $STEAM/BepInEx/plugins/SFHeadlessHost.dll (client-mode shim auto-detects interactive runs)"
+  md5sum "$STEAM/BepInEx/plugins/SFHeadlessHost.dll"
 else
   echo "  SKIP — Steam install $STEAM not found or missing BepInEx/plugins/."
-  echo "  Manually copy $CLIENT_DLL → <SF install>/BepInEx/plugins/"
+  echo "  Manually copy $CLIENT_DLL + $SERVER_DLL → <SF install>/BepInEx/plugins/"
 fi
 
 echo

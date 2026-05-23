@@ -53,7 +53,6 @@ namespace SFHeadlessHost
     //  P0-14 MapInfoSyncableBase position broadcast       ~3553+  CollectMapSyncSnapshot, etc.
     //  CollectActiveNsoSnapshot                           ~3690+
     //  ApplyClientObjectUpdate (legacy)                   ~3850
-    //  NsoIsKillboxFallen (P0-11 helper)                  ~3940
     //  ReadEnv                                            ~4530
     // ============================================================
     //
@@ -596,7 +595,6 @@ namespace SFHeadlessHost
         private static readonly HashSet<ushort> _p65ObjUpdateSeenIndices = new HashSet<ushort>();
         private static int _p65ObjUpdateFilterCount;
         private static int _p65DestructionFilterCount;
-        private static int _p65DestructionForwardCount;
         internal static bool SendBroadcastPrefix(object[] __args)
         {
             try
@@ -4006,46 +4004,6 @@ namespace SFHeadlessHost
         private readonly Dictionary<ushort, float>   _nsoLastMovedAt      = new Dictionary<ushort, float>();
         private const float NsoPosDeltaThreshold = 0.01f;   // ~1 cm
         private const float NsoKeepaliveSec      = 1.0f;
-
-        // P0-11 helper — look up an NSO by its m_Index and report whether
-        // its current position is in the killbox-fall band (Y < -30). The
-        // outbound destruction filter uses this to forward legitimate
-        // server-side breaks while still dropping the spurious "box drifted
-        // off the platform and shattered against the killbox" destructions.
-        // Returns true iff the NSO is below the killbox threshold OR if
-        // the NSO can't be found (the conservative interpretation: if we
-        // can't verify, treat as "fell off and we already destroyed it").
-        private bool NsoIsKillboxFallen(ushort idx)
-        {
-            try
-            {
-                if ((object)_nsoType == null)
-                {
-                    _nsoType = AccessTools.TypeByName("NetworkSyncableObject");
-                    if ((object)_nsoType == null) return false;
-                    _nsoIndexProp = AccessTools.Property(_nsoType, "Index");
-                    _nsoIndexField = AccessTools.Field(_nsoType, "m_Index");
-                }
-                var all = UnityEngine.Object.FindObjectsOfType(_nsoType);
-                if (all == null) return false;
-                foreach (var nso in all)
-                {
-                    var comp = nso as Component;
-                    if ((object)comp == null) continue;
-                    ushort id = 0;
-                    if ((object)_nsoIndexProp != null) id = (ushort)_nsoIndexProp.GetValue(nso, null);
-                    else if ((object)_nsoIndexField != null) id = (ushort)_nsoIndexField.GetValue(nso);
-                    if (id != idx) continue;
-                    return comp.transform.position.y < -30f;
-                }
-            }
-            catch { }
-            // NSO not found in scene — most likely already destroyed by the
-            // previous frame. We forward the destruction event (return false
-            // → "not killbox-fall") so the clients can apply if they haven't
-            // already. Idempotent on the destruction side.
-            return false;
-        }
 
         private List<NsoSnap> CollectActiveNsoSnapshot()
         {
