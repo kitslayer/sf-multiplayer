@@ -64,25 +64,51 @@ def load_lobbies() -> list[dict]:
     return entries
 
 
+HTML_VIEW = """<!doctype html>
+<html><head><meta charset="utf-8"><title>sf-multiplayer lobbies</title>
+<style>body{font-family:ui-monospace,monospace;background:#1a1a1a;color:#ddd;padding:1em;}
+table{border-collapse:collapse;width:100%;}th,td{border:1px solid #444;padding:.4em .7em;text-align:left;}
+th{background:#222;}.up{color:#7fff7f;}.stale{color:#ff7f7f;}h1{font-weight:normal;font-size:1.2em;}</style>
+<meta http-equiv="refresh" content="5"></head><body>
+<h1>sf-multiplayer lobbies <small id="ts"></small></h1>
+<table><thead><tr><th>code</th><th>port</th><th>bridge</th><th>pid</th><th>started</th></tr></thead>
+<tbody id="rows"></tbody></table>
+<script>
+fetch("/lobbies").then(r=>r.json()).then(d=>{
+  document.getElementById("ts").textContent = "(updated " + d.generatedAt + ")";
+  const rows = d.lobbies.map(l =>
+    `<tr><td>${l.code||"?"}</td><td>${l.port||"?"}</td><td>${l.bridge||"?"}</td>` +
+    `<td>${l.pid||"?"}</td><td>${l.started||"?"}</td></tr>`).join("");
+  document.getElementById("rows").innerHTML = rows ||
+    `<tr><td colspan=5 style="color:#888">no lobbies running</td></tr>`;
+});
+</script></body></html>
+"""
+
+
 class LobbyHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
-        if self.path not in ("/lobbies", "/lobbies/"):
-            self.send_response(404)
-            self.end_headers()
-            self.wfile.write(b"Not found. Try GET /lobbies\n")
+        if self.path in ("", "/", "/index.html"):
+            self._send(200, "text/html; charset=utf-8", HTML_VIEW.encode())
             return
-        body = json.dumps(
-            {
-                "generatedAt": datetime.now(timezone.utc).isoformat(),
-                "registry": REGISTRY_DIR,
-                "lobbies": [lobby for lobby in load_lobbies() if lobby.get("alive")],
-            },
-            indent=2,
-        ).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
+        if self.path in ("/lobbies", "/lobbies/"):
+            body = json.dumps(
+                {
+                    "generatedAt": datetime.now(timezone.utc).isoformat(),
+                    "registry": REGISTRY_DIR,
+                    "lobbies": [lobby for lobby in load_lobbies() if lobby.get("alive")],
+                },
+                indent=2,
+            ).encode()
+            self._send(200, "application/json", body)
+            return
+        self._send(404, "text/plain", b"Not found. Try GET /  or  GET /lobbies\n")
+
+    def _send(self, code: int, ctype: str, body: bytes) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")  # in-game / web UI can call
+        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(body)
 
