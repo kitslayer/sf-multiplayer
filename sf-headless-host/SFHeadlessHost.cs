@@ -2825,7 +2825,12 @@ namespace SFHeadlessHost
             foreach (var kv in _sfClients)
             {
                 if (kv.Value == cli) continue;
-                if (!kv.Value.Spawned) continue;
+                // Gate on Initialized (set after ClientInit) — NOT on Spawned,
+                // which BroadcastStartMatch resets to false at /start. Stock SF
+                // expects re-spawn via new ClientRequestingToSpawn, but during
+                // the gap PlayerUpdates would otherwise stop forwarding. Causes
+                // the 'movement syncs in lobby but not after /start' bug.
+                if (!kv.Value.Initialized) continue;
                 SendSfPacket(kv.Value.Addr, PktPlayerUpdate, body, cli.SteamID, channel);
             }
 
