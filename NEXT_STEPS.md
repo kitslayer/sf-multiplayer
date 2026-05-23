@@ -58,8 +58,9 @@ The current "mirror rig that teleports to client position" approach is acknowled
 - Oracle tags each outgoing snapshot with `lastInputSeq` (last sequence number consumed for that slot)
 - Client maintains a sequence-tagged input ring buffer; on snapshot arrival, if local predicted position at sequence N differs from server position at sequence N beyond a tolerance, the client replays buffered inputs from N to current — the canonical CSGO rollback model
 
-### Phase 6.13 — World shards (multi-lobby) ✅ v1
+### Phase 6.13 — World shards (multi-lobby) ✅ v1 + ✅ v1.5
 - v1 (shipped 2026-05-23): multi-process — each lobby is its own Proton+SF oracle on its own UDP port, fully isolated. Driven by [`launch-lobby.sh`](launch-lobby.sh), [`stop-lobby.sh`](stop-lobby.sh), [`list-lobbies.sh`](list-lobbies.sh), [`stop-all-lobbies.sh`](stop-all-lobbies.sh).
+- v1.5 (shipped 2026-05-23): lobby browser endpoint — [`serve-lobbies.py`](serve-lobbies.py) exposes the registry as JSON at `GET /lobbies`. Any server browser (in-game mod, web UI) can poll. Filters out stale entries.
 - v2 (design only): in-process — N additive scenes at Z-offset in one SF process, per-shard state isolation, Harmony dispatch on SF singletons. See [`notes/phase6/12-PHASE6.13-sharding.md`](notes/phase6/12-PHASE6.13-sharding.md) for the design + roadmap.
 
 ### Phase 6.14+ — broader authority

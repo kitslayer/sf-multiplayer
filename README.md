@@ -15,6 +15,8 @@ Centralized dedicated-server revival for **Stick Fight: The Game** (Steam app 67
 | [`launch-sf-headless.sh`](launch-sf-headless.sh) | Launches Stick Fight under Proton in `-batchmode -nographics` with the headless-host plugin loaded. Honors `SFHEADLESS_PORT` / `SFHEADLESS_BRIDGEPORT` env vars for one-instance use. |
 | [`launch-lobby.sh`](launch-lobby.sh) | **Multi-lobby (Phase 6.13 v1).** Spawn one new oracle on the next free UDP port. `launch-lobby.sh [CODE] [PORT]`. Each lobby is fully isolated (separate wineprefix, log, process). |
 | [`stop-lobby.sh`](stop-lobby.sh) / [`stop-all-lobbies.sh`](stop-all-lobbies.sh) / [`list-lobbies.sh`](list-lobbies.sh) | Lobby lifecycle management. Registry at `/tmp/sf-lobbies/`. |
+| [`setup-all.sh`](setup-all.sh) | One-command build + deploy of both plugins (server + client). |
+| [`serve-lobbies.py`](serve-lobbies.py) | HTTP lobby-browser endpoint. `GET /lobbies` returns running lobbies as JSON for server browsers. |
 | [`launch-sf-player.sh`](launch-sf-player.sh) | Launches Stick Fight in graphical mode (player-side) against `127.0.0.1:1337`. For local end-to-end testing. |
 | [`launch-sf-bepinex.sh`](launch-sf-bepinex.sh) | Wrapper that launches SF under Proton with `WINEDLLOVERRIDES="winhttp=n,b"` so BepInEx actually loads (Steam's vanilla "Play" doesn't set this env var). |
 | [`maps/`](maps/) | Dumped map data — 123 Landfall scenes as JSON, used by the server for authoritative weapon/player spawn positions. |
