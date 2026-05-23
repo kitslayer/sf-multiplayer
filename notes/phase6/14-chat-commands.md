@@ -1,6 +1,36 @@
-# Phase 6.15 — Chat-command admin interface
+# Phase 6.15 / 6.20 — Chat-command admin interface
 
-**Status:** design only. Captured from ALKA's `docs/MOD_CLIENT.md` — these are commands the patched `Assembly-CSharp.dll` already parses on the client and emits as `PktPlayerTalked` (msgType 12) packets to the server.
+**Status:** v1 shipped (Phase 6.15) + v2 admin/tournament suite shipped (Phase 6.20). Live commands below in [Implemented commands](#implemented-commands).
+
+This started as a design-only doc lifted from ALKA's `docs/MOD_CLIENT.md`; live commands are now documented inline.
+
+## Implemented commands
+
+All are typed into the in-game chat with a `/` prefix. The server replies back as a chat message visible to the sender.
+
+### Match flow
+- `/start` — kick off the match (anyone can issue)
+- `/restart`, `/next` — schedule a random map advance
+- `/map <1-124>` — switch to a specific Landfall scene (excludes 102 — non-MP)
+- `/listmaps`, `/maps` — list playable scene indices (truncated to 40)
+
+### Info / inspection
+- `/code`, `/room` — show this lobby's code (set via `SF_LOBBY_CODE` env)
+- `/ping` — server replies `pong`
+- `/version` — plugin version string
+- `/players` — connected, spawned, rig count
+- `/lobbies` — list other lobbies on this host (from `/tmp/sf-lobbies/`)
+- `/tickrate [N]` — show or set server physics tickrate (20-240 Hz, default 60). Affects only the oracle; client FPS is independent.
+
+### Admin / tournament
+- `/weapons` — show current weapon allow-list
+  - `/weapons all` — clear filter (default 0-7 round-robin)
+  - `/weapons 0,1,3` — restrict spawns to these weapon IDs
+- `/kick <slot>` — boot a player by slot (0-3). Self-kick blocked.
+- `/anticheat [on|off]` — show or toggle `SF_ANTICHEAT_ENFORCE` without restart
+
+### Help
+- `/help` — list all commands
 
 ## Protocol shape
 

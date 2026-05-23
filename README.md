@@ -118,16 +118,22 @@ Chat commands (type into chat with `/` prefix, response comes back as a thought 
 
 | Command | Effect |
 |---------|--------|
-| `/help`     | List available commands |
-| `/code`     | Show the current lobby's code |
-| `/players`  | Show client/spawn/rig counts |
-| `/lobbies`  | List other running lobbies on this host |
-| `/start`    | Force-start the current lobby's match |
-| `/restart`, `/next` | Schedule a map advance |
-| `/ping`     | Server replies `pong` |
-| `/version`  | Show plugin version |
+| `/help` | List available commands |
+| `/code` | Show the current lobby's code |
+| `/players` | Show client/spawn/rig counts |
+| `/lobbies` | List other running lobbies on this host |
+| `/start` | Force-start the current lobby's match |
+| `/restart`, `/next` | Schedule a map advance (random) |
+| `/map <1-124>` | Switch to a specific Landfall scene |
+| `/listmaps`, `/maps` | List playable scene indices |
+| `/tickrate [20-240]` | Show or set server physics rate (default 60Hz) |
+| `/weapons [0,1,3 \| all]` | Show or set the weapon allow-list |
+| `/kick <slot>` | Boot a player |
+| `/anticheat [on\|off]` | Show or toggle `SF_ANTICHEAT_ENFORCE` |
+| `/ping` | Server replies `pong` |
+| `/version` | Show plugin version |
 
-Server emits a welcome message ("Welcome to lobby {code}. Type /help for commands.") on first spawn.
+Server emits a welcome message ("Welcome to lobby {code}. Type /help for commands.") on first spawn. Full chat-command reference + design context in [`notes/phase6/14-chat-commands.md`](notes/phase6/14-chat-commands.md).
 
 ## Ops + monitoring
 

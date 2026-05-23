@@ -2347,6 +2347,52 @@ namespace SFHeadlessHost
                             _pendingRoundAdvanceAt = Time.realtimeSinceStartup + 1.0f;
                         }
                         break;
+                    case "/map":
+                    {
+                        string arg = (space < 0 ? "" : text.Substring(space + 1).Trim());
+                        if (string.IsNullOrEmpty(arg))
+                        {
+                            SendChatToPlayer(sender, $"Current map: scene {_currentSceneIndex}. Usage: /map <1-124>. Random next: /next.");
+                            break;
+                        }
+                        if (!int.TryParse(arg, out int sceneIdx) || sceneIdx < 1 || sceneIdx > 124 || sceneIdx == 102)
+                        {
+                            SendChatToPlayer(sender, "Usage: /map <1-124> (102 excluded — non-MP scene). Use /listmaps to browse.");
+                            break;
+                        }
+                        bool valid = false;
+                        foreach (var m in _allLandfallMaps) if (m == sceneIdx) { valid = true; break; }
+                        if (!valid)
+                        {
+                            SendChatToPlayer(sender, $"Scene {sceneIdx} isn't in the playable Landfall set.");
+                            break;
+                        }
+                        _currentSceneIndex = sceneIdx;
+                        SendChatToPlayer(sender, $"Map set to scene {sceneIdx}. Switching now...");
+                        Log.LogInfo($"[chat] /map {sceneIdx} by slot={sender.Slot}");
+                        // Reuse AdvanceRound's MapChange + StartMatch chain via the pending timer.
+                        // AdvanceRound picks a random map though, so we need a direct call shape.
+                        _pendingRoundAdvanceAt = -1f;
+                        BroadcastMapChange(_currentSceneIndex);
+                        _pendingStartMatchAt = Time.realtimeSinceStartup + NextMatchDelaySec;
+                        foreach (var kv in _sfClients) kv.Value.Spawned = false;
+                        break;
+                    }
+                    case "/listmaps":
+                    case "/maps":
+                    {
+                        var sb = new System.Text.StringBuilder("Maps (1-124, 102 excluded): ");
+                        int shown = 0;
+                        foreach (var m in _allLandfallMaps)
+                        {
+                            if (shown > 0) sb.Append(",");
+                            sb.Append(m);
+                            shown++;
+                            if (shown >= 40) { sb.Append("..."); break; }
+                        }
+                        SendChatToPlayer(sender, sb.ToString());
+                        break;
+                    }
                     case "/players":
                         int up = 0, sp = 0;
                         foreach (var ckv in _sfClients) { up++; if (ckv.Value.Spawned) sp++; }
@@ -2469,7 +2515,7 @@ namespace SFHeadlessHost
                         break;
                     }
                     case "/help":
-                        SendChatToPlayer(sender, "Commands: /code /ping /start /restart /next /players /lobbies /tickrate /weapons /kick /anticheat /version /help");
+                        SendChatToPlayer(sender, "Commands: /code /ping /start /restart /next /map /listmaps /players /lobbies /tickrate /weapons /kick /anticheat /version /help");
                         break;
                     default:
                         SendChatToPlayer(sender, "Unknown command. Type /help");
