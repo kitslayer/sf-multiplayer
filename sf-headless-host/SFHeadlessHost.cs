@@ -5127,10 +5127,20 @@ namespace SFHeadlessHost
     // their plugin logs trampling each other in BepInEx/LogOutput.log.
     // Catches lines from ALL sources (SFHeadlessHost, BepInEx itself, any
     // other plugin), so the per-lobby file is a superset of LogOutput.
+    //
+    // 2026-05-23 fix: removed `lock (_lock)` — the C# compiler emits
+    // `Monitor.Enter(obj, ref bool)` (2-arg) which SF's old Mono 2.0
+    // runtime DOESN'T HAVE. The MissingMethodException was caught and
+    // re-logged, hitting our listener again, recursively, dumping 400MB
+    // of log per oracle in ~10 minutes. Replaced with a ThreadStatic
+    // re-entry guard + no locking. BepInEx log events come from the
+    // Unity main thread; concurrent writes are not a real concern here.
+    // The re-entry guard means even if WriteLine itself throws, the
+    // listener immediately returns instead of recursing.
     internal class PerLobbyLogListener : BepInEx.Logging.ILogListener
     {
         private readonly System.IO.StreamWriter _writer;
-        private readonly object _lock = new object();
+        [System.ThreadStatic] private static bool _reentryGuard;
 
         public PerLobbyLogListener(string path)
         {
@@ -5143,14 +5153,14 @@ namespace SFHeadlessHost
 
         public void LogEvent(object sender, BepInEx.Logging.LogEventArgs eventArgs)
         {
+            if (_reentryGuard) return;
+            _reentryGuard = true;
             try
             {
-                lock (_lock)
-                {
-                    _writer.WriteLine($"[{eventArgs.Level,-7}:{eventArgs.Source.SourceName}] {eventArgs.Data}");
-                }
+                _writer.WriteLine($"[{eventArgs.Level,-7}:{eventArgs.Source.SourceName}] {eventArgs.Data}");
             }
-            catch { /* never let logging crash the plugin */ }
+            catch { /* never let logging crash the plugin OR recurse */ }
+            finally { _reentryGuard = false; }
         }
 
         public void Dispose()

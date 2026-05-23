@@ -1,0 +1,102 @@
+# Crash investigation — oracle native access violation
+
+Started 2026-05-23 night. Hard fault inside `StickFight.exe` while running under Proton/Wine. **7 distinct crash dumps in `/home/miles/sf-mirror-local/2026-05-23_*/` from this single day's testing.**
+
+## TL;DR
+
+The oracle is crashing **deterministically at the same x86 instruction address** during gameplay. Same bytes, same access violation, 5 separate crash dirs match perfectly. It's not a race; it's a code path. **Cause unknown without symbols.** Until we know more, do NOT speculate-patch — every revert and partial-fix this session has caused other regressions.
+
+## The crashes
+
+```
+Today's oracle crashes (StickFight.exe access violation 0xc0000005):
+  13:14:40  → EIP 0x0057ed26  bytes: f0 0f c1 08 8b 4e 34 89 4d f8 85 c9 74 2a 8b 51
+  14:36:22  → epilogue bytes (different — likely same fault, caught mid-unwind)
+  15:24:06  → EIP 0x0057ed26  bytes: f0 0f c1 08 8b 4e 34 89 4d f8 85 c9 74 2a 8b 51
+  15:30:48  → epilogue bytes (different)
+  15:59:02  → EIP 0x0057ed26  bytes: f0 0f c1 08 8b 4e 34 89 4d f8 85 c9 74 2a 8b 51
+  17:41:42  → EIP 0x0057ed26  bytes: f0 0f c1 08 8b 4e 34 89 4d f8 85 c9 74 2a 8b 51
+  20:09:28  → EIP 0x0057ed26  bytes: f0 0f c1 08 8b 4e 34 89 4d f8 85 c9 74 2a 8b 51
+```
+
+Five out of seven crashes hit the exact same instruction with identical surrounding bytes. The other two have function-epilogue bytes (`83 ec 04 8d 65 f4 59 ...`) — those look like the same fault propagating up through stack unwind.
+
+## Decoded faulting instruction
+
+```
+f0 0f c1 08              lock xadd dword ptr [eax], ecx
+8b 4e 34                 mov  ecx, [esi+0x34]
+89 4d f8                 mov  [ebp-8], ecx
+85 c9                    test ecx, ecx
+74 2a                    jz   +0x2a              (skip if null)
+8b 51 ??                 mov  edx, [ecx+??]      (deref next-pointer)
+```
+
+That's a "atomic-increment-refcount-then-traverse-next-pointer" pattern. Classic for **linked-list / sync-collection iteration with refcount safety**. Mono uses this for ThreadLocalStorage, sync block tables, weak references, GC handles. Native unmanaged C++ uses it for `std::shared_ptr` style refcount inc.
+
+## Faulting memory location
+
+```
+Write to location 7f800004 caused an access violation.
+EAX: 0x7f800004
+ESI: 0x20ab7160  (probably the actual object)
+```
+
+`0x7f800000` is the **last MB of 32-bit user space** in Wine — right at the user/kernel boundary. Writing there always faults. This is a sentinel-pointer pattern: when something is unmapped, freed, or never-initialized, Wine sometimes leaves a high address as a "do not touch" marker rather than NULL.
+
+So EAX is bogus: the code computed a refcount address via `ESI + 0x34` (`mov ecx, [esi+0x34]`) but EAX was loaded from somewhere else BEFORE this instruction — possibly the previous instruction loaded EAX from a different field of ESI that's been corrupted/freed.
+
+## What I know it's NOT
+
+- Not BepInEx itself (BepInEx 5.4 is widely deployed; our 5.4.23.5 is the same as everyone uses)
+- Not the patched Assembly-CSharp.dll (md5 stable across runs; same as user's working install on .115)
+- Not my new code's exception handlers (the addresses are in stickfight.exe NATIVE, not Mono-managed Harmony stubs)
+- Not memory exhaustion (43% memory in use at crash time, 0 paging file pressure)
+- Not GC stress (no GC log entries, fault is in non-GC code)
+
+## What I suspect (top 3, no proof)
+
+### Hypothesis A: NSO event-channel iteration
+
+`f0 0f c1 08` matches the pattern Unity uses for NSO `ListenForEventPackages` / `ListenForPackages` iteration internals. With our heavy NSO traffic + the `m_DontSyncForSeconds` interaction we patched, a syncable object could be freed (via `OnDestroy` setting `mIsListening=false`) while another thread is mid-iteration on its event-channel. The refcount inc to keep it alive races with the destroy.
+
+**Verifiable**: would correlate with high destruction-event traffic just before each crash. We saw the live oracle log show a stress-break path for chains (P0-11 era) — the destruction filter is now drop-all but the SERVER's own DestructiblePiece collision still fires server-side. That fires SF's internal `OnDestructibleDestroyed` → object pool returns → race window.
+
+### Hypothesis B: InvokeMultiplayerManagerInitChain side-effect
+
+We log NREs in `[P6.9] ReadyUp threw NRE` + `[P6.9] InitSyncedObjects threw NRE` after every match start. These exceptions are caught but leave SF's `mNetworkManager`/`mConnectedClients`/`mSpawnedWeapons` partially initialized. Later, SF's own native code (driven by Lidgren network thread or Unity main loop) dereferences a field expected to be a valid object but it's the sentinel pointer 0x7f800000.
+
+**Verifiable**: crashes only happen AFTER `/start` was issued. If we never start a match, no crashes. (Not yet validated.)
+
+### Hypothesis C: Concurrent ObjectUpdate write into a removed NSO
+
+Our `SendBroadcastPrefix` runs on Unity main thread. SF's Lidgren receive thread processes inbound `ObjectUpdate`. If a client's ObjectUpdate arrives for an NSO that was just destroyed (via the destruction filter race scenario), the inbound handler tries to apply a position to a freed object. Most cases throw NRE; one specific case writes to a refcount field at 0x7f800004 because the NSO header has been replaced with the sentinel.
+
+**Verifiable**: crashes coincide with ObjectUpdate-for-recently-destroyed-NSO. Need an NSO-destroy-timing trace to confirm.
+
+## What's blocking diagnosis
+
+1. **No symbols for StickFight.exe** — `SymGetSymFromAddr64, GetLastError: 'Success.'` means we can't resolve `0x0057ed26` to a function name. Would need a debug build of SF (Landfall doesn't ship one) or symbol-extract from a reverse-engineering toolchain.
+2. **No Mono-managed callstack** — the crash is in native code, so the .NET-side stack that LED to that native call isn't in the dump.
+3. **Crash dumps are minidumps, not full core** — Wine's `crash.dmp` is a Windows-style minidump. Can be loaded in WinDbg / dotPeek / Ghidra to disassemble around 0x0057ed26 + understand calling context.
+
+## Next moves (in order of value vs effort)
+
+1. **Disassemble the crash region around 0x0057ed26 in StickFight.exe using Ghidra/IDA** — would tell us what function this is. Cheap if you have the tools; expensive setup-time otherwise.
+2. **Test Hypothesis B (no-/start = no crash)** — run the oracle for 30 min with NO clients ever connecting. If no crash, the trigger is match-time activity.
+3. **Test Hypothesis A (destruction race)** — disable client-initiated destruction relay entirely for one run. If no crash, destruction events are the trigger.
+4. **Patch a fault handler in our plugin** to log "we crashed in 0x0057ed26 at time T, recent activity was X" before the process dies. Use `AppDomain.UnhandledException` + a watchdog thread that captures the last 100 LogInfo lines.
+
+## DO NOT do yet
+
+- Don't add a `try-catch` to suppress this — it's native, not managed. Try-catch in C# won't catch it.
+- Don't add a Harmony patch to the suspected SF function — we don't know which function it is.
+- Don't revert recent changes hoping it fixes itself — the crash pattern was present BEFORE the recent feature work (the 13:14:40 crash predates Phase 6.19 work).
+
+## Side note — log flood bug from commit `bce8bcc` (FIXED)
+
+The per-lobby log listener used `lock (_lock)` which the C# compiler emits as `Monitor.Enter(obj, ref bool)` (2-arg overload added in .NET 4.0). SF's Mono 2.0 runtime doesn't have that overload. Every log event threw `MissingMethodException`, which BepInEx logged, which fired the listener again, which threw → infinite recursion → 400MB/oracle log floods in ~10 min.
+
+**Fixed** by replacing `lock(_lock)` with a `[ThreadStatic] _reentryGuard` boolean. The guard prevents recursion even if `WriteLine` itself throws something else later.
+
+This was MY bug, NOT the underlying native crash. The two crashes labeled "kernelbase.dll AccessViolation" (14:36:22 and 15:30:48) might be Wine cascading off the log flood saturating something, OR they might be the same StickFight.exe crash with the stack unwinding past the SF boundary. Inconclusive without symbols.
