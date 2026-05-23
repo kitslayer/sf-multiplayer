@@ -64,10 +64,11 @@ Where we are vs. that target:
 - ✅ v26 wire protocol shipped (snapshot, input, fire-weapon)
 - ✅ Client snapshot smoothing + divergence-snap (Phase 6.11.2 + 6.12.2 v0.2)
 - ✅ Tick-history ring buffer on server (Phase 6.14.5 v0.1)
-- ✅ Server-authoritative NSOs (no more client-shim cross-fire, commit `6b1a9e4`)
-- ⏳ **Full input-replay rollback (Phase 6.12.2 v1.0)** — currently only hard-snap; replay loop needs SF Movement state restore
-- ⏳ **Local NSO push prediction (Phase 6.18)** — boxes feel laggy because clients now have kinematic NSOs and wait for server broadcast
-- ⏳ **Server-side projectile hit registration (Phase 6.17 v0.2)** — registry + broadcast shipped; raycast vs player rigs + authoritative damage emit pending
+- ✅ Server-authoritative NSOs + dynamic-client + kinematic-platforms (Phase 6.19)
+- ✅ **Shift-correction reconciliation (Phase 6.12.2 v1.0)** — server corrections applied as offset to current local position; no more "snap back to stale server pos" feel. The canonical CSGO/Valorant model.
+- ✅ **Server-side projectile hit registration (Phase 6.17 v0.2)** — swept sphere check, authoritative damage emit. Polish pending: particle direction bytes, wall occlusion (v0.3).
+- ⏳ **Local NSO push prediction (Phase 6.18)** — boxes feel responsive now thanks to dynamic client NSOs (commit `6875908`), but still no "predict local push, server confirms" loop. Optional polish.
+- ⏳ **Full Movement.cs state-restore replay** — current shift-correction handles the position; subtle internal-state divergence (jump state, grounded flag, etc.) would need a full state-restore loop. Only matters in pathological lag cases.
 
 ## Roadmap
 
