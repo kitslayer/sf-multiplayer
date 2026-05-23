@@ -1818,17 +1818,31 @@ namespace SFHeadlessHost
                     RelayBodyToAll(msgType, data, bodyOffset, bodyLen, channel);
                     break;
 
-                // The rest are "relay to all OTHER clients" — SF's host passes
-                // ignoreUserID = sender so they don't get duplicate force
-                // events / fall-outs.
+                // "Relay to all OTHER clients" — SF's host passes ignoreUserID =
+                // sender so they don't get duplicate force events / fall-outs.
                 case PktPlayerForceAdded:
                 case PktPlayerForceAddedAndBlock:
                 case PktPlayerLavaForceAdded:
                 case PktPlayerFallOut:
-                case PktObjectDestructionCollision:
-                case PktObjectSimpleDestruction:
                 case PktObjectUpdate:
+                case PktPlayerTalked:        // voice/ping blip; sender already triggered it locally
+                case PktOptionsChanged:      // lobby option toggles (ALKA BUGS_BACKLOG P0-4)
                     RelayBodyToOthers(cli, msgType, data, bodyOffset, bodyLen, channel);
+                    break;
+
+                // "Relay to ALL including sender" for destruction events.
+                // In vanilla SF, the host applies the break locally and broadcasts
+                // to non-host clients. In our dedicated-server setup, NO client
+                // is the host — the sender hasn't applied the break locally yet
+                // either, so they need the echo back to actually see the ice/
+                // crate/chain break. Without this, the breaker's screen shows
+                // unbroken ice while others see it shattered. Spotted in ALKA's
+                // BUGS_BACKLOG P0-3 — same fix shape as our PlayerTookDamage
+                // include-sender for the killing-blow signal.
+                case PktObjectSimpleDestruction:
+                case PktObjectInvokeDestructionEvent:
+                case PktObjectDestructionCollision:
+                    RelayBodyToAll(msgType, data, bodyOffset, bodyLen, channel);
                     break;
 
                 // Weapon drop: SF's OnPlayerRequestingWeaponDrop just appends
