@@ -1847,7 +1847,7 @@ namespace SFHeadlessHost
                     HandleClientRequestingToSpawn(cli, data, bodyOffset, bodyLen);
                     break;
                 case PktPlayerUpdate:
-                    HandlePlayerUpdate(cli, data, bodyOffset, bodyLen);
+                    HandlePlayerUpdate(cli, data, bodyOffset, bodyLen, channel);
                     break;
                 case PktClientReadyUp:
                     HandleClientReadyUp(cli, data, bodyOffset, bodyLen);
@@ -2806,15 +2806,19 @@ namespace SFHeadlessHost
         // render this player) AND teleport this client's auth ghost rig to
         // the reported position so it can physically push boxes server-side.
         //
-        // The ghost rig is the auth NetworkPlayer in kinematic mode (see
-        // ConfigureAuthoritativeRig). MovePosition does swept collision so
-        // dynamic NSO bodies (boxes/crates) the rig overlaps get pushed
-        // server-side. Phase 6.14 NSO snapshots then broadcast the box
-        // positions consistently to all clients.
+        // CHANNEL ROUTING IS CRITICAL: SF's NetworkPlayer.InitNetworkSpawnID
+        // assigns `mUpdateChannel = slot * 2 + 2`, and incoming packets get
+        // dispatched to the matching NetworkPlayer by channel. Forwarding on
+        // channel 0 (our old behavior) means the receiving client doesn't
+        // route the update to the sender's NetworkPlayer — the remote player
+        // appears frozen. We must forward on the SAME channel we received on.
+        //
+        // The incoming channel encodes the sender's slot, so we don't need
+        // to look it up — just preserve the byte.
         //
         // Body format (from NetworkPlayer.SyncClientState): first 4 bytes
         // are posY + posZ as int16 / 100.
-        private void HandlePlayerUpdate(SfClient cli, byte[] data, int off, int len)
+        private void HandlePlayerUpdate(SfClient cli, byte[] data, int off, int len, byte channel)
         {
             byte[] body = new byte[len];
             if (len > 0) System.Buffer.BlockCopy(data, off, body, 0, len);
@@ -2822,7 +2826,7 @@ namespace SFHeadlessHost
             {
                 if (kv.Value == cli) continue;
                 if (!kv.Value.Spawned) continue;
-                SendSfPacket(kv.Value.Addr, PktPlayerUpdate, body, cli.SteamID, 0);
+                SendSfPacket(kv.Value.Addr, PktPlayerUpdate, body, cli.SteamID, channel);
             }
 
             if (len < 4 || cli.Slot < 0) return;
