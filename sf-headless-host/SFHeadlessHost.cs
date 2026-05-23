@@ -1891,7 +1891,6 @@ namespace SFHeadlessHost
                 case PktPlayerForceAddedAndBlock:
                 case PktPlayerLavaForceAdded:
                 case PktPlayerFallOut:
-                case PktObjectUpdate:
                 case PktPlayerTalked:        // chat / voice / commands (see PlayerTalked hex log below)
                 case PktOptionsChanged:      // lobby option toggles (ALKA BUGS_BACKLOG P0-4)
                 case PktLerpPlayer:          // patched-DLL ext, remote-lerp trigger (ALKA P1-4)
@@ -1902,6 +1901,19 @@ namespace SFHeadlessHost
                         LogPlayerTalkedTelemetry(cli, data, bodyOffset, bodyLen, channel);
                         TryProcessChatCommand(cli, data, bodyOffset, bodyLen);
                     }
+                    RelayBodyToOthers(cli, msgType, data, bodyOffset, bodyLen, channel);
+                    break;
+
+                case PktObjectUpdate:
+                    // BOXES FIX — apply the client's NSO update to the
+                    // server's own scene state BEFORE relaying. Previously
+                    // we only relayed; the server's local NSO sat at its
+                    // spawn position forever, so v26 WorldStateSnapshot
+                    // broadcast (Phase 6.14) overrode the client's correct
+                    // local-push with the server's stale "still at spawn"
+                    // view. Now the server tracks who-pushed-what and the
+                    // snapshot is accurate.
+                    ApplyClientObjectUpdate(data, bodyOffset, bodyLen);
                     RelayBodyToOthers(cli, msgType, data, bodyOffset, bodyLen, channel);
                     break;
 
@@ -3177,6 +3189,81 @@ namespace SFHeadlessHost
         }
 
         private struct NsoSnap { public ushort Id; public float X, Y, Z, RotZ; }
+
+        // Apply an incoming PktObjectUpdate (msgType 26) to the server's
+        // local NSO scene state. Body layout (from
+        // NetworkSyncableObject.SendNewObjectStatePackage decompile):
+        //   u16 Index
+        //   i16 PosY/100         (corresponds to Unity world Y)
+        //   i16 PosZ/100         (corresponds to Unity world Z)
+        //   i16 RotY/100         (unused here)
+        //   i16 RotZ/100         (rotation about forward, applied as eulerZ)
+        // Without this, every client's box positions diverged because the
+        // server didn't know boxes had moved → its v26 snapshot broadcast
+        // the boxes' spawn positions, snapping clients back.
+        private readonly Dictionary<ushort, Component> _nsoByIndexCache = new Dictionary<ushort, Component>();
+        private float _nsoCacheLastRebuildAt = -1f;
+        private int _objectUpdateAppliedCount;
+        private void ApplyClientObjectUpdate(byte[] data, int off, int len)
+        {
+            if (len < 10) return;
+            ushort idx = (ushort)(data[off] | (data[off + 1] << 8));
+            short rawY = (short)(data[off + 2] | (data[off + 3] << 8));
+            short rawZ = (short)(data[off + 4] | (data[off + 5] << 8));
+            short rawRotZ = (short)(data[off + 8] | (data[off + 9] << 8));
+            float py    = rawY / 100f;
+            float pz    = rawZ / 100f;
+            float rotZ  = rawRotZ / 100f;
+
+            // Rebuild the index→Component cache periodically. NSO Indexes
+            // get re-assigned on every scene load, so a stale cache after
+            // a map change would point at destroyed objects.
+            float now = Time.realtimeSinceStartup;
+            if (_nsoCacheLastRebuildAt < 0f || now - _nsoCacheLastRebuildAt > 5f || _nsoByIndexCache.Count == 0)
+            {
+                RebuildNsoIndexCache();
+                _nsoCacheLastRebuildAt = now;
+            }
+            if (!_nsoByIndexCache.TryGetValue(idx, out var comp) || (object)comp == null)
+                return;
+            comp.transform.position = new Vector3(0f, py, pz);
+            comp.transform.rotation = Quaternion.Euler(0f, 0f, rotZ);
+            // Mark as recently-moved so CollectActiveNsoSnapshot will
+            // include this NSO in subsequent broadcasts even after the
+            // client stops sending updates.
+            _nsoLastBroadcastPos[idx] = comp.transform.position;
+            _nsoLastMovedAt[idx]      = now;
+            _objectUpdateAppliedCount++;
+            if (_objectUpdateAppliedCount == 1 || _objectUpdateAppliedCount % 60 == 0)
+                Log.LogInfo($"[BOXES] Applied client ObjectUpdate #{_objectUpdateAppliedCount} idx={idx} → ({py:0.0},{pz:0.0})");
+        }
+
+        private void RebuildNsoIndexCache()
+        {
+            _nsoByIndexCache.Clear();
+            try
+            {
+                if ((object)_nsoType == null)
+                {
+                    _nsoType = AccessTools.TypeByName("NetworkSyncableObject");
+                    if ((object)_nsoType == null) return;
+                    _nsoIndexProp = AccessTools.Property(_nsoType, "Index");
+                    _nsoIndexField = AccessTools.Field(_nsoType, "m_Index");
+                }
+                var all = UnityEngine.Object.FindObjectsOfType(_nsoType);
+                if (all == null) return;
+                foreach (var nso in all)
+                {
+                    ushort id = 0;
+                    if ((object)_nsoIndexProp != null)
+                        id = (ushort)_nsoIndexProp.GetValue(nso, null);
+                    else if ((object)_nsoIndexField != null)
+                        id = (ushort)_nsoIndexField.GetValue(nso);
+                    _nsoByIndexCache[id] = nso as Component;
+                }
+            }
+            catch (Exception ex) { Log.LogWarning($"[BOXES NSO cache] {ex.Message}"); }
+        }
 
         // Gather NSOs that need broadcasting this tick. Three include cases:
         //   1. Non-kinematic NSO with current velocity (boxes being pushed,
