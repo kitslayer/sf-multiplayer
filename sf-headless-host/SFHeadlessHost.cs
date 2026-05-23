@@ -1420,50 +1420,12 @@ namespace SFHeadlessHost
                     // Drop stale clients so we don't keep forwarding broadcasts
                     // to ghosts after ungraceful disconnects.
                     SweepStaleClients();
-                    // Fire scheduled auto-match-start if armed and time reached.
+                    // Fire scheduled match-start if /start was issued (user-driven now,
+                    // no longer auto-armed by ClientRequestingToSpawn).
                     if (_autoStartAt > 0f && Time.realtimeSinceStartup >= _autoStartAt && !_matchStarted)
                     {
                         _autoStartAt = -1f;
-                        Log.LogInfo($"[SF] Auto-match-start firing: broadcast MapChange + StartMatch.");
-                        BroadcastMapChange(_currentSceneIndex);
-                        BroadcastStartMatch();
-                        _matchStarted = true;
-                        // Phase 6.5 Step 1.5a — also load the match scene on the
-                        // oracle so its host-side gameplay code (weapon spawn
-                        // timers, killboxes, projectile sim) actually runs. The
-                        // IsServer=true postfix is useless if no gameplay scene
-                        // is active to call SendMessageToAllClients.
-                        try
-                        {
-                            // Flip MatchmakingHandler.IsNetworkMatch=true so
-                            // GameManager.Update takes the SpawnWeapon network
-                            // branch (line 289-292 of decompile). Without this,
-                            // GameManager would Instantiate weapons locally and
-                            // never call our intercept point.
-                            var mhType = AccessTools.TypeByName("MatchmakingHandler");
-                            if ((object)mhType != null)
-                            {
-                                var setNetMatch = AccessTools.Method(mhType, "SetNetworkMatch");
-                                if ((object)setNetMatch != null)
-                                {
-                                    setNetMatch.Invoke(null, new object[] { true });
-                                    Log.LogInfo("[P6.5] MatchmakingHandler.SetNetworkMatch(true).");
-                                }
-                            }
-
-                            // No SceneManager.LoadScene here — GameManager.StartMatch
-                            // internally does LoadMapCourotine → SceneManager.LoadScene(
-                            // num, Additive). A Single-load destroys MainScene's
-                            // GameManager (no DontDestroyOnLoad in stock SF), causing
-                            // StartCoroutine NullRef on the dead instance.
-                            _oracleStartMatchAt = Time.realtimeSinceStartup + 0.5f;
-                            _oracleStartMatchFired = false;
-                            Log.LogInfo($"[P6.5] Scheduled oracle GameManager.StartMatch in 0.5s (will Additively load scene {_currentSceneIndex} internally).");
-                        }
-                        catch (Exception e)
-                        {
-                            Log.LogError($"[P6.5] StartMatch scheduling failed: {e}");
-                        }
+                        FireMatchStart("scheduled");
                     }
                     // Phase 6.5 Step 2 — kick GameManager.StartMatch on the oracle
                     // so the StartMapSequence coroutine runs (additively loads
@@ -2131,9 +2093,7 @@ namespace SFHeadlessHost
                         else
                         {
                             SendChatToPlayer(sender, "Starting match...");
-                            BroadcastMapChange(_currentSceneIndex);
-                            BroadcastStartMatch();
-                            _matchStarted = true;
+                            FireMatchStart($"chat /start from slot {sender.Slot}");
                         }
                         break;
                     case "/version":
@@ -2625,13 +2585,33 @@ namespace SFHeadlessHost
             }
             cli.Spawned = true;
 
-            // First spawn into the lobby — schedule auto-match-start in 4s
-            // so player has time to register the spawn before the scene loads.
-            if (!_matchStarted && _autoStartAt < 0f)
+            // BUG FIX (asymmetric sync): broadcast PktClientJoined (msgType 2)
+            // to every other already-connected client so they register this
+            // new player in their mConnectedClients array (per the decompile
+            // of MultiplayerManager.OnClientJoined). Without this, existing
+            // clients get ClientSpawned for the new player but their
+            // mConnectedClients[slot] is empty — subsequent PlayerUpdates
+            // from the new player's SteamID don't map to a NetworkPlayer
+            // and silently drop, so the existing client sees the new player
+            // as frozen.
+            //
+            // Body: u8 slot + u64 steamID LE.
+            byte[] joinBody = new byte[9];
+            joinBody[0] = (byte)cli.Slot;
+            ulong sid = cli.SteamID;
+            for (int b = 0; b < 8; b++) joinBody[1 + b] = (byte)(sid >> (8 * b));
+            int notified = 0;
+            foreach (var kv in _sfClients)
             {
-                _autoStartAt = Time.realtimeSinceStartup + 4.0f;
-                Log.LogInfo($"[SF] Auto-match-start scheduled in 4s.");
+                if (kv.Value == cli) continue;
+                SendSfPacket(kv.Value.Addr, PktClientJoined, joinBody, cli.SteamID, 0);
+                notified++;
             }
+            if (notified > 0)
+                Log.LogInfo($"[SF] Broadcast PktClientJoined slot={cli.Slot} steamID={cli.SteamID} → {notified} existing client(s)");
+
+            // Match no longer auto-starts. Players spawn into the lobby and
+            // wait for /start in chat. Host can type /start to begin.
 
             // Phase 6.15.1 — welcome message via chat. Sent once per spawn so
             // the player knows the server's identity + commands available.
@@ -2653,15 +2633,48 @@ namespace SFHeadlessHost
         private int _currentSceneIndex = 6; // Desert3 — known-good Landfall map
         private void HandleClientReadyUp(SfClient cli, byte[] data, int off, int len)
         {
-            Log.LogInfo($"[SF] ClientReadyUp from {cli.Addr} bodyLen={len}; broadcasting MapChange+StartMatch.");
-            if (_matchStarted) {
+            // Match no longer auto-starts on ClientReadyUp. Host types /start
+            // in chat. ClientReadyUp is still logged so we can see the
+            // ready-button-walk-through.
+            Log.LogInfo($"[SF] ClientReadyUp from {cli.Addr} bodyLen={len} — ignored; waiting for /start chat command.");
+            if (_matchStarted)
+            {
                 Log.LogInfo($"[SF] Match already started; re-sending StartMatch to {cli.Addr} only.");
                 SendSfPacket(cli.Addr, PktStartMatch, new byte[0], 0, 0);
+            }
+        }
+
+        // Consolidated match-start sequence. Called by /start chat or by
+        // anything else that wants to begin a match. Idempotent — second call
+        // while a match is in progress just logs and returns.
+        private void FireMatchStart(string source)
+        {
+            if (_matchStarted)
+            {
+                Log.LogInfo($"[SF] FireMatchStart({source}) — already started, no-op.");
                 return;
             }
+            Log.LogInfo($"[SF] FireMatchStart({source}) — broadcasting MapChange + StartMatch + invoking oracle GameManager.");
             BroadcastMapChange(_currentSceneIndex);
             BroadcastStartMatch();
             _matchStarted = true;
+            try
+            {
+                var mhType = AccessTools.TypeByName("MatchmakingHandler");
+                if ((object)mhType != null)
+                {
+                    var setNetMatch = AccessTools.Method(mhType, "SetNetworkMatch");
+                    if ((object)setNetMatch != null)
+                    {
+                        setNetMatch.Invoke(null, new object[] { true });
+                        Log.LogInfo("[P6.5] MatchmakingHandler.SetNetworkMatch(true).");
+                    }
+                }
+                _oracleStartMatchAt = Time.realtimeSinceStartup + 0.5f;
+                _oracleStartMatchFired = false;
+                Log.LogInfo($"[P6.5] Scheduled oracle GameManager.StartMatch in 0.5s (additive scene {_currentSceneIndex}).");
+            }
+            catch (Exception e) { Log.LogError($"[P6.5] FireMatchStart scheduling failed: {e}"); }
         }
 
         // MapChange body: byte winnerIndex + byte mapType + mapData.
