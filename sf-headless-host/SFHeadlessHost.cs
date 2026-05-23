@@ -1844,10 +1844,12 @@ namespace SFHeadlessHost
                 case PktPlayerLavaForceAdded:
                 case PktPlayerFallOut:
                 case PktObjectUpdate:
-                case PktPlayerTalked:        // voice/ping blip; sender already triggered it locally
+                case PktPlayerTalked:        // chat / voice / commands (see PlayerTalked hex log below)
                 case PktOptionsChanged:      // lobby option toggles (ALKA BUGS_BACKLOG P0-4)
                 case PktLerpPlayer:          // patched-DLL ext, remote-lerp trigger (ALKA P1-4)
                 case PktColorChanged:        // patched-DLL ext, player color (ALKA P1-4)
+                case PktKickPlayer:          // host kick — patched DLL emits, peer clients see who got booted
+                    if (msgType == PktPlayerTalked) LogPlayerTalkedTelemetry(cli, data, bodyOffset, bodyLen, channel);
                     RelayBodyToOthers(cli, msgType, data, bodyOffset, bodyLen, channel);
                     break;
 
@@ -1892,6 +1894,29 @@ namespace SFHeadlessHost
             {
                 Log.LogWarning($"[SF] dispatch threw on msgType={msgType} from={from}: {ex.Message}");
             }
+        }
+
+        // Telemetry for the chat-command research effort (notes/phase6/14-
+        // chat-commands.md). The patched DLL sends '/start', '/code', etc.
+        // via PktPlayerTalked on channel (slot*2)+3 — we don't yet know the
+        // exact body encoding. Log first few packets' first 32 bytes so we
+        // can decode the format from real wire data.
+        private int _playerTalkedLogged;
+        private void LogPlayerTalkedTelemetry(SfClient cli, byte[] data, int off, int len, byte channel)
+        {
+            if (_playerTalkedLogged >= 20) return;
+            _playerTalkedLogged++;
+            int dumpLen = System.Math.Min(len, 32);
+            var hex = new System.Text.StringBuilder(dumpLen * 3);
+            for (int i = 0; i < dumpLen; i++) hex.Append(data[off + i].ToString("X2")).Append(' ');
+            // Best-effort UTF-8 with non-printable as '.'
+            var ascii = new System.Text.StringBuilder(dumpLen);
+            for (int i = 0; i < dumpLen; i++)
+            {
+                byte b = data[off + i];
+                ascii.Append(b >= 32 && b < 127 ? (char)b : '.');
+            }
+            Log.LogInfo($"[telemetry chat] slot={cli.Slot} ch={channel} len={len} hex={hex} ascii='{ascii}'");
         }
 
         // === ALKA-style anticheat — observation-only rate guard ===
