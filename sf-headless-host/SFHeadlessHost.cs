@@ -3365,15 +3365,51 @@ namespace SFHeadlessHost
                 // and is much cheaper than per-bone raycast. Emit server-
                 // authoritative PktPlayerTookDamage on hit; the relay
                 // path validates + fans out to all clients.
+                //
+                // v0.3 — wall occlusion via Physics.Linecast from prev to
+                // new position. If the line is intersected by a collider
+                // whose root isn't a player rig (Controller component),
+                // expire the projectile silently (bullet hit a wall). If
+                // first hit IS a player, fall through to the sphere check
+                // so the existing hit emit applies.
                 Vector3 prev = p.Position;
                 p.Position += p.Velocity * dt;
+                if (ProjectileHitWall(prev, p.Position))
+                {
+                    _projectiles.RemoveAt(i);
+                    continue;
+                }
                 int hitSlot = TestProjectileHit(p, prev);
                 if (hitSlot >= 0)
                 {
-                    EmitServerDamage(hitSlot, p.OwnerSlot, p.WeaponType);
+                    EmitServerDamage(hitSlot, p.OwnerSlot, p.WeaponType, p.Velocity);
                     _projectiles.RemoveAt(i);
                 }
             }
+        }
+
+        // v0.3 — wall occlusion. Linecast from prev to new along the segment
+        // the projectile traveled this tick. If the first hit collider
+        // belongs to scene geometry (no Controller component in its root),
+        // it's a wall — the bullet expires without damage. Player rigs are
+        // intentionally excluded because TestProjectileHit handles them
+        // (and SF's player rigs span many bones; a raycast might hit a
+        // hand collider while the sphere check finds the torso).
+        private bool ProjectileHitWall(Vector3 from, Vector3 to)
+        {
+            Vector3 dir = to - from;
+            float dist = dir.magnitude;
+            if (dist < 0.001f) return false;
+            // Single Linecast — Unity returns first hit by default.
+            if (Physics.Linecast(from, to, out var hit))
+            {
+                if ((object)hit.collider == null) return false;
+                var root = hit.collider.transform.root;
+                if ((object)root == null) return false;
+                if (root.GetComponent("Controller") != null) return false;  // player hit, let sphere check handle
+                return true;  // wall / scene geometry hit
+            }
+            return false;
         }
 
         // Returns the slot of the first rig (other than the owner) whose
@@ -3404,26 +3440,42 @@ namespace SFHeadlessHost
         }
 
         // Build a PktPlayerTookDamage body and broadcast it as if it had come
-        // from the victim's own client. The standard 25 damage + dmgType=0
+        // from the victim's own client. Standard 25 damage + dmgType=0
         // tracks vanilla pistol behavior. weaponType byte is reserved for
         // when we differentiate pistol/sniper/etc.; logged but not used yet.
-        private void EmitServerDamage(int victimSlot, byte attackerSlot, byte weaponType)
+        //
+        // v0.3 — particle direction included. Body format (from
+        // NetworkPlayer.SyncClienthealth parser at line 649):
+        //   byte attackerIdx          (1)
+        //   f32  damage               (4)
+        //   bool playParticles        (1)
+        //   f32  particleDir.y        (4)  if playParticles
+        //   f32  particleDir.z        (4)  if playParticles
+        //   byte dmgType              (1)
+        // Total = 15 bytes with particles. Client renders the spray
+        // direction from particleDir; we use the projectile's velocity
+        // direction so it sprays backward from the hit point.
+        private void EmitServerDamage(int victimSlot, byte attackerSlot, byte weaponType, Vector3 projVelocity)
         {
-            // Body shape from NetworkPlayer.UnitWasDamaged: byte attackerIdx,
-            // f32 damage, bool playParticles, 4×sbyte particleDir (XY pair?),
-            // byte dmgType.  We omit projectile-track particles by setting
-            // playParticles=false; the body shrinks accordingly. Minimum body
-            // length = 1 + 4 + 1 + 1 = 7 bytes (attackerIdx, damage, playFx=0,
-            // dmgType). Channel = (victimSlot*2)+3 per NetworkPlayer.mEventChannel.
-            byte[] body = new byte[7];
-            body[0] = attackerSlot;
-            byte[] dmgBytes = BitConverter.GetBytes(25.0f);  // server-authoritative damage
-            Buffer.BlockCopy(dmgBytes, 0, body, 1, 4);
-            body[5] = 0;  // playParticles=false
-            body[6] = 0;  // dmgType=0 generic
+            byte[] body = new byte[15];
+            int off = 0;
+            body[off++] = attackerSlot;
+            byte[] dmgBytes = BitConverter.GetBytes(25.0f);
+            Buffer.BlockCopy(dmgBytes, 0, body, off, 4); off += 4;
+            body[off++] = 1;  // playParticles=true
+            // particleDir.y / .z — the receiver uses Quaternion.LookRotation
+            // on Vector3(0, y, z). Pointing along the projectile velocity
+            // means the particle system orients along the hit direction.
+            // Normalize so magnitude doesn't affect particle behavior.
+            Vector3 dir = projVelocity.sqrMagnitude > 0.0001f ? projVelocity.normalized : Vector3.forward;
+            byte[] yBytes = BitConverter.GetBytes(dir.y);
+            byte[] zBytes = BitConverter.GetBytes(dir.z);
+            Buffer.BlockCopy(yBytes, 0, body, off, 4); off += 4;
+            Buffer.BlockCopy(zBytes, 0, body, off, 4); off += 4;
+            body[off++] = 0;  // dmgType=0 generic
             byte channel = (byte)(victimSlot * 2 + 3);
             BroadcastSfPacket(PktPlayerTookDamage, body, 0uL, channel);
-            Log.LogInfo($"[P6.17v2] Server-side hit: attacker={attackerSlot} victim={victimSlot} w={weaponType} → 25 dmg on chan={channel}");
+            Log.LogInfo($"[P6.17v3] Server hit: attacker={attackerSlot} victim={victimSlot} w={weaponType} dir=({dir.y:0.00},{dir.z:0.00}) → 25 dmg on chan={channel}");
         }
 
         // Phase 6.14.5 — tick-history ring buffer for lag-comp.
