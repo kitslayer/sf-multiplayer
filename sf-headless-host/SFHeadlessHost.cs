@@ -1761,7 +1761,8 @@ namespace SFHeadlessHost
             // below, which would create a phantom SfClient entry every time.
             if (msgType == PktPlayerInput)
             {
-                HandlePlayerInput(data, bodyOffset, bodyLen);
+                try { HandlePlayerInput(data, bodyOffset, bodyLen); }
+                catch (Exception ex) { Log.LogWarning($"[SF] HandlePlayerInput threw: {ex.Message}"); }
                 return;
             }
 
@@ -1776,6 +1777,11 @@ namespace SFHeadlessHost
             cli.LastSeen = Time.realtimeSinceStartup;
             if (steamID != 0) cli.SteamID = steamID;
 
+            // ALKA P0-5 defense: a bad/malformed packet in one handler should
+            // log + drop, not bubble out and skip the rest of the batch (which
+            // would happen if it propagated up to DrainSfServer's catch).
+            try
+            {
             switch (msgType)
             {
                 case PktPing:
@@ -1865,6 +1871,11 @@ namespace SFHeadlessHost
                 default:
                     if (Verbose) Log.LogDebug($"[SF] unhandled type={msgType} from={from}");
                     break;
+            }
+            }
+            catch (Exception ex)
+            {
+                Log.LogWarning($"[SF] dispatch threw on msgType={msgType} from={from}: {ex.Message}");
             }
         }
 
