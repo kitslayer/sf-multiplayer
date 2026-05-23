@@ -1813,10 +1813,17 @@ namespace SFHeadlessHost
                 Log.LogInfo($"[SF] new client appeared: {from}");
             }
             cli.LastSeen = Time.realtimeSinceStartup;
-            if (steamID != 0)
+            // CRITICAL: do NOT overwrite cli.SteamID from the envelope here.
+            // SF's SendP2PPacketToUser puts the DESTINATION's SteamID in the
+            // envelope, not the sender's. When P1's OnClientJoined fires it
+            // calls PingAllUsers → P1 sends a Ping with envelope steamID=P2's,
+            // and a blind overwrite would clobber P1's record. cli.SteamID is
+            // set exactly once from ClientRequestingIndex's body (which DOES
+            // carry the sender's identity) — that's enough.
+            if (cli.SteamID == 0 && steamID != 0)
             {
-                if (cli.SteamID != 0 && cli.SteamID != steamID)
-                    Log.LogWarning($"[SF DEBUG] cli {cli.Addr} slot={cli.Slot} SteamID CHANGING {cli.SteamID} → {steamID} (incoming msgType={msgType})");
+                // First-ever steamID for this addr — accept it (covers e.g.
+                // direct ClientRequestingAccepting before ClientRequestingIndex).
                 cli.SteamID = steamID;
             }
 
