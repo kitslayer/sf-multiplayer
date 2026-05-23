@@ -1,6 +1,30 @@
 # What's new — 2026-05-23 session
 
-Roughly **40+ commits** landed in one day. This file's a running tally so visitors and contributors can scan the deltas without scrolling git log. Headline items below; commit messages have the detail. See [`notes/PROTOCOL.md`](notes/PROTOCOL.md) for the wire-format spec.
+**60+ commits** landed in one day. Running tally so visitors can scan the deltas without scrolling git log. See [`notes/ARCHITECTURE.md`](notes/ARCHITECTURE.md) for the system overview, [`notes/PROTOCOL.md`](notes/PROTOCOL.md) for the wire-format spec, [`notes/BUGS_BACKLOG.md`](notes/BUGS_BACKLOG.md) for the bug incident log.
+
+## End-state goal (confirmed 2026-05-23)
+
+**Client-side prediction + server-authoritative simulation + client reconciliation** — canonical CS/Valorant/Overwatch netcode. Foundations all shipped this session; full input-replay rollback + local NSO prediction are the remaining big steps before the loop closes.
+
+## Sharding state
+
+**Multi-process sharding (v1) is shipped** — `launch-lobby.sh CODE` spawns a fully isolated SF.exe oracle per lobby, each with its own UDP port + wineprefix + log. `serve-lobbies.py` exposes the running set as JSON for browsers. `list-lobbies.sh` tabulates. ~500MB RAM + 1 vCPU per lobby; a hobby VPS handles 6-8 concurrent.
+
+**In-process sharding (v2)** is design-only. One SF.exe running N additive scenes at Z-offset with per-shard state isolation. Documented in [`notes/phase6/12-PHASE6.13-sharding.md`](notes/phase6/12-PHASE6.13-sharding.md). The hard part is SF's singleton-heavy code: `MultiplayerManager.Instance`, `GameManager.Instance`, etc. all assume one global match. Would need either Harmony-dispatch on `Instance` getters by shard, or careful state save/restore around each call. ALKA's `WorldShardManager.cs` ships the scene-management piece but his `applyInput`/`damage`/etc. are also marked "next: scoped per shard" — not done. For comp scale, v1 is sufficient.
+
+## P0 bugs found + fixed during live multi-client testing
+
+(Full details in `notes/BUGS_BACKLOG.md`.)
+
+- **PlayerUpdate forwarded on channel 0** instead of `slot*2 + 2` — `NetworkPlayer.InitNetworkSpawnID` sets a per-slot receive channel; forwards on channel 0 never reach any NetworkPlayer's listener. Fixed by preserving the incoming channel through `HandlePlayerUpdate`.
+- **SteamID overwrite from envelope** — SF's `SendP2PPacketToUser` puts the *destination's* SteamID in envelope, not sender's. Our blind `cli.SteamID = envelope.steamID` corrupted records when `OnClientJoined.PingAllUsers()` fired. Fixed by setting SteamID exactly once from `ClientRequestingIndex` body.
+- **PktClientSpawned before PktClientJoined** — `OnPlayerSpawned` reads `mConnectedClients[b]` (populated by `OnClientJoined`) at line 1623 of decompile. Sending Spawned first NullRef'd existing peers' rig wire-up. Fixed by reversing the order.
+- **`Spawned` gate stale after /start** — `BroadcastStartMatch` resets `cli.Spawned=false` per round; `HandlePlayerUpdate` gated on Spawned → stopped forwarding the moment match started. Fixed by gating on `cli.Initialized` (set permanently after ClientInit).
+- **Cross-client NSO authority fight** — every client had `mHasControl=true` via the client-shim → all of them broadcast their own physics → boxes desync'd, randomly destructed. Fixed by removing the client-shim entirely; oracle is sole authority now (server-authoritative model).
+- **Server-originated destruction events broadcast to clients** — chains/ice on the oracle stress-broke under joint forces at scene load; SendBroadcastPrefix forwarded those destructions → clients removed intact local objects. Fixed by skipping server-originated msgType 28/29/30 outbound (kept inbound relay-to-all path intact).
+- **`stop-lobby.sh` killed user's game windows** — `pkill -f StickFight.exe.*-port 1337` matched both clients too. Fixed by matching the lobby-specific `-logFile` instead.
+
+## Architecture additions
 
 ## Architecture additions
 

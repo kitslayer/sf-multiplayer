@@ -18,17 +18,45 @@ Live server end-to-end. Steam Stick Fight (Windows or Linux/Proton) connects to 
 - Per-map weapon allow-lists still ignored beyond what SF natively does — every map gets random-from-global, plus pre-placed weapons from `CheckForGroundWeapons`
 - Workshop maps not supported at runtime (just the 123 pre-dumped Landfall scenes)
 
-## End-state goal
+## End-state goal — CONFIRMED 2026-05-23
 
-Client-side prediction + server-side authoritative simulation + client reconciliation. Canonical CS/Valorant/Overwatch model:
+**Client-side prediction + server-side authoritative simulation + client reconciliation.** The canonical CS/Valorant/Overwatch netcode model. User confirmed: "we should have client prediction as the end goal."
 
-1. Client runs local Movement / shoot / interact prediction so input feels instant
-2. Client sends *inputs* (not positions) to server with sequence numbers
-3. Server runs authoritative simulation
-4. Server broadcasts snapshots at ~30Hz
-5. Client compares local prediction to server snapshot; if divergent, snap-correct by replaying inputs from the snapshot's sequence forward
+```
+PER-FRAME (client side)
+  1. Read input (keyboard / pad)
+  2. Run local Movement.cs on the input → predicted player position
+  3. Run local NSO physics on local pushes → predicted box motion
+  4. Send PktPlayerInput { stickXY, aimXY, buttons, sequenceNum } to server
+  5. Render at predicted positions
 
-The current "mirror rig that teleports to client position" approach is acknowledged as a local maximum — boxes work, but the server isn't actually authoritative on anything player-driven, so cheats can fake position and ice/destructibles desync. Real prediction+reconciliation is the destination.
+EVERY 33ms (server → client)
+  6. Receive PktWorldStateSnapshot { tick, players, NSOs, projectiles, lastInputSeq }
+  7. Compare local-predicted position at sequenceNum=lastInputSeq vs server.position
+  8. If divergence > threshold: snap-correct + REPLAY buffered inputs from
+     (lastInputSeq+1) through current sequence — i.e. re-run Movement.cs
+     starting from the server-authoritative state. End result: local
+     view converges to "server's view + my latest local inputs applied"
+     instead of "stale-by-RTT server view alone."
+
+PER-FRAME (server side)
+  9. Process inbound inputs into SlotInputs[slot]
+  10. SF's own Movement.cs (server-side, via InjectInputPrefix) advances
+      the authoritative rig from those inputs
+  11. SF's own physics advances NSO/projectile state on the oracle's scene
+  12. NSO.TickSyncPos (5Hz) broadcasts deltas; our v26 snapshot (30Hz)
+      broadcasts everything
+  13. Validates incoming damage events against tick-history rewind buffer
+```
+
+Where we are vs. that target:
+- ✅ v26 wire protocol shipped (snapshot, input, fire-weapon)
+- ✅ Client snapshot smoothing + divergence-snap (Phase 6.11.2 + 6.12.2 v0.2)
+- ✅ Tick-history ring buffer on server (Phase 6.14.5 v0.1)
+- ✅ Server-authoritative NSOs (no more client-shim cross-fire, commit `6b1a9e4`)
+- ⏳ **Full input-replay rollback (Phase 6.12.2 v1.0)** — currently only hard-snap; replay loop needs SF Movement state restore
+- ⏳ **Local NSO push prediction (Phase 6.18)** — boxes feel laggy because clients now have kinematic NSOs and wait for server broadcast
+- ⏳ **Server-side projectile hit registration (Phase 6.17 v0.2)** — registry + broadcast shipped; raycast vs player rigs + authoritative damage emit pending
 
 ## Roadmap
 
