@@ -23,7 +23,7 @@ Centralized dedicated-server revival for **Stick Fight: The Game** (Steam app 67
 | [`launch-sf-bepinex.sh`](launch-sf-bepinex.sh) | Wrapper that launches SF under Proton with `WINEDLLOVERRIDES="winhttp=n,b"` so BepInEx actually loads (Steam's vanilla "Play" doesn't set this env var). |
 | [`maps/`](maps/) | Dumped map data — 123 Landfall scenes as JSON, used by the server for authoritative weapon/player spawn positions. |
 | [`refs/`](refs/) | Decompiled `Assembly-CSharp` source (~358 .cs files) — not redistributed, generated from your own copy. See [`refs/README.md`](refs/README.md). |
-| [`notes/`](notes/) | Living design + research docs. [`notes/SUMMARY.md`](notes/SUMMARY.md) is the latest top-level entry point; [`notes/phase6/`](notes/phase6/) tracks the current architecture work. |
+| [`notes/`](notes/) | Living design + research docs. Start at [`notes/README.md`](notes/README.md) for the reading order — top entries are [`notes/ARCHITECTURE.md`](notes/ARCHITECTURE.md), [`notes/PROTOCOL.md`](notes/PROTOCOL.md), [`notes/OBJECT_SYNC.md`](notes/OBJECT_SYNC.md), [`notes/BUGS_BACKLOG.md`](notes/BUGS_BACKLOG.md), and [`notes/AUDIT_2026-05-23.md`](notes/AUDIT_2026-05-23.md). |
 | [`tools/`](tools/) | Python scripts. `dump-sf-maps.py` is an offline UnityPy-based map extractor that runs without launching SF. |
 | [`sf-leveldumper/`](sf-leveldumper/) | One-shot BepInEx plugin that walks Landfall scenes and dumps geometry + spawn points + killboxes to JSON. Not loaded at runtime. |
 | [`legacy/`](legacy/) | Earlier architectures kept for reference — Go dedicated server, v26 client plugin, local-control fix, lobby browser, launcher fork. None are in the active data path. See [`legacy/README.md`](legacy/README.md). |
