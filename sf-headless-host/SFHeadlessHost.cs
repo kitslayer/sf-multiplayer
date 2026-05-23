@@ -2579,36 +2579,36 @@ namespace SFHeadlessHost
                 bw.Write(rx); bw.Write(ry); bw.Write(rz);
                 bw.Write((byte)0);    // spawnFlag false = RevivePlayer at pos
                 bw.Write((int)0);     // colorCount (patched-only)
-                byte[] body = ms.ToArray();
-                // Echo to the asking client AND broadcast to others.
-                BroadcastSfPacket(PktClientSpawned, body, cli.SteamID, 0);
+                byte[] spawnBody = ms.ToArray();
+
+                // ORDER MATTERS: existing clients need PktClientJoined BEFORE
+                // PktClientSpawned so their mConnectedClients[slot] is
+                // populated before OnPlayerSpawned reads it (line 1623 of
+                // MultiplayerManager.cs decompile: reads slot then accesses
+                // .ControlledLocally; null slot → NullRef → broken rig).
+                //
+                // Body: u8 slot + u64 steamID LE.
+                byte[] joinBody = new byte[9];
+                joinBody[0] = (byte)cli.Slot;
+                ulong sid = cli.SteamID;
+                for (int b = 0; b < 8; b++) joinBody[1 + b] = (byte)(sid >> (8 * b));
+                int notified = 0;
+                foreach (var kv in _sfClients)
+                {
+                    if (kv.Value == cli) continue;
+                    SendSfPacket(kv.Value.Addr, PktClientJoined, joinBody, cli.SteamID, 0);
+                    notified++;
+                }
+                if (notified > 0)
+                    Log.LogInfo($"[SF] step1: sent PktClientJoined slot={cli.Slot} steamID={cli.SteamID} → {notified} existing client(s)");
+
+                // Now safe to broadcast ClientSpawned. New client gets their
+                // own echo; existing clients have mConnectedClients[slot]
+                // populated so OnPlayerSpawned can read it cleanly.
+                BroadcastSfPacket(PktClientSpawned, spawnBody, cli.SteamID, 0);
+                Log.LogInfo($"[SF] step2: broadcast PktClientSpawned slot={cli.Slot} pos=({px:0.0},{py:0.0},{pz:0.0}) to all {_sfClients.Count} client(s)");
             }
             cli.Spawned = true;
-
-            // BUG FIX (asymmetric sync): broadcast PktClientJoined (msgType 2)
-            // to every other already-connected client so they register this
-            // new player in their mConnectedClients array (per the decompile
-            // of MultiplayerManager.OnClientJoined). Without this, existing
-            // clients get ClientSpawned for the new player but their
-            // mConnectedClients[slot] is empty — subsequent PlayerUpdates
-            // from the new player's SteamID don't map to a NetworkPlayer
-            // and silently drop, so the existing client sees the new player
-            // as frozen.
-            //
-            // Body: u8 slot + u64 steamID LE.
-            byte[] joinBody = new byte[9];
-            joinBody[0] = (byte)cli.Slot;
-            ulong sid = cli.SteamID;
-            for (int b = 0; b < 8; b++) joinBody[1 + b] = (byte)(sid >> (8 * b));
-            int notified = 0;
-            foreach (var kv in _sfClients)
-            {
-                if (kv.Value == cli) continue;
-                SendSfPacket(kv.Value.Addr, PktClientJoined, joinBody, cli.SteamID, 0);
-                notified++;
-            }
-            if (notified > 0)
-                Log.LogInfo($"[SF] Broadcast PktClientJoined slot={cli.Slot} steamID={cli.SteamID} → {notified} existing client(s)");
 
             // Match no longer auto-starts. Players spawn into the lobby and
             // wait for /start in chat. Host can type /start to begin.
