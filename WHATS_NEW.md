@@ -75,7 +75,7 @@ Roughly 16 commits landed in one day. This file's a running tally so visitors an
 - Chat commands actually implemented (he has them in design + DLL emit, server-side parser is now ours)
 
 **Behind him:**
-- Damage authority (server-side damage validation) — designed, not shipped
+- Damage authority — we now have v0.1 (magnitude + attacker-idx sanity); his is fuller (range check, weapon match, alive check). Full version waits on Phase 6.14.5 rewind buffer.
 - Server-side rewind buffer for lag-comp — designed, not shipped
 - His one-click Windows `.bat` deploy scripts — we have Linux equivalents but no Windows yet
 - Active launcher binary (he has a Go launcher that auto-patches the DLL)
