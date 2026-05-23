@@ -7,6 +7,8 @@ The Phase 6 oracle is a headless Stick Fight instance running under Proton with 
 - 4+ GB RAM (per oracle ~600 MB; comfortable host = 4 GB + 600 MB × N lobbies)
 - 2+ CPU cores (per oracle ~0.5 idle vCPU)
 - 32-bit Wine library support (`i386` multi-arch on Debian/Ubuntu)
+- **`xvfb` package** (Wine needs a virtual X11 display even in `-batchmode -nographics` mode — without it SF.exe loads but hangs at 0% CPU forever at `nodrv_CreateWindow`)
+- `steam-installer` package (apt) for the Steam-runtime i386/amd64 libs Proton expects, OR manually rsync `~/.local/share/Steam/{ubuntu12_32,ubuntu12_64,linux32,linux64}` from a desktop install
 - UDP port forwarding from public IP → 1337+ for connect, optional TCP 8080 for the lobby browser HTTP endpoint
 - `rsync`, `unzip`, `python3`, `systemd`, basic GNU coreutils
 
@@ -22,6 +24,20 @@ The Phase 6 oracle is a headless Stick Fight instance running under Proton with 
 ├── runtime/                 ← used as STEAM_COMPAT_CLIENT_INSTALL_PATH; can be empty
 └── prefix-<bridgeport>/     ← per-oracle wineprefix, created on first boot
 ```
+
+## Server prep (one-time, needs sudo)
+
+```bash
+sudo apt-get update
+sudo dpkg --add-architecture i386
+sudo apt-get install -y \
+  libc6:i386 libstdc++6:i386 libfreetype6:i386 \
+  libgl1:i386 libgl1-mesa-dri:i386 libvulkan1:i386 zlib1g:i386 \
+  libx11-6:i386 libxext6:i386 libxcomposite1:i386 libxrandr2:i386 libxxf86vm1:i386 \
+  xvfb steam-installer
+```
+
+`steam-installer` pulls in the right Steam-runtime metapackages (`steam-libs:amd64`, `steam-libs:i386`, `steam-libs-i386:i386`) without launching the Steam GUI. `xvfb` is required because Wine inside Proton can't run without a display driver even in batchmode — `xvfb-run` provides a tiny virtual X11 server.
 
 ## Deploy from a local working machine
 

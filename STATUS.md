@@ -12,11 +12,17 @@ Updated continuously by Claude as work progresses. Latest commit at top. Check t
 
 ## What's happening right now
 
-**Now (2026-05-23 ~20:45):**
-- Crash investigation complete; findings in [`notes/CRASH_INVESTIGATION.md`](notes/CRASH_INVESTIGATION.md)
-- Per-lobby log listener bug fixed (commit pending push)
-- Stopped all local oracles per goal directive
-- About to start .115 deployment
+**Now (2026-05-23 ~21:25):**
+- ✅ Crash investigation complete; findings in [`notes/CRASH_INVESTIGATION.md`](notes/CRASH_INVESTIGATION.md)
+- ✅ Per-lobby log listener bug fixed
+- ✅ Stopped all local oracles per goal directive
+- ✅ **Phase 6 oracle DEPLOYED + RUNNING on .115** (192.168.1.115)
+  - Port 1337 UDP/TCP bound
+  - UDP ping verified from laptop
+  - Per-lobby plugin log streaming heartbeats
+  - All 10 Phase 6.5 patches loaded
+  - Systemd auto-restart on crash
+- Next: lobby browser HTTP on .115, real client testing whenever you're ready
 
 ## Key crash findings (full doc: [`CRASH_INVESTIGATION.md`](notes/CRASH_INVESTIGATION.md))
 
@@ -43,15 +49,19 @@ Updated continuously by Claude as work progresses. Latest commit at top. Check t
 - [x] Stop + remove sfdsrv on .115 (systemd unit + /opt/sfdsrv gone)
 - [x] Sync SF install to .115 (`~/sf-oracle/install`, 398M, plugins md5 verified)
 - [x] Sync project to .115 (`~/sf-multiplayer`, 19M)
-- [⏳] Sync Proton to .115 (~/sf-oracle/proton, in progress 886/1400 MB)
-- [x] Write `deploy/start-oracle-server.sh` (server-bundled launcher)
+- [x] Sync Proton (1.4G) + Steam Runtime libs (1.1G) to .115
+- [x] Write `deploy/start-oracle-server.sh` (server-bundled launcher; xvfb-run wrapper added)
 - [x] Write `deploy/sf-oracle.service` (systemd unit)
 - [x] Write `deploy/install-sf-client.sh` (client installer)
 - [x] Write `deploy/server-browser.html` (standalone GUI browser)
-- [ ] Install systemd unit on .115 + start
-- [ ] Validate oracle boots cleanly on .115 (Proton path issues likely)
-- [ ] Document `notes/DEPLOY.md` for future-self
-- [ ] Commit + push all deploy files
+- [x] Install systemd unit on .115 + start
+- [x] Install required apt deps on .115 (i386 libs + steam-installer + xvfb)
+- [x] Validate oracle boots cleanly on .115 (port bound, plugin log streams, UDP ping responds)
+- [x] Document `notes/DEPLOY.md` with apt deps + xvfb requirement
+- [ ] Commit + push xvfb fix + STATUS update
+- [ ] Test the lobby browser HTTP endpoint on .115
+- [ ] (optional) Document `install-sf-client.sh` usage in DEPLOY.md
+- [ ] (optional) Make `server-browser.html` discoverable via README
 
 ## Known open issues (carried from earlier)
 

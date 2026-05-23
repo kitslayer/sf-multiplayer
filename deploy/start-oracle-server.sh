@@ -72,6 +72,21 @@ echo "  PLUGIN LOG:  $PLUGINLOG"
 echo "  UNITY LOG:   $UNITY_LOG"
 echo "  LOBBY CODE:  $SF_LOBBY_CODE"
 
-exec "$PROTON" run "$SF_DIR/StickFight.exe" \
-  -batchmode -nographics \
-  -logFile "$UNITY_LOG"
+# Wine needs SOME display driver for its core (CreateWindow internals, even
+# in -batchmode -nographics). On a headless server we wrap in xvfb-run so
+# Wine gets a virtual X11 display. Without this, the SF binary loads but
+# never progresses past nodrv_CreateWindow ("The explorer process failed to
+# start.") and hangs at 0% CPU forever.
+if command -v xvfb-run >/dev/null 2>&1; then
+  exec xvfb-run -a --server-args="-screen 0 320x240x24" \
+    "$PROTON" run "$SF_DIR/StickFight.exe" \
+    -batchmode -nographics \
+    -logFile "$UNITY_LOG"
+else
+  # Fallback to bare Proton — only works if there's an existing X display
+  # (e.g., a desktop session with this script in a terminal).
+  echo "  WARNING: xvfb-run not found — Wine may hang without a display driver. apt install xvfb."
+  exec "$PROTON" run "$SF_DIR/StickFight.exe" \
+    -batchmode -nographics \
+    -logFile "$UNITY_LOG"
+fi
