@@ -49,15 +49,6 @@ namespace SFHeadlessHost
             Log = Logger;
             Instance = this;
 
-            // Phase 6.9 settle phase, re-introduced after the boxes-fix recon:
-            // ripping this dropped a load-bearing piece. Stock SF's
-            // PrepareMapForTravel coroutine freezes all map rigidbodies for ~1s
-            // on load so joints + constraints register at rest. Without it, the
-            // server's NSOs fall through the floor before physics settles and
-            // wind up at Y=-50, then broadcast that bad position to clients.
-            SceneManager.sceneLoaded -= OnAnySceneLoadedRunSettle;
-            SceneManager.sceneLoaded += OnAnySceneLoadedRunSettle;
-
             // Unity 5.6 doesn't have Application.isBatchMode — fall back to
             // checking the command-line for -batchmode.
             bool batchMode = false;
@@ -522,6 +513,7 @@ namespace SFHeadlessHost
         private static int _p65ObjUpdateIdxLogCount;
         private static readonly HashSet<ushort> _p65ObjUpdateSeenIndices = new HashSet<ushort>();
         private static int _p65ObjUpdateFilterCount;
+        private static int _p65DestructionFilterCount;
         internal static bool SendBroadcastPrefix(object[] __args)
         {
             try
@@ -590,9 +582,9 @@ namespace SFHeadlessHost
                     {
                         try { channel = (byte)Convert.ToInt32(__args[5]); } catch { }
                     }
+                    bool skip = false;
                     // For ObjectUpdate, filter out broadcasts where the object's
                     // Y position is out of int16 range (overflow artifact).
-                    bool skip = false;
                     if (msgType == 26 && data.Length >= 4)
                     {
                         short posYmul100 = (short)(data[2] | (data[3] << 8));
@@ -603,6 +595,23 @@ namespace SFHeadlessHost
                                 Log.LogInfo($"[P6.5] Skipping ObjectUpdate forward — Y={posYmul100/100f:0.0} out of playable range (#{_p65ObjUpdateFilterCount})");
                             _p65ObjUpdateFilterCount++;
                         }
+                    }
+                    // BOXES/ICE VANISHING FIX: don't forward server-originated
+                    // destruction events. The oracle's own NSO scene generates
+                    // spurious destructions (chains stress-breaking under
+                    // gravity, boxes that drift off the platform hitting the
+                    // killbox) that have no equivalent on any client. Forwarding
+                    // them makes clients destroy intact local objects.
+                    //
+                    // Legit client-initiated destructions still propagate via
+                    // the INBOUND path (RelayBodyToAll on msgType 28/29/30 in
+                    // SfDispatch), which broadcasts to all including sender.
+                    if (msgType == 28 || msgType == 29 || msgType == 30)
+                    {
+                        skip = true;
+                        if (_p65DestructionFilterCount < 5 || _p65DestructionFilterCount % 50 == 0)
+                            Log.LogInfo($"[P6.5] Skipping server-originated destruction msgType={msgType} (#{_p65DestructionFilterCount}) — client-initiated destructions still relay via inbound path");
+                        _p65DestructionFilterCount++;
                     }
                     if (!skip) Instance.ForwardBroadcastToV25Clients(msgType, data, ignoreUID, channel);
                 }
@@ -720,85 +729,6 @@ namespace SFHeadlessHost
             {
                 Log.LogError($"[P6.5] InvokeOracleStartCountDown threw: {e}");
             }
-        }
-
-        // Phase 6.9 settle phase, re-introduced 2026-05-23 for the boxes-fix
-        // second pass. Hooks SceneManager.sceneLoaded — on each non-MainScene
-        // load, freezes all rigidbodies for ~1.5s, then re-enables dynamic
-        // for the ones that should be (non-DestructiblePiece OR
-        // simple/event-destruction). DestructiblePieces with collision-only
-        // destruction stay kinematic until struck (chains, ice).
-        //
-        // Why this is necessary: without it, on each new map load the
-        // server's NSO rigidbodies start with gravity, joints haven't
-        // registered constraints yet, and stacks of crates tip and fall
-        // through the platform before physics settles. The fallen positions
-        // then broadcast to clients via host-side ObjectUpdate AND our v26
-        // snapshot, making boxes vanish off-screen on every client.
-        private void OnAnySceneLoadedRunSettle(Scene scene, LoadSceneMode mode)
-        {
-            if (scene.name == "MainScene" || string.IsNullOrEmpty(scene.name)) return;
-            Log.LogInfo($"[settle] Scene loaded: '{scene.name}'; freezing rigidbodies for 1.5s.");
-            StartCoroutine(SettlePhaseCoroutine(scene));
-        }
-
-        private System.Collections.IEnumerator SettlePhaseCoroutine(Scene scene)
-        {
-            yield return null;
-            var rootGOs = scene.GetRootGameObjects();
-            var allRBs = new List<Rigidbody>();
-            foreach (var go in rootGOs)
-            {
-                if ((object)go == null) continue;
-                allRBs.AddRange(go.GetComponentsInChildren<Rigidbody>(true));
-            }
-            int n = allRBs.Count;
-            Log.LogInfo($"[settle] Scene '{scene.name}': freezing {n} rigidbodies.");
-            bool[] wasKinematic = new bool[n];
-            for (int i = 0; i < n; i++)
-            {
-                var rb = allRBs[i];
-                if ((object)rb == null) continue;
-                wasKinematic[i] = rb.isKinematic;
-                rb.isKinematic = true;
-                rb.velocity = Vector3.zero;
-                rb.angularVelocity = Vector3.zero;
-            }
-            yield return new WaitForSecondsRealtime(1.5f);
-
-            // Re-enable kinematic=false only for bodies that should be dynamic:
-            //   - not a DestructiblePiece OR
-            //   - DestructiblePiece with simpleDestruction or eventDestruction
-            //   - AND no DontEnableRig marker
-            var dpType        = AccessTools.TypeByName("DestructiblePiece");
-            var dontEnableT   = AccessTools.TypeByName("DontEnableRig");
-            FieldInfo simpleF = (object)dpType != null ? AccessTools.Field(dpType, "simpleDestruction") : null;
-            FieldInfo eventF  = (object)dpType != null ? AccessTools.Field(dpType, "eventDestruction")  : null;
-            int reEnabled = 0;
-            for (int i = 0; i < n; i++)
-            {
-                var rb = allRBs[i];
-                if ((object)rb == null) continue;
-                if (wasKinematic[i]) continue;
-                bool stayKin = false;
-                if ((object)dpType != null)
-                {
-                    var dp = rb.GetComponent(dpType);
-                    if ((object)dp != null)
-                    {
-                        bool simple = (object)simpleF != null && (bool)simpleF.GetValue(dp);
-                        bool ev     = (object)eventF  != null && (bool)eventF.GetValue(dp);
-                        if (!simple && !ev) stayKin = true;
-                    }
-                }
-                if ((object)dontEnableT != null && rb.GetComponent(dontEnableT) != null) stayKin = true;
-                if (!stayKin)
-                {
-                    rb.isKinematic = false;
-                    reEnabled++;
-                }
-            }
-            Log.LogInfo($"[settle] Done '{scene.name}': {reEnabled}/{n} re-enabled dynamic; rest stay kinematic until struck.");
         }
 
         // Phase 6.9 — manual invoke of MultiplayerManager.InitMapDataObjects +
@@ -3007,18 +2937,29 @@ namespace SFHeadlessHost
             var rootPos = rig.transform.position;
             var delta = target - rootPos;
             if (delta.sqrMagnitude < 0.0001f) return;
+            // BOXES FIX v3: large jumps (first update from spawn-point to client's
+            // real position, or scene transition) use direct rb.position writes
+            // so we DON'T sweep through box stacks and knock them off platforms.
+            // Subsequent small deltas use MovePosition's swept collision so the
+            // rig CAN push boxes as it walks into them.
+            bool teleport = delta.magnitude > 5f;
             rig.transform.position = target;
             var rbs = rig.GetComponentsInChildren<Rigidbody>();
             foreach (var rb in rbs)
             {
                 if ((object)rb == null) continue;
-                if (rb.isKinematic)
+                if (teleport)
+                {
+                    rb.position = rb.position + delta;
+                    if (!rb.isKinematic) rb.velocity = Vector3.zero;
+                }
+                else if (rb.isKinematic)
                     rb.MovePosition(rb.position + delta);
                 else
                     rb.position += delta;
             }
             if (_ghostMoveLogCount < 5 || _ghostMoveLogCount % 600 == 0)
-                Log.LogInfo($"[P6.9 ghost] slot={slot} moved to {target} (delta={delta.magnitude:0.00})");
+                Log.LogInfo($"[P6.9 ghost] slot={slot} moved to {target} (delta={delta.magnitude:0.00} {(teleport?"TELEPORT":"sweep")})");
             _ghostMoveLogCount++;
         }
 
