@@ -38,11 +38,22 @@ if [ -f "$REGISTRY/${CODE}.conf" ]; then
   rm "$REGISTRY/${CODE}.conf"
 fi
 
+# Ports the V26 CLIENT (SFClientRecon) might bind on the same machine. We
+# skip these so a local oracle never collides with a local client's snapshot
+# listener. Set SF_RESERVED_PORTS="1339 1340 1341" to extend.
+RESERVED_PORTS="${SF_RESERVED_PORTS:-1339 1340}"
+
 # --- Resolve port ---
 PORT="${2:-}"
 if [ -z "$PORT" ]; then
   for try in $(seq 0 $((MAX_LOBBIES - 1))); do
     cand=$((BASE_PORT + try))
+    # Skip if reserved for local v26 client listeners
+    skip=0
+    for rp in $RESERVED_PORTS; do
+      if [ "$cand" = "$rp" ]; then skip=1; break; fi
+    done
+    [ "$skip" = "1" ] && continue
     # Skip if in our registry
     if ls "$REGISTRY"/*.conf 2>/dev/null | xargs -r grep -l "^port=${cand}$" >/dev/null; then
       continue
@@ -63,12 +74,18 @@ fi
 BRIDGEPORT=$((PORT + 10000))  # 11337+ — separate from anything in 1000-9999
 LOG="/tmp/sf-oracle-unity-${BRIDGEPORT}.log"
 BEPLOG="$HOME/sf-mirror-local/BepInEx/LogOutput.log"
+# Phase 6.22 — per-lobby plugin log (truncate stale before launch).
+# The plugin tees its BepInEx output here so multiple oracles sharing the
+# same install don't trample each other in the shared LogOutput.log.
+PLUGINLOG="/tmp/sf-oracle-plugin-${BRIDGEPORT}.log"
+rm -f "$PLUGINLOG"
 
 echo "Starting lobby '$CODE' on UDP $PORT (bridge $BRIDGEPORT)..."
 SFHEADLESS_PORT="$PORT" \
 SFHEADLESS_BRIDGEPORT="$BRIDGEPORT" \
 SFHEADLESS_DEBUG=1 \
 SF_LOBBY_CODE="$CODE" \
+SFHEADLESS_LOGFILE="$PLUGINLOG" \
   nohup bash "$REPO_DIR/launch-sf-headless.sh" >/dev/null 2>&1 &
 PID=$!
 disown
@@ -81,6 +98,7 @@ bridge=${BRIDGEPORT}
 pid=${PID}
 log=${LOG}
 beplog=${BEPLOG}
+pluginlog=${PLUGINLOG}
 started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
 
@@ -88,9 +106,10 @@ EOF
 for i in $(seq 1 30); do
   if ss -lunH "sport = :${PORT}" 2>/dev/null | grep -q .; then
     echo "Lobby '$CODE' READY → connect: -address <server-ip> -port $PORT"
-    echo "  pid:    $PID"
-    echo "  log:    $LOG"
-    echo "  bepinex: $BEPLOG"
+    echo "  pid:        $PID"
+    echo "  unity log:  $LOG"
+    echo "  plugin log: $PLUGINLOG  (per-lobby; tee from BepInEx)"
+    echo "  bepinex log: $BEPLOG    (shared across all lobbies on this install)"
     exit 0
   fi
   sleep 1

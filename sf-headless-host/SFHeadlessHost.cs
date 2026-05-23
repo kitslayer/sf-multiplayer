@@ -98,6 +98,23 @@ namespace SFHeadlessHost
             Log = Logger;
             Instance = this;
 
+            // Phase 6.22 — per-lobby plugin log file. The shared BepInEx
+            // LogOutput.log gets trampled when multiple oracles run from the
+            // same install (last-writer-wins). Set SFHEADLESS_LOGFILE to a
+            // unique path per oracle so each gets its own tee'd log.
+            // launch-lobby.sh sets this automatically to
+            // /tmp/sf-oracle-plugin-<BRIDGE>.log.
+            try
+            {
+                var perLobbyPath = Environment.GetEnvironmentVariable("SFHEADLESS_LOGFILE");
+                if (!string.IsNullOrEmpty(perLobbyPath))
+                {
+                    BepInEx.Logging.Logger.Listeners.Add(new PerLobbyLogListener(perLobbyPath));
+                    Log.LogInfo($"Per-lobby log tee → {perLobbyPath}");
+                }
+            }
+            catch (Exception e) { Log.LogWarning($"per-lobby log init failed: {e.Message}"); }
+
             // Unity 5.6 doesn't have Application.isBatchMode — fall back to
             // checking the command-line for -batchmode.
             bool batchMode = false;
@@ -5103,5 +5120,42 @@ namespace SFHeadlessHost
             }
         }
 
+    }
+
+    // Phase 6.22 — log listener that tees every BepInEx log line to a
+    // per-lobby file. Lets multiple oracles share the same install without
+    // their plugin logs trampling each other in BepInEx/LogOutput.log.
+    // Catches lines from ALL sources (SFHeadlessHost, BepInEx itself, any
+    // other plugin), so the per-lobby file is a superset of LogOutput.
+    internal class PerLobbyLogListener : BepInEx.Logging.ILogListener
+    {
+        private readonly System.IO.StreamWriter _writer;
+        private readonly object _lock = new object();
+
+        public PerLobbyLogListener(string path)
+        {
+            // Append mode so a restart doesn't wipe history. Truncate is
+            // handled by the launcher (which deletes stale files itself).
+            var fs = new System.IO.FileStream(path, System.IO.FileMode.Append, System.IO.FileAccess.Write, System.IO.FileShare.Read);
+            _writer = new System.IO.StreamWriter(fs) { AutoFlush = true };
+            _writer.WriteLine($"--- per-lobby log opened {DateTime.UtcNow:O} ---");
+        }
+
+        public void LogEvent(object sender, BepInEx.Logging.LogEventArgs eventArgs)
+        {
+            try
+            {
+                lock (_lock)
+                {
+                    _writer.WriteLine($"[{eventArgs.Level,-7}:{eventArgs.Source.SourceName}] {eventArgs.Data}");
+                }
+            }
+            catch { /* never let logging crash the plugin */ }
+        }
+
+        public void Dispose()
+        {
+            try { _writer.Dispose(); } catch { }
+        }
     }
 }
