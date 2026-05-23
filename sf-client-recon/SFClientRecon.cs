@@ -731,10 +731,29 @@ namespace SFClientRecon
         // low relativeVelocity (force < threshold) anyway.
         private const float NsoLargeLerpThreshold = 0.3f;
 
+        // Phase 6.21 — cached WeaponPickUp Type for the destruction guard.
+        // Lazy-resolved on FIRST PREFIX CALL (not static-init) so we don't
+        // race the Assembly-CSharp.dll load order. Static so the prefix
+        // can use it without instance overhead.
+        private static Type _weaponPickUpType;
+        private static int _weaponSkipCount;
+
         // Harmony prefix on DestructiblePiece.OnCollisionEnter — returns false
-        // (skip stock) when the colliding rigidbody's root was snapshot-lerped
-        // in the last ~150ms. Prevents the swept-lerp-into-ice-block path that
-        // makes ice "randomly break" during normal motion. See P0-15.
+        // (skip stock) in two cases:
+        //
+        // (1) [P0-15] when the colliding rigidbody's root was snapshot-lerped
+        // in the last ~150ms. Prevents the swept-lerp-into-ice-block path.
+        //
+        // (2) [Phase 6.21] when the colliding rigidbody is a WeaponPickUp.
+        // Server-spawned shooting guns (heavy mass) fall onto chains/ice and
+        // the mass>300 multiplier (10x) or mass>1000 multiplier (50x) pushes
+        // the collision force past the destruction threshold → spurious
+        // chain/ice break across all clients. Vanilla SF doesn't see this
+        // because the host's authoritative ObjectUpdate stream pulls weapons
+        // out of free-fall before they hit anything; our oracle's update
+        // stream has different timing. Cheapest fix: don't let weapons
+        // ever drive destruction. Player hits, throws, kicks still work
+        // (those go through the player's rigid body, not the weapon's).
         internal static bool DestructibleCollisionPrefix(MonoBehaviour __instance, Collision collision)
         {
             try
@@ -744,6 +763,21 @@ namespace SFClientRecon
                 if ((object)rb == null) return true;
                 var rootT = rb.transform.root;
                 if ((object)rootT == null) return true;
+
+                // (2) — skip if the colliding body's root has a WeaponPickUp
+                // anywhere in its hierarchy. WeaponPickUp lives on the
+                // weapon prefab's root in stock SF.
+                if ((object)_weaponPickUpType == null)
+                {
+                    try { _weaponPickUpType = AccessTools.TypeByName("WeaponPickUp"); } catch { }
+                }
+                if ((object)_weaponPickUpType != null && rootT.GetComponentInChildren(_weaponPickUpType, true) != null)
+                {
+                    _weaponSkipCount++;
+                    if (_weaponSkipCount == 1 || _weaponSkipCount % 20 == 0)
+                        Log.LogInfo($"[Phase 6.21] Suppressed destruction from WeaponPickUp collision (#{_weaponSkipCount}) on '{__instance?.name}'");
+                    return false;
+                }
 
                 float now = Time.realtimeSinceStartup;
                 int id = rootT.GetInstanceID();
