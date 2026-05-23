@@ -68,6 +68,7 @@ echo "Starting lobby '$CODE' on UDP $PORT (bridge $BRIDGEPORT)..."
 SFHEADLESS_PORT="$PORT" \
 SFHEADLESS_BRIDGEPORT="$BRIDGEPORT" \
 SFHEADLESS_DEBUG=1 \
+SF_LOBBY_CODE="$CODE" \
   nohup bash "$REPO_DIR/launch-sf-headless.sh" >/dev/null 2>&1 &
 PID=$!
 disown

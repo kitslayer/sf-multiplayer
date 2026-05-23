@@ -1884,7 +1884,11 @@ namespace SFHeadlessHost
                 case PktLerpPlayer:          // patched-DLL ext, remote-lerp trigger (ALKA P1-4)
                 case PktColorChanged:        // patched-DLL ext, player color (ALKA P1-4)
                 case PktKickPlayer:          // host kick — patched DLL emits, peer clients see who got booted
-                    if (msgType == PktPlayerTalked) LogPlayerTalkedTelemetry(cli, data, bodyOffset, bodyLen, channel);
+                    if (msgType == PktPlayerTalked)
+                    {
+                        LogPlayerTalkedTelemetry(cli, data, bodyOffset, bodyLen, channel);
+                        TryProcessChatCommand(cli, data, bodyOffset, bodyLen);
+                    }
                     RelayBodyToOthers(cli, msgType, data, bodyOffset, bodyLen, channel);
                     break;
 
@@ -1931,11 +1935,73 @@ namespace SFHeadlessHost
             }
         }
 
+        // Phase 6.15 — server-emitted chat. Used for command responses.
+        // Wire format: body = raw UTF-8 bytes of the message (no length
+        // prefix; total length comes from the v25 wrapper). Channel encodes
+        // the talker's slot as (slot*2)+3; we use the recipient's owner
+        // channel so it shows up over their own player.
+        private void SendChatToPlayer(SfClient target, string text)
+        {
+            if (target == null || target.Slot < 0) return;
+            byte[] body = System.Text.Encoding.UTF8.GetBytes(text);
+            byte ch = (byte)((target.Slot * 2) + 3);
+            SendSfPacket(target.Addr, PktPlayerTalked, body, 0uL, ch);
+        }
+
+        // Phase 6.15 — chat command parser. Body of PktPlayerTalked is
+        // raw UTF-8 (verified from decompiled NetworkPlayer.OnTalked). If the
+        // text starts with '/' we treat it as a server command. Format mirrors
+        // ALKA's MOD_CLIENT.md (/code, /room, /ping, /start initially).
+        private void TryProcessChatCommand(SfClient sender, byte[] data, int off, int len)
+        {
+            try
+            {
+                if (len == 0) return;
+                string text = System.Text.Encoding.UTF8.GetString(data, off, len);
+                if (string.IsNullOrEmpty(text) || text[0] != '/') return;
+                var space = text.IndexOf(' ');
+                string cmd = (space < 0 ? text : text.Substring(0, space)).ToLowerInvariant();
+                Log.LogInfo($"[chat] slot={sender.Slot} command='{text}'");
+                switch (cmd)
+                {
+                    case "/code":
+                    case "/room":
+                        string code = Environment.GetEnvironmentVariable("SF_LOBBY_CODE");
+                        SendChatToPlayer(sender, "Lobby code: " + (string.IsNullOrEmpty(code) ? "<unknown>" : code));
+                        break;
+                    case "/ping":
+                        SendChatToPlayer(sender, "pong");
+                        break;
+                    case "/start":
+                        if (_matchStarted)
+                        {
+                            SendChatToPlayer(sender, "Match already in progress.");
+                        }
+                        else
+                        {
+                            SendChatToPlayer(sender, "Starting match...");
+                            BroadcastMapChange(_currentSceneIndex);
+                            BroadcastStartMatch();
+                            _matchStarted = true;
+                        }
+                        break;
+                    case "/help":
+                        SendChatToPlayer(sender, "Commands: /code /ping /start /help");
+                        break;
+                    default:
+                        SendChatToPlayer(sender, "Unknown command. Type /help");
+                        break;
+                }
+            }
+            catch (Exception ex) { Log.LogWarning($"[chat parse] {ex.Message}"); }
+        }
+
         // Telemetry for the chat-command research effort (notes/phase6/14-
         // chat-commands.md). The patched DLL sends '/start', '/code', etc.
-        // via PktPlayerTalked on channel (slot*2)+3 — we don't yet know the
-        // exact body encoding. Log first few packets' first 32 bytes so we
-        // can decode the format from real wire data.
+        // via PktPlayerTalked on channel (slot*2)+3 — body format is raw UTF-8
+        // (confirmed from NetworkPlayer.OnTalked decompile). We log the first
+        // 20 packets' hex+ASCII as a redundant capture so we can confirm
+        // format if the parser misbehaves on edge cases.
         private int _playerTalkedLogged;
         private void LogPlayerTalkedTelemetry(SfClient cli, byte[] data, int off, int len, byte channel)
         {
