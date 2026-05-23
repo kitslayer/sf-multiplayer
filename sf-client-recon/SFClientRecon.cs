@@ -91,7 +91,14 @@ namespace SFClientRecon
                     return;
                 }
             }
-            Log.LogInfo($"{PluginName} {PluginVersion}: starting v26 snapshot listener on UDP :{V26_LISTEN_PORT}.");
+            // Uncap FPS so local Movement prediction runs at the highest rate
+            // the user's hardware allows — smoother feel + more accurate
+            // reconciliation between snapshot boundaries. Cribbed from
+            // ALKA's SFClientEnhancements; cost is zero, value is real.
+            QualitySettings.vSyncCount = 0;
+            Application.targetFrameRate = -1;
+
+            Log.LogInfo($"{PluginName} {PluginVersion}: starting v26 snapshot listener on UDP :{V26_LISTEN_PORT}. vSync off, FPS uncapped.");
             try
             {
                 _socket = new UdpClient(V26_LISTEN_PORT);

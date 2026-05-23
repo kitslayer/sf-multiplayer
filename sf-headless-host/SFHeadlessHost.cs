@@ -1760,6 +1760,13 @@ namespace SFHeadlessHost
             if (_sfPacketsRx == 1 || _sfPacketsRx % 30 == 0)
                 Log.LogInfo($"[SF] rx#{_sfPacketsRx} type={msgType} bodyLen={bodyLen} ch={channel} from={from} steamID={steamID}");
 
+            // ALKA-style anticheat — per-client packet rate observation. Logs
+            // when a client exceeds thresholds; doesn't drop packets yet (would
+            // need careful tuning to not stomp legit bursts). Phase 6.13+ can
+            // promote this to actually rate-limit once we have telemetry on
+            // healthy traffic shape.
+            AnticheatObserve(from, msgType);
+
             // Phase 6.12 — v26 PktPlayerInput is keyed by slot embedded in the
             // body, not by source IP+port (the SFClientRecon plugin sends from
             // its own ephemeral UDP socket, not the patched DLL's). Route it
@@ -1885,6 +1892,80 @@ namespace SFHeadlessHost
             {
                 Log.LogWarning($"[SF] dispatch threw on msgType={msgType} from={from}: {ex.Message}");
             }
+        }
+
+        // === ALKA-style anticheat — observation-only rate guard ===
+        // Per-client sliding window of packet timestamps. Currently logs
+        // warnings when thresholds are crossed; doesn't drop packets yet.
+        // Ported from server-go/anticheat.go but tuned conservatively (3-4x
+        // typical vanilla SF traffic) so it surfaces real anomalies, not
+        // legitimate gameplay bursts.
+        private class RateGuard
+        {
+            public Queue<float> All        = new Queue<float>();
+            public Queue<float> PlayerUpd  = new Queue<float>();
+            public Queue<float> Damage     = new Queue<float>();
+            public Queue<float> Object     = new Queue<float>();
+            public int Violations;
+            public float LastViolationLog;
+        }
+        private const int MaxAllPerSec        = 240;   // vanilla ≈ 80-100
+        private const int MaxPlayerUpdPerSec  = 120;   // vanilla ≈ 60
+        private const int MaxDamagePerSec     = 30;    // vanilla bursts <10
+        private const int MaxObjectPerSec     = 480;   // boxes/chains can be chatty
+        private readonly Dictionary<string, RateGuard> _rateGuards = new Dictionary<string, RateGuard>();
+        private void AnticheatObserve(IPEndPoint from, byte msgType)
+        {
+            try
+            {
+                string key = from.ToString();
+                if (!_rateGuards.TryGetValue(key, out var g))
+                {
+                    g = new RateGuard();
+                    _rateGuards[key] = g;
+                }
+                float now = Time.realtimeSinceStartup;
+                RotateQueue(g.All, now);
+                g.All.Enqueue(now);
+                if (g.All.Count > MaxAllPerSec) ReportViolation(g, key, "total", g.All.Count);
+
+                if (msgType == PktPlayerUpdate)
+                {
+                    RotateQueue(g.PlayerUpd, now);
+                    g.PlayerUpd.Enqueue(now);
+                    if (g.PlayerUpd.Count > MaxPlayerUpdPerSec) ReportViolation(g, key, "playerUpdate", g.PlayerUpd.Count);
+                }
+                else if (msgType == PktPlayerTookDamage)
+                {
+                    RotateQueue(g.Damage, now);
+                    g.Damage.Enqueue(now);
+                    if (g.Damage.Count > MaxDamagePerSec) ReportViolation(g, key, "damage", g.Damage.Count);
+                }
+                else if (msgType == PktObjectUpdate
+                      || msgType == PktObjectSpawned
+                      || msgType == PktObjectDestructionCollision
+                      || msgType == PktObjectSimpleDestruction
+                      || msgType == PktObjectInvokeDestructionEvent
+                      || msgType == PktObjectHello)
+                {
+                    RotateQueue(g.Object, now);
+                    g.Object.Enqueue(now);
+                    if (g.Object.Count > MaxObjectPerSec) ReportViolation(g, key, "object", g.Object.Count);
+                }
+            }
+            catch { /* observation only — never let it crash the dispatch */ }
+        }
+        private static void RotateQueue(Queue<float> q, float now)
+        {
+            while (q.Count > 0 && now - q.Peek() > 1.0f) q.Dequeue();
+        }
+        private void ReportViolation(RateGuard g, string key, string label, int rate)
+        {
+            g.Violations++;
+            float now = Time.realtimeSinceStartup;
+            if (now - g.LastViolationLog < 5f) return;
+            g.LastViolationLog = now;
+            Log.LogWarning($"[anticheat] {key} exceeded {label} rate ({rate}/s) — violation #{g.Violations}. Observation only; not dropping.");
         }
 
         // Re-broadcast body to all v25 clients except the sender. Used for
