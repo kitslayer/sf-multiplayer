@@ -1997,11 +1997,28 @@ namespace SFHeadlessHost
                 Log.LogWarning($"[anticheat damage] Reject — attacker idx {attackerIdx} out of range. Dropped #{_damagePacketsDropped}");
                 return false;
             }
-            // Future (Phase 6.14.5 with rewind buffer): also validate
-            //   - attacker is alive at acked tick
-            //   - victim is alive at acked tick
-            //   - attacker had the claimed weapon at acked tick
-            //   - distance(attacker, victim) <= max-reach(weapon)
+            // Phase 6.16 v0.2 — range plausibility. If both attacker and victim
+            // have spawned rigs, distance between them must be < MaxReach (very
+            // generous — 50 SF units; tighter weapon-specific max-reach awaits
+            // weapon-state tracking). Skips when attacker is environment (255)
+            // or when either rig is missing (still in lobby / not yet spawned).
+            if (attackerIdx != 255 && SlotToRig.TryGetValue(attackerIdx, out var attRig) && (object)attRig != null
+                && sender.Slot >= 0 && SlotToRig.TryGetValue(sender.Slot, out var vicRig) && (object)vicRig != null)
+            {
+                float dist = Vector3.Distance(attRig.transform.position, vicRig.transform.position);
+                const float MaxPlausibleReach = 50f;
+                if (dist > MaxPlausibleReach)
+                {
+                    _damagePacketsDropped++;
+                    Log.LogWarning($"[anticheat damage] Reject — distance {dist:0.0}u > {MaxPlausibleReach}u between attacker slot {attackerIdx} and victim slot {sender.Slot}. Dropped #{_damagePacketsDropped}");
+                    return false;
+                }
+            }
+            // Future (Phase 6.14.5 full rewind): tighter weapon-specific max-
+            // reach + alive checks at the attacker's last-acked tick (requires
+            // damage packet to carry a tick reference — needs a patched-DLL
+            // extension). Tick history is already being recorded; awaiting
+            // the protocol bump.
             return true;
         }
 
@@ -2805,6 +2822,46 @@ namespace SFHeadlessHost
         private const int V26_CLIENT_PORT = 1339;
         private float _lastSnapshotAt = -1f;
         private uint  _serverTick;
+
+        // Phase 6.14.5 — tick-history ring buffer for lag-comp.
+        // Records per-slot positions at each server tick so a future damage-
+        // event handler can rewind to validate. We just RECORD here; the
+        // VALIDATE step needs the damage packet to carry a tick reference,
+        // which requires a patched-DLL extension (not yet shipped). Until
+        // then the buffer feeds telemetry only — but having it built means
+        // when we add `clientLastAckedServerTick` to the damage protocol,
+        // validation is a 30-line addition. See notes/phase6/13-rewind-buffer.md.
+        private class TickSample
+        {
+            public uint Tick;
+            public Vector3[] Positions = new Vector3[4];
+            public bool[]    Alive     = new bool[4];
+        }
+        private readonly Queue<TickSample> _tickHistory = new Queue<TickSample>(64);
+        private const int MaxHistoryTicks = 60;  // ~2s at 30Hz snapshot
+
+        private void RecordTickSample()
+        {
+            var s = new TickSample { Tick = _serverTick };
+            foreach (var kv in SlotToRig)
+            {
+                if (kv.Key < 0 || kv.Key > 3) continue;
+                var rig = kv.Value;
+                if ((object)rig == null) continue;
+                s.Positions[kv.Key] = rig.transform.position;
+                s.Alive[kv.Key]     = true;
+            }
+            _tickHistory.Enqueue(s);
+            while (_tickHistory.Count > MaxHistoryTicks) _tickHistory.Dequeue();
+        }
+
+        // Lookup positions at a given server tick. Returns null if tick is
+        // outside the buffer window.
+        private TickSample LookupTickSample(uint tick)
+        {
+            foreach (var s in _tickHistory) if (s.Tick == tick) return s;
+            return null;
+        }
         private void TickWorldStateSnapshot()
         {
             if (!_matchStarted) return;
@@ -2812,6 +2869,7 @@ namespace SFHeadlessHost
             if (Time.realtimeSinceStartup - _lastSnapshotAt < (1.0f / 30.0f)) return;
             _lastSnapshotAt = Time.realtimeSinceStartup;
             _serverTick++;
+            RecordTickSample();        // Phase 6.14.5 — history before broadcast
             BroadcastWorldStateSnapshot();
         }
 
