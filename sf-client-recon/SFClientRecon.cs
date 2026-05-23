@@ -146,6 +146,33 @@ namespace SFClientRecon
             }
             catch (Exception e) { Log.LogWarning($"Weapon.ActuallyShoot patch failed: {e.Message}"); }
 
+            // P0-15 — suppress DestructiblePiece collisions during/just-after
+            // snapshot-lerp. Without this, swept-lerp motion of NSOs (boxes,
+            // ice debris) can hit adjacent ice/destructibles with high
+            // relativeVelocity → SendDestructMessage fires → server forwards →
+            // ice/box "randomly" breaks for everyone. Solution: track which
+            // NSO root transforms were lerped in the last ~150ms; the prefix
+            // returns false (skip stock OnCollisionEnter) when the colliding
+            // body's root is on that recent-lerp list.
+            try
+            {
+                var dpType = AccessTools.TypeByName("DestructiblePiece");
+                if ((object)dpType != null)
+                {
+                    var onColl = AccessTools.Method(dpType, "OnCollisionEnter");
+                    if ((object)onColl != null)
+                    {
+                        var harmony = new Harmony(PluginGuid + ".destructible-guard");
+                        var prefix = AccessTools.Method(typeof(Plugin), nameof(DestructibleCollisionPrefix));
+                        harmony.Patch(onColl, prefix: new HarmonyMethod(prefix));
+                        Log.LogInfo("Patched DestructiblePiece.OnCollisionEnter prefix → suppresses destructions on recently-lerped bodies.");
+                    }
+                    else Log.LogWarning("[P0-15] DestructiblePiece.OnCollisionEnter not found.");
+                }
+                else Log.LogWarning("[P0-15] DestructiblePiece type not found.");
+            }
+            catch (Exception e) { Log.LogWarning($"[P0-15] DestructiblePiece patch failed: {e.Message}"); }
+
             Log.LogInfo($"{PluginName} {PluginVersion}: starting v26 snapshot listener on UDP :{_listenPort}. vSync off, FPS uncapped.");
             try
             {
@@ -359,6 +386,7 @@ namespace SFClientRecon
                 // NSOs: smooth all entries in the target dict against cached refs.
                 if (_nsoTargets.Count > 0 && _nsoCache.Count > 0)
                 {
+                    float now = Time.realtimeSinceStartup;
                     foreach (var kv in _nsoTargets)
                     {
                         if (!_nsoCache.TryGetValue(kv.Key, out var comp) || (object)comp == null) continue;
@@ -373,6 +401,12 @@ namespace SFClientRecon
                             comp.transform.position = Vector3.Lerp(comp.transform.position, kv.Value.Pos, t);
                             comp.transform.rotation = Quaternion.Slerp(comp.transform.rotation, kv.Value.Rot, t);
                         }
+                        // P0-15 — mark root-transform as recently lerped so
+                        // the DestructiblePiece guard can suppress spurious
+                        // post-lerp destruction broadcasts.
+                        var rootT = comp.transform.root;
+                        if ((object)rootT != null)
+                            _recentLerpAt[rootT.GetInstanceID()] = now;
                     }
                 }
             }
@@ -524,6 +558,54 @@ namespace SFClientRecon
             if (_inputSeq == 1 || _inputSeq % 300 == 0)
                 Log.LogInfo($"[P6.12] Sent PlayerInput #{_inputSeq} slot={localSlot} stick=({sx:0.00},{sy:0.00}) btns=0x{btns:X} hist={_historySeq.Count}");
         }
+
+        // P0-15 — recently snapshot-lerped root transforms.
+        // SmoothTowardTargets writes here on every NSO lerp tick; the
+        // DestructiblePiece.OnCollisionEnter prefix checks here to decide
+        // whether to suppress the destruction broadcast. Dictionary is
+        // pruned lazily by the prefix to avoid unbounded growth.
+        private static readonly Dictionary<int, float> _recentLerpAt = new Dictionary<int, float>();
+        private const float LerpSuppressWindowSec = 0.15f;
+
+        // Harmony prefix on DestructiblePiece.OnCollisionEnter — returns false
+        // (skip stock) when the colliding rigidbody's root was snapshot-lerped
+        // in the last ~150ms. Prevents the swept-lerp-into-ice-block path that
+        // makes ice "randomly break" during normal motion. See P0-15.
+        internal static bool DestructibleCollisionPrefix(MonoBehaviour __instance, Collision collision)
+        {
+            try
+            {
+                if ((object)collision == null) return true;
+                var rb = collision.rigidbody;
+                if ((object)rb == null) return true;
+                var rootT = rb.transform.root;
+                if ((object)rootT == null) return true;
+
+                float now = Time.realtimeSinceStartup;
+                int id = rootT.GetInstanceID();
+                if (_recentLerpAt.TryGetValue(id, out float lastLerp))
+                {
+                    if (now - lastLerp < LerpSuppressWindowSec)
+                    {
+                        // Recently teleported by snapshot apply — don't let
+                        // stock code interpret this as a player-driven impact.
+                        return false; // skip stock OnCollisionEnter
+                    }
+                }
+
+                // Opportunistic cleanup: prune stale entries every ~100 calls.
+                if ((++_destructibleGuardCallCount % 100) == 0)
+                {
+                    var staleKeys = new List<int>();
+                    foreach (var kv in _recentLerpAt)
+                        if (now - kv.Value > 2.0f) staleKeys.Add(kv.Key);
+                    foreach (var k in staleKeys) _recentLerpAt.Remove(k);
+                }
+            }
+            catch { /* let stock run on any error */ }
+            return true;
+        }
+        private static int _destructibleGuardCallCount;
 
         // Phase 6.17 v0.1 — Harmony postfix on Weapon.ActuallyShoot.
         // Fires after the local Shoot ran. We capture the muzzle position +

@@ -73,9 +73,17 @@ namespace SFHeadlessHost
             {
                 Log.LogInfo($"{PluginName} {PluginVersion}: interactive run — installing CLIENT-MODE shim.");
                 InstallClientModePatches();
+                InstallMapInfoSyncQuantize();  // P0-12 — also on the client side
                 return;
             }
             Log.LogInfo($"{PluginName} {PluginVersion}: batchmode detected, bootstrapping headless host.");
+
+            // P0-12 — install on the server side too. AddMapDataObject runs
+            // in MapInfoSyncableBase.Awake on the oracle's scene; without
+            // matching quantization the server's dict key would diverge from
+            // the client's even though both call the same function (different
+            // process, different float arithmetic).
+            InstallMapInfoSyncQuantize();
 
             ReadEnv();
 
@@ -523,6 +531,7 @@ namespace SFHeadlessHost
         private static readonly HashSet<ushort> _p65ObjUpdateSeenIndices = new HashSet<ushort>();
         private static int _p65ObjUpdateFilterCount;
         private static int _p65DestructionFilterCount;
+        private static int _p65DestructionForwardCount;
         internal static bool SendBroadcastPrefix(object[] __args)
         {
             try
@@ -605,22 +614,46 @@ namespace SFHeadlessHost
                             _p65ObjUpdateFilterCount++;
                         }
                     }
-                    // BOXES/ICE VANISHING FIX: don't forward server-originated
-                    // destruction events. The oracle's own NSO scene generates
-                    // spurious destructions (chains stress-breaking under
-                    // gravity, boxes that drift off the platform hitting the
-                    // killbox) that have no equivalent on any client. Forwarding
-                    // them makes clients destroy intact local objects.
+                    // P0-11 — Y-aware destruction filter (was: drop-all).
+                    // The oracle's own NSO scene generates spurious destructions
+                    // (chains stress-breaking under gravity at scene load,
+                    // boxes drifting off the platform into the killbox). We
+                    // want to drop those — they have no equivalent on any
+                    // client. But the old unconditional drop also masked
+                    // legitimate server-side destructions, producing "ghost
+                    // box" desync where the oracle thinks an NSO is gone but
+                    // clients still have it.
+                    //
+                    // Heuristic: look up the destroyed NSO's current Y by
+                    // index (body[0..1]). If Y < -30, it's the killbox-fall
+                    // case — drop. Otherwise it's a legitimate break and
+                    // we forward.
                     //
                     // Legit client-initiated destructions still propagate via
                     // the INBOUND path (RelayBodyToAll on msgType 28/29/30 in
                     // SfDispatch), which broadcasts to all including sender.
                     if (msgType == 28 || msgType == 29 || msgType == 30)
                     {
-                        skip = true;
-                        if (_p65DestructionFilterCount < 5 || _p65DestructionFilterCount % 50 == 0)
-                            Log.LogInfo($"[P6.5] Skipping server-originated destruction msgType={msgType} (#{_p65DestructionFilterCount}) — client-initiated destructions still relay via inbound path");
-                        _p65DestructionFilterCount++;
+                        bool isKillboxFall = false;
+                        if (data.Length >= 2 && (object)Instance != null)
+                        {
+                            ushort idx = (ushort)(data[0] | (data[1] << 8));
+                            if (Instance.NsoIsKillboxFallen(idx)) isKillboxFall = true;
+                        }
+                        if (isKillboxFall)
+                        {
+                            skip = true;
+                            if (_p65DestructionFilterCount < 5 || _p65DestructionFilterCount % 50 == 0)
+                                Log.LogInfo($"[P0-11] Skip server-originated destruction msgType={msgType} for killbox-fall NSO (#{_p65DestructionFilterCount})");
+                            _p65DestructionFilterCount++;
+                        }
+                        else
+                        {
+                            // Forward as legit server-side destruction.
+                            if (_p65DestructionForwardCount < 5 || _p65DestructionForwardCount % 50 == 0)
+                                Log.LogInfo($"[P0-11] Forward server-originated destruction msgType={msgType} (NSO not below killbox) (#{_p65DestructionForwardCount})");
+                            _p65DestructionForwardCount++;
+                        }
                     }
                     if (!skip) Instance.ForwardBroadcastToV25Clients(msgType, data, ignoreUID, channel);
                 }
@@ -1113,6 +1146,104 @@ namespace SFHeadlessHost
         // authority for boxes, with the oracle continuing as the network
         // coordinator. Doesn't try to flip IsServer entirely (which would
         // break weapon spawning on the client).
+        // P0-12 — quantize the Vector2 key used for MapInfoSyncableBase
+        // dictionary lookup. Stock SF stores objects by world-space
+        // (position.y, position.z) with bit-exact float comparison. Float32
+        // can differ by a few ULPs between server and clients at Awake
+        // time, causing silent lookup failures → MapInfoSync packets
+        // arrive but client never applies SetData. Round to 0.01 (1 cm) —
+        // well below the spacing between platforms, well above any
+        // realistic precision drift.
+        private const float MapSyncKeyQuantum = 0.01f;
+        internal static Vector2 QuantizeMapSyncKey(Vector2 v)
+        {
+            float invQ = 1f / MapSyncKeyQuantum;
+            return new Vector2(
+                Mathf.Round(v.x * invQ) / invQ,
+                Mathf.Round(v.y * invQ) / invQ);
+        }
+
+        // Prefix on MultiplayerManager.AddMapDataObject(Vector2, MapInfoSyncableBase).
+        // We can't change a struct argument by ref in a Harmony prefix on a
+        // non-out parameter, but we CAN modify the dictionary via the
+        // postfix side. Instead, intercept by writing the quantized key
+        // back into the MapInfoSyncableBase's m_StartPos AND replacing
+        // the pos arg via the __args array (Harmony allows this).
+        internal static bool AddMapDataObjectPrefix(object[] __args)
+        {
+            try
+            {
+                if (__args == null || __args.Length < 2) return true;
+                if (!(__args[0] is Vector2 pos)) return true;
+                var quantized = QuantizeMapSyncKey(pos);
+                __args[0] = quantized;
+                // Also update m_StartPos on the MapInfoSyncableBase so
+                // outbound SyncMapData broadcasts the quantized key.
+                if (__args[1] != null)
+                {
+                    var t = __args[1].GetType();
+                    var f = AccessTools.Field(t, "m_StartPos");
+                    if ((object)f != null) f.SetValue(__args[1], quantized);
+                }
+            }
+            catch { }
+            return true;
+        }
+
+        // Prefix on MultiplayerManager.OnMapDataRecieved(byte[]).
+        // The body's first 8 bytes are the Vector2 key the server sent.
+        // After our AddMapDataObjectPrefix the server's keys are already
+        // quantized, so the wire's key matches our dict — no action
+        // needed here. But: if for some reason the server didn't quantize
+        // (older oracle, race), an inbound un-quantized key would still
+        // miss our quantized dict. Rewrite the body's first 8 bytes to
+        // the quantized form as a belt-and-suspenders.
+        internal static bool OnMapDataRecievedPrefix(byte[] data)
+        {
+            try
+            {
+                if (data == null || data.Length < 8) return true;
+                float x = BitConverter.ToSingle(data, 0);
+                float y = BitConverter.ToSingle(data, 4);
+                if (float.IsNaN(x) || float.IsInfinity(x) || float.IsNaN(y) || float.IsInfinity(y)) return true;
+                var q = QuantizeMapSyncKey(new Vector2(x, y));
+                var xBytes = BitConverter.GetBytes(q.x);
+                var yBytes = BitConverter.GetBytes(q.y);
+                Buffer.BlockCopy(xBytes, 0, data, 0, 4);
+                Buffer.BlockCopy(yBytes, 0, data, 4, 4);
+            }
+            catch { }
+            return true;
+        }
+
+        private static bool _mapSyncQuantizeInstalled;
+        private static void InstallMapInfoSyncQuantize()
+        {
+            if (_mapSyncQuantizeInstalled) return;
+            _mapSyncQuantizeInstalled = true;
+            try
+            {
+                var mgrType = AccessTools.TypeByName("MultiplayerManager");
+                if ((object)mgrType == null) { Log.LogWarning("[P0-12] MultiplayerManager not found."); return; }
+                var harmony = new Harmony(PluginGuid + ".mapsync-quantize");
+                var addM = AccessTools.Method(mgrType, "AddMapDataObject");
+                if ((object)addM != null)
+                {
+                    harmony.Patch(addM, prefix: new HarmonyMethod(AccessTools.Method(typeof(Plugin), nameof(AddMapDataObjectPrefix))));
+                    Log.LogInfo("[P0-12] Patched MultiplayerManager.AddMapDataObject (quantize Vector2 key to 0.01).");
+                }
+                else Log.LogWarning("[P0-12] AddMapDataObject not found.");
+                var recvM = AccessTools.Method(mgrType, "OnMapDataRecieved");
+                if ((object)recvM != null)
+                {
+                    harmony.Patch(recvM, prefix: new HarmonyMethod(AccessTools.Method(typeof(Plugin), nameof(OnMapDataRecievedPrefix))));
+                    Log.LogInfo("[P0-12] Patched MultiplayerManager.OnMapDataRecieved (quantize inbound Vector2 key).");
+                }
+                else Log.LogWarning("[P0-12] OnMapDataRecieved not found.");
+            }
+            catch (Exception e) { Log.LogWarning($"[P0-12] install failed: {e.Message}"); }
+        }
+
         private static void InstallClientModePatches()
         {
             try
@@ -2027,6 +2158,19 @@ namespace SFHeadlessHost
                 Log.LogWarning($"[anticheat damage] Reject — attacker idx {attackerIdx} out of range. Dropped #{_damagePacketsDropped}");
                 return false;
             }
+            // P1-8 — attacker-slot identity check. The body's attacker byte
+            // is used downstream for the rewind-buffer distance lookup, so
+            // it must match the SENDER's authenticated slot. Without this
+            // gate a malicious client could spoof a different slot's
+            // identity and pass distance checks against that slot's
+            // position rather than their own. 255 (environment kill) is
+            // allowed from any sender.
+            if (attackerIdx != 255 && sender.Slot >= 0 && attackerIdx != sender.Slot)
+            {
+                _damagePacketsDropped++;
+                Log.LogWarning($"[anticheat damage] Reject — attackerIdx={attackerIdx} != sender.Slot={sender.Slot} (spoof). Dropped #{_damagePacketsDropped}");
+                return false;
+            }
             // Phase 6.14.5 v0.2 — range plausibility with rewind buffer.
             // Damage packets don't carry a client-tick reference (would need
             // a patched-DLL extension), so we assume the hit happened
@@ -2841,6 +2985,17 @@ namespace SFHeadlessHost
                 {
                     _slotV26Endpoint[slot] = from;
                     Log.LogInfo($"[P6.12] Slot {slot} v26 endpoint → {from}");
+                    // P0-13 — send a full-keyframe snapshot to this new
+                    // endpoint so it learns the current position of every
+                    // NSO, not just the ones currently moving. The regular
+                    // snapshot stream filters at-rest NSOs; without this
+                    // keyframe a late-joining client would never learn the
+                    // box positions until something pushed them.
+                    if (_matchStarted)
+                    {
+                        try { SendKeyframeSnapshotToEndpoint(from); }
+                        catch (Exception ex) { Log.LogWarning($"[P0-13] keyframe send failed: {ex.Message}"); }
+                    }
                 }
             }
             _inputPacketsRx++;
@@ -3312,6 +3467,94 @@ namespace SFHeadlessHost
 
         private struct NsoSnap { public ushort Id; public float X, Y, Z, RotZ; }
 
+        // P0-13 — full-keyframe variant of CollectActiveNsoSnapshot that
+        // includes every NSO regardless of position-delta / activity. Used
+        // exactly once per new v26 endpoint so newly-joining clients learn
+        // the current resting position of at-rest NSOs. Still respects the
+        // Y > -30 filter (don't ship killbox-fallen NSOs).
+        private List<NsoSnap> CollectAllNsoSnapshot()
+        {
+            var result = new List<NsoSnap>();
+            try
+            {
+                if ((object)_nsoType == null)
+                {
+                    _nsoType = AccessTools.TypeByName("NetworkSyncableObject");
+                    if ((object)_nsoType == null) return result;
+                    _nsoIndexProp = AccessTools.Property(_nsoType, "Index");
+                    _nsoIndexField = AccessTools.Field(_nsoType, "m_Index");
+                }
+                var all = UnityEngine.Object.FindObjectsOfType(_nsoType);
+                if (all == null) return result;
+                foreach (var nso in all)
+                {
+                    var comp = nso as Component;
+                    if ((object)comp == null) continue;
+                    ushort id = 0;
+                    if ((object)_nsoIndexProp != null) id = (ushort)_nsoIndexProp.GetValue(nso, null);
+                    else if ((object)_nsoIndexField != null) id = (ushort)_nsoIndexField.GetValue(nso);
+                    var p = comp.transform.position;
+                    if (p.y < -30f) continue;
+                    var e = comp.transform.eulerAngles;
+                    result.Add(new NsoSnap { Id = id, X = p.x, Y = p.y, Z = p.z, RotZ = e.z });
+                }
+            }
+            catch (Exception ex) { Log.LogWarning($"[P0-13 keyframe collect] {ex.Message}"); }
+            return result;
+        }
+
+        // P0-13 — build a v26 snapshot containing all current players +
+        // every NSO and send it to a single endpoint. Wire format is
+        // identical to BroadcastWorldStateSnapshot so existing client
+        // parsers handle it without changes.
+        private void SendKeyframeSnapshotToEndpoint(IPEndPoint target)
+        {
+            int n = 0;
+            foreach (var kv in SlotToRig) if ((object)kv.Value != null) n++;
+            var nsoEntries = CollectAllNsoSnapshot();
+            int bodyLen = 4 + 1 + n * 17 + 2 + nsoEntries.Count * 18 + 2 + _projectiles.Count * 18;
+            byte[] body = new byte[bodyLen];
+            int off = 0;
+            WriteU32LE(body, off, _serverTick); off += 4;
+            body[off++] = (byte)n;
+            var slotSeq = new Dictionary<int, uint>(_sfClients.Count);
+            foreach (var ckv in _sfClients) if (ckv.Value.Slot >= 0) slotSeq[ckv.Value.Slot] = ckv.Value.LastInputSeq;
+            foreach (var kv in SlotToRig)
+            {
+                var rig = kv.Value;
+                if ((object)rig == null) continue;
+                body[off++] = (byte)kv.Key;
+                Vector3 p = rig.transform.position;
+                WriteF32LE(body, off, p.x); off += 4;
+                WriteF32LE(body, off, p.y); off += 4;
+                WriteF32LE(body, off, p.z); off += 4;
+                uint lastSeq = 0;
+                slotSeq.TryGetValue(kv.Key, out lastSeq);
+                WriteU32LE(body, off, lastSeq); off += 4;
+            }
+            WriteU16LE(body, off, (ushort)nsoEntries.Count); off += 2;
+            foreach (var e in nsoEntries)
+            {
+                WriteU16LE(body, off, e.Id); off += 2;
+                WriteF32LE(body, off, e.X); off += 4;
+                WriteF32LE(body, off, e.Y); off += 4;
+                WriteF32LE(body, off, e.Z); off += 4;
+                WriteF32LE(body, off, e.RotZ); off += 4;
+            }
+            WriteU16LE(body, off, (ushort)_projectiles.Count); off += 2;
+            foreach (var p in _projectiles)
+            {
+                WriteU32LE(body, off, p.Id); off += 4;
+                body[off++] = p.OwnerSlot;
+                body[off++] = p.WeaponType;
+                WriteF32LE(body, off, p.Position.x); off += 4;
+                WriteF32LE(body, off, p.Position.y); off += 4;
+                WriteF32LE(body, off, p.Position.z); off += 4;
+            }
+            SendSfPacket(target, PktWorldStateSnapshot, body, 0, 0);
+            Log.LogInfo($"[P0-13] Sent keyframe snapshot to {target} — players={n} nsos={nsoEntries.Count} bytes={bodyLen}");
+        }
+
         // Apply an incoming PktObjectUpdate (msgType 26) to the server's
         // local NSO scene state. Body layout (from
         // NetworkSyncableObject.SendNewObjectStatePackage decompile):
@@ -3403,6 +3646,46 @@ namespace SFHeadlessHost
         private readonly Dictionary<ushort, float>   _nsoLastMovedAt      = new Dictionary<ushort, float>();
         private const float NsoPosDeltaThreshold = 0.01f;   // ~1 cm
         private const float NsoKeepaliveSec      = 1.0f;
+
+        // P0-11 helper — look up an NSO by its m_Index and report whether
+        // its current position is in the killbox-fall band (Y < -30). The
+        // outbound destruction filter uses this to forward legitimate
+        // server-side breaks while still dropping the spurious "box drifted
+        // off the platform and shattered against the killbox" destructions.
+        // Returns true iff the NSO is below the killbox threshold OR if
+        // the NSO can't be found (the conservative interpretation: if we
+        // can't verify, treat as "fell off and we already destroyed it").
+        private bool NsoIsKillboxFallen(ushort idx)
+        {
+            try
+            {
+                if ((object)_nsoType == null)
+                {
+                    _nsoType = AccessTools.TypeByName("NetworkSyncableObject");
+                    if ((object)_nsoType == null) return false;
+                    _nsoIndexProp = AccessTools.Property(_nsoType, "Index");
+                    _nsoIndexField = AccessTools.Field(_nsoType, "m_Index");
+                }
+                var all = UnityEngine.Object.FindObjectsOfType(_nsoType);
+                if (all == null) return false;
+                foreach (var nso in all)
+                {
+                    var comp = nso as Component;
+                    if ((object)comp == null) continue;
+                    ushort id = 0;
+                    if ((object)_nsoIndexProp != null) id = (ushort)_nsoIndexProp.GetValue(nso, null);
+                    else if ((object)_nsoIndexField != null) id = (ushort)_nsoIndexField.GetValue(nso);
+                    if (id != idx) continue;
+                    return comp.transform.position.y < -30f;
+                }
+            }
+            catch { }
+            // NSO not found in scene — most likely already destroyed by the
+            // previous frame. We forward the destruction event (return false
+            // → "not killbox-fall") so the clients can apply if they haven't
+            // already. Idempotent on the destruction side.
+            return false;
+        }
 
         private List<NsoSnap> CollectActiveNsoSnapshot()
         {
