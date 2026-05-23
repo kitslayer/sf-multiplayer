@@ -1997,28 +1997,53 @@ namespace SFHeadlessHost
                 Log.LogWarning($"[anticheat damage] Reject — attacker idx {attackerIdx} out of range. Dropped #{_damagePacketsDropped}");
                 return false;
             }
-            // Phase 6.16 v0.2 — range plausibility. If both attacker and victim
-            // have spawned rigs, distance between them must be < MaxReach (very
-            // generous — 50 SF units; tighter weapon-specific max-reach awaits
-            // weapon-state tracking). Skips when attacker is environment (255)
-            // or when either rig is missing (still in lobby / not yet spawned).
-            if (attackerIdx != 255 && SlotToRig.TryGetValue(attackerIdx, out var attRig) && (object)attRig != null
-                && sender.Slot >= 0 && SlotToRig.TryGetValue(sender.Slot, out var vicRig) && (object)vicRig != null)
+            // Phase 6.14.5 v0.2 — range plausibility with rewind buffer.
+            // Damage packets don't carry a client-tick reference (would need
+            // a patched-DLL extension), so we assume the hit happened
+            // ~2 ticks ago (≈66ms at 30Hz snapshot rate — typical RTT/2 +
+            // client-processing latency). LookupTickSample retrieves the
+            // historical positions; if not available (still in early ticks),
+            // fall back to current.
+            if (attackerIdx != 255 && sender.Slot >= 0)
             {
-                float dist = Vector3.Distance(attRig.transform.position, vicRig.transform.position);
+                Vector3 attPos, vicPos;
+                bool gotHistoric = false;
+                if (_serverTick >= 2)
+                {
+                    var sample = LookupTickSample(_serverTick - 2);
+                    if (sample != null && sample.Alive[attackerIdx] && sample.Alive[sender.Slot])
+                    {
+                        attPos = sample.Positions[attackerIdx];
+                        vicPos = sample.Positions[sender.Slot];
+                        gotHistoric = true;
+                    }
+                    else { attPos = vicPos = Vector3.zero; }
+                }
+                else { attPos = vicPos = Vector3.zero; }
+
+                if (!gotHistoric)
+                {
+                    if (SlotToRig.TryGetValue(attackerIdx, out var attRig) && (object)attRig != null
+                        && SlotToRig.TryGetValue(sender.Slot, out var vicRig) && (object)vicRig != null)
+                    {
+                        attPos = attRig.transform.position;
+                        vicPos = vicRig.transform.position;
+                    }
+                    else return true;  // not enough info to validate; trust
+                }
+
+                float dist = Vector3.Distance(attPos, vicPos);
                 const float MaxPlausibleReach = 50f;
                 if (dist > MaxPlausibleReach)
                 {
                     _damagePacketsDropped++;
-                    Log.LogWarning($"[anticheat damage] Reject — distance {dist:0.0}u > {MaxPlausibleReach}u between attacker slot {attackerIdx} and victim slot {sender.Slot}. Dropped #{_damagePacketsDropped}");
+                    Log.LogWarning($"[anticheat damage] Reject — distance {dist:0.0}u > {MaxPlausibleReach}u (attacker slot {attackerIdx}, victim slot {sender.Slot}, {(gotHistoric ? "rewind" : "live")}). Dropped #{_damagePacketsDropped}");
                     return false;
                 }
             }
-            // Future (Phase 6.14.5 full rewind): tighter weapon-specific max-
-            // reach + alive checks at the attacker's last-acked tick (requires
-            // damage packet to carry a tick reference — needs a patched-DLL
-            // extension). Tick history is already being recorded; awaiting
-            // the protocol bump.
+            // Future (Phase 6.16+): weapon-specific max-reach (sword=3.5u,
+            // pistol=18u, RPG=22u). Requires per-slot weapon tracking which
+            // we don't have yet on the oracle side.
             return true;
         }
 
@@ -2075,6 +2100,16 @@ namespace SFHeadlessHost
                     case "/version":
                         SendChatToPlayer(sender, $"sf-multiplayer {PluginVersion} (v26 protocol)");
                         break;
+                    case "/restart":
+                    case "/next":
+                        if (_pendingRoundAdvanceAt > 0f)
+                            SendChatToPlayer(sender, "Round advance already pending.");
+                        else
+                        {
+                            SendChatToPlayer(sender, "Advancing to next map...");
+                            _pendingRoundAdvanceAt = Time.realtimeSinceStartup + 1.0f;
+                        }
+                        break;
                     case "/players":
                         int up = 0, sp = 0;
                         foreach (var ckv in _sfClients) { up++; if (ckv.Value.Spawned) sp++; }
@@ -2084,7 +2119,7 @@ namespace SFHeadlessHost
                         SendChatToPlayer(sender, ListOtherLobbiesFromRegistry());
                         break;
                     case "/help":
-                        SendChatToPlayer(sender, "Commands: /code /ping /start /players /lobbies /version /help");
+                        SendChatToPlayer(sender, "Commands: /code /ping /start /restart /next /players /lobbies /version /help");
                         break;
                     default:
                         SendChatToPlayer(sender, "Unknown command. Type /help");
