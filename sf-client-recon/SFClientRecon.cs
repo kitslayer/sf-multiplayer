@@ -58,8 +58,16 @@ namespace SFClientRecon
         private float _lastInputSendAt;
         private const float InputSendInterval = 1.0f / 60.0f;  // 60Hz cap
         // Phase 6.12.2 prep — latest server-acked input seq from snapshots.
-        // Stored but not yet acted on (full replay rollback comes later).
         private uint _serverLastAckedSeq;
+        // Ring buffer of (sequenceNum → local player position at time of send).
+        // When a snapshot arrives we look up the position WE thought we were at
+        // when input N was sent, compare to server's reported position, and log
+        // divergence. Foundation for the future replay-rollback loop.
+        private const int InputHistoryCap = 240;  // 4s at 60Hz
+        private readonly Queue<uint>     _historySeq = new Queue<uint>(InputHistoryCap);
+        private readonly Queue<Vector3>  _historyPos = new Queue<Vector3>(InputHistoryCap);
+        private readonly Dictionary<uint, Vector3> _historyLookup = new Dictionary<uint, Vector3>(InputHistoryCap);
+        private uint _divergenceLogged;
 
         // Pending snapshot (set on RX thread, applied on main thread).
         private readonly object _snapLock = new object();
@@ -430,8 +438,44 @@ namespace SFClientRecon
             try { _socket.Send(pkt, pkt.Length, _serverEp); }
             catch (Exception e) { Log.LogWarning($"TX: {e.Message}"); }
 
+            // Phase 6.12.2 — snapshot the local player's position at the time
+            // of this send, keyed by sequenceNum. Server replies with this
+            // seq + the position IT thinks we were at, and we diff them in
+            // ApplySnapshot above. Ring-buffer size capped to ~4s of inputs.
+            try
+            {
+                var npType = AccessTools.TypeByName("NetworkPlayer");
+                if ((object)npType != null)
+                {
+                    var nps = UnityEngine.Object.FindObjectsOfType(npType);
+                    var pidField = AccessTools.Field(npType, "playerID");
+                    if (nps != null && (object)pidField != null)
+                    {
+                        foreach (var np in nps)
+                        {
+                            var pidObj = pidField.GetValue(np);
+                            if (!(pidObj is int pi) || pi != localSlot) continue;
+                            var npComp = np as Component;
+                            if ((object)npComp == null) break;
+                            Vector3 currentPos = npComp.transform.position;
+                            _historySeq.Enqueue(_inputSeq);
+                            _historyPos.Enqueue(currentPos);
+                            _historyLookup[_inputSeq] = currentPos;
+                            while (_historySeq.Count > InputHistoryCap)
+                            {
+                                uint dropSeq = _historySeq.Dequeue();
+                                _historyPos.Dequeue();
+                                _historyLookup.Remove(dropSeq);
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            catch { /* best-effort */ }
+
             if (_inputSeq == 1 || _inputSeq % 300 == 0)
-                Log.LogInfo($"[P6.12] Sent PlayerInput #{_inputSeq} slot={localSlot} stick=({sx:0.00},{sy:0.00}) btns=0x{btns:X}");
+                Log.LogInfo($"[P6.12] Sent PlayerInput #{_inputSeq} slot={localSlot} stick=({sx:0.00},{sy:0.00}) btns=0x{btns:X} hist={_historySeq.Count}");
         }
 
         private static void WriteU32LE(byte[] b, int o, uint v)
@@ -470,11 +514,23 @@ namespace SFClientRecon
                     // players continue rendering from forwarded PlayerUpdate.
                     if (entry.Slot != localSlot) continue;
                     // Phase 6.11.2 — record target; SmoothTowardTargets lerps each frame.
-                    _playerTargets[entry.Slot] = new Vector3(entry.X, entry.Y, entry.Z);
-                    // Phase 6.12.2 (in-progress) — record the server's last-acked
-                    // input seq so the replay-rollback loop knows which prediction
-                    // tick to compare against.
+                    var target = new Vector3(entry.X, entry.Y, entry.Z);
+                    _playerTargets[entry.Slot] = target;
                     _serverLastAckedSeq = entry.LastInputSeq;
+                    // Phase 6.12.2 (in-progress) — divergence detection. Look up
+                    // local-predicted position at the same seq the server is
+                    // reporting and warn if it drifted significantly. Full
+                    // input-replay rollback comes next; this is the floor.
+                    if (_historyLookup.TryGetValue(entry.LastInputSeq, out var predictedAtSeq))
+                    {
+                        float drift = Vector3.Distance(predictedAtSeq, target);
+                        if (drift > 1.0f)  // 1 SF-unit ≈ ~visible-divergence threshold
+                        {
+                            _divergenceLogged++;
+                            if (_divergenceLogged == 1 || _divergenceLogged % 30 == 0)
+                                Log.LogWarning($"[P6.12.2 divergence] seq={entry.LastInputSeq} predicted={predictedAtSeq} server={target} drift={drift:0.00}u — total events {_divergenceLogged}");
+                        }
+                    }
                 }
                 _snapsApplied++;
                 if (_snapsApplied == 1 || _snapsApplied % 90 == 0)
