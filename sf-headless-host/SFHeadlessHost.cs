@@ -1813,7 +1813,12 @@ namespace SFHeadlessHost
                 Log.LogInfo($"[SF] new client appeared: {from}");
             }
             cli.LastSeen = Time.realtimeSinceStartup;
-            if (steamID != 0) cli.SteamID = steamID;
+            if (steamID != 0)
+            {
+                if (cli.SteamID != 0 && cli.SteamID != steamID)
+                    Log.LogWarning($"[SF DEBUG] cli {cli.Addr} slot={cli.Slot} SteamID CHANGING {cli.SteamID} → {steamID} (incoming msgType={msgType})");
+                cli.SteamID = steamID;
+            }
 
             // ALKA P0-5 defense: a bad/malformed packet in one handler should
             // log + drop, not bubble out and skip the rest of the batch (which
@@ -2458,7 +2463,13 @@ namespace SFHeadlessHost
             // tells the client slot 0 has SteamID 0 → client doesn't match
             // it against its local Steam ID → ControlledLocally stays false
             // → no ClientRequestingToSpawn → stuck in lobby.
-            if (len >= 8) cli.SteamID = ReadU64LE(data, off);
+            if (len >= 8)
+            {
+                ulong newSid = ReadU64LE(data, off);
+                if (cli.SteamID != 0 && cli.SteamID != newSid)
+                    Log.LogWarning($"[SF DEBUG] cli {cli.Addr} slot={cli.Slot} SteamID CHANGING {cli.SteamID} → {newSid} (in HandleClientRequestingIndex)");
+                cli.SteamID = newSid;
+            }
             byte playerCount = (len >= 9) ? data[off + 8] : (byte)1;
 
             // Evict any prior _sfClients entry with the same SteamID — this
@@ -2833,6 +2844,13 @@ namespace SFHeadlessHost
         private void SpawnAuthoritativePlayersForAllClients()
         {
             Log.LogInfo($"[P6.9] SpawnAuthoritativePlayers: iterating {_sfClients.Count} clients.");
+            // [SF DEBUG] dump every SfClient's state before we spawn — this
+            // is the ground-truth snapshot of who-is-who at this moment.
+            foreach (var kv in _sfClients)
+            {
+                var c = kv.Value;
+                Log.LogInfo($"[SF DEBUG]   _sfClients[{kv.Key}] → Slot={c.Slot} SteamID={c.SteamID} Spawned={c.Spawned} Initialized={c.Initialized}");
+            }
             int considered = 0, spawned = 0, skipped = 0;
             foreach (var kv in _sfClients)
             {
