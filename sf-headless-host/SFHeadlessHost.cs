@@ -679,46 +679,30 @@ namespace SFHeadlessHost
                             _p65ObjUpdateFilterCount++;
                         }
                     }
-                    // P0-11 — Y-aware destruction filter (was: drop-all).
-                    // The oracle's own NSO scene generates spurious destructions
-                    // (chains stress-breaking under gravity at scene load,
-                    // boxes drifting off the platform into the killbox). We
-                    // want to drop those — they have no equivalent on any
-                    // client. But the old unconditional drop also masked
-                    // legitimate server-side destructions, producing "ghost
-                    // box" desync where the oracle thinks an NSO is gone but
-                    // clients still have it.
+                    // BOXES/ICE VANISHING FIX (reverted from P0-11 Y-aware
+                    // heuristic 2026-05-23 night). Back to drop-ALL for
+                    // server-originated destructions. The Y-aware filter
+                    // introduced random ice/chain breaks because chains
+                    // stress-break on the oracle's scene under joint
+                    // forces (above Y=-30 obviously) and we were forwarding
+                    // those.
                     //
-                    // Heuristic: look up the destroyed NSO's current Y by
-                    // index (body[0..1]). If Y < -30, it's the killbox-fall
-                    // case — drop. Otherwise it's a legitimate break and
-                    // we forward.
+                    // The "ghost box" tradeoff (server destroys box, client
+                    // still has it) is rare and recoverable. The "ice
+                    // randomly breaks" was constant during play. Pick the
+                    // less-bad failure mode.
                     //
-                    // Legit client-initiated destructions still propagate via
-                    // the INBOUND path (RelayBodyToAll on msgType 28/29/30 in
-                    // SfDispatch), which broadcasts to all including sender.
+                    // Legit destructions still propagate from clients via
+                    // the INBOUND RelayBodyToAll path — kicking ice as a
+                    // player still works because the player rig (dynamic)
+                    // colliding with the ice (kinematic on client now)
+                    // fires OnCollisionEnter → SendDestructMessage → server.
                     if (msgType == 28 || msgType == 29 || msgType == 30)
                     {
-                        bool isKillboxFall = false;
-                        if (data.Length >= 2 && (object)Instance != null)
-                        {
-                            ushort idx = (ushort)(data[0] | (data[1] << 8));
-                            if (Instance.NsoIsKillboxFallen(idx)) isKillboxFall = true;
-                        }
-                        if (isKillboxFall)
-                        {
-                            skip = true;
-                            if (_p65DestructionFilterCount < 5 || _p65DestructionFilterCount % 50 == 0)
-                                Log.LogInfo($"[P0-11] Skip server-originated destruction msgType={msgType} for killbox-fall NSO (#{_p65DestructionFilterCount})");
-                            _p65DestructionFilterCount++;
-                        }
-                        else
-                        {
-                            // Forward as legit server-side destruction.
-                            if (_p65DestructionForwardCount < 5 || _p65DestructionForwardCount % 50 == 0)
-                                Log.LogInfo($"[P0-11] Forward server-originated destruction msgType={msgType} (NSO not below killbox) (#{_p65DestructionForwardCount})");
-                            _p65DestructionForwardCount++;
-                        }
+                        skip = true;
+                        if (_p65DestructionFilterCount < 5 || _p65DestructionFilterCount % 50 == 0)
+                            Log.LogInfo($"[destruction] Skip server-originated msgType={msgType} (#{_p65DestructionFilterCount}) — only client-initiated destructions are forwarded");
+                        _p65DestructionFilterCount++;
                     }
                     if (!skip) Instance.ForwardBroadcastToV25Clients(msgType, data, ignoreUID, channel);
                 }
@@ -1318,40 +1302,25 @@ namespace SFHeadlessHost
                 var nsoType = AccessTools.TypeByName("NetworkSyncableObject");
                 if ((object)nsoType == null) { Log.LogWarning("[CLIENT] NetworkSyncableObject type not found."); return; }
 
-                // Hybrid client-side NSO behavior: dynamic rigidbodies (so
-                // pushing a box has instant local feedback — no RTT wait
-                // for server broadcast) BUT mHasControl=false (so we don't
-                // broadcast — oracle remains the sole authority for the
-                // canonical position).
+                // REVERTED 2026-05-23 night — the "dynamic NSOs locally"
+                // patch (Patch 1) caused random ice/chain destruction events
+                // during normal gameplay: each client's local box physics
+                // would do NSO-on-NSO collisions that fire DestructiblePiece
+                // .Collide → SendDestructMessage → server → all clients see
+                // a spurious break.
                 //
-                // Why this combination:
-                //   - Kinematic + mHasControl=false (pure server authority):
-                //     boxes don't move when you push them locally → laggy
-                //     feel as you wait for server snapshot to update
-                //   - Dynamic + mHasControl=true (old shim): every client
-                //     broadcast its own physics → cross-client position
-                //     fight + random destruction events
-                //   - Dynamic + mHasControl=false (THIS):
-                //     local push has instant feedback (dynamic body responds
-                //     to collision); no broadcast means no cross-client fight;
-                //     server's NSO.TickSyncPos / v26 snapshot still drive the
-                //     authoritative position, which the kinematic-aware lerp
-                //     in SFClientRecon reconciles toward.
+                // Stock SF kinematic NSOs on clients:
+                //   - NSO-on-NSO collisions don't fire OnCollisionEnter
+                //     (both bodies kinematic — no contact resolution)
+                //   - Player-on-NSO collisions still fire (player rig is
+                //     dynamic) — so kicking ice still destructs correctly,
+                //     just via the server-relay round-trip
+                //   - Cost: pushing a box has ~RTT latency before it
+                //     visually moves locally (the v26 snapshot drives it)
                 //
-                // Patch 1: skip DisableAllRigidBodies so client NSOs stay dynamic.
-                var dis = AccessTools.Method(nsoType, "DisableAllRigidBodies");
-                if ((object)dis != null)
-                {
-                    harmony.Patch(dis, prefix: new HarmonyMethod(AccessTools.Method(typeof(Plugin), nameof(SkipPrefix))));
-                    Log.LogInfo("[CLIENT] Patched NetworkSyncableObject.DisableAllRigidBodies (skip — local NSOs stay dynamic for instant push feedback).");
-                }
-                else Log.LogWarning("[CLIENT] DisableAllRigidBodies method not found.");
-
-                // NO Patch 2 — mHasControl stays false (stock non-host).
-                // Means client doesn't broadcast NSO updates. Oracle is sole
-                // authority on canonical position; local dynamic physics is
-                // only for the user's own instant feedback.
-                Log.LogInfo("[CLIENT] Client-mode shim installed (dynamic NSOs, no broadcast).");
+                // Net: stable destruction model > instant push feedback.
+                // Tradeoff is the same one P0-5's original fix took.
+                Log.LogInfo("[CLIENT] Stock-default kinematic NSOs (no DisableAllRigidBodies skip — prevents spurious NSO-on-NSO destruction events).");
             }
             catch (Exception e)
             {
@@ -2223,19 +2192,23 @@ namespace SFHeadlessHost
                 Log.LogWarning($"[anticheat damage] Reject — attacker idx {attackerIdx} out of range. Dropped #{_damagePacketsDropped}");
                 return false;
             }
-            // P1-8 — attacker-slot identity check. The body's attacker byte
-            // is used downstream for the rewind-buffer distance lookup, so
-            // it must match the SENDER's authenticated slot. Without this
-            // gate a malicious client could spoof a different slot's
-            // identity and pass distance checks against that slot's
-            // position rather than their own. 255 (environment kill) is
-            // allowed from any sender.
-            if (attackerIdx != 255 && sender.Slot >= 0 && attackerIdx != sender.Slot)
-            {
-                _damagePacketsDropped++;
-                Log.LogWarning($"[anticheat damage] Reject — attackerIdx={attackerIdx} != sender.Slot={sender.Slot} (spoof). Dropped #{_damagePacketsDropped}");
-                return false;
-            }
+            // P1-8 REVERTED 2026-05-23 night — the original "reject if
+            // attackerIdx != sender.Slot" check was WRONG. In stock SF,
+            // PktPlayerTookDamage is emitted by the VICTIM's
+            // NetworkPlayer.UnitWasDamaged after their HealthHandler took
+            // damage. The body's attackerIdx is the SHOOTER (computed by
+            // looking up mController.damager in ConnectedClients), while
+            // the sender of the packet is the victim. So attackerIdx !=
+            // sender.Slot is THE NORMAL CASE — and rejecting it blocks
+            // all damage between players (void/lava worked because they
+            // had attacker == sender, but bullets/punches did not).
+            //
+            // The audit's "spoofing" concern stands but the fix-shape was
+            // wrong. Proper anticheat for damage-source spoofing requires
+            // server-side hit detection (Phase 6.17 v0.2+, in progress —
+            // server emits its own damage instead of trusting clients).
+            // Until that's the only damage path, we trust clients and
+            // rely on the existing range/magnitude checks below.
             // Phase 6.14.5 v0.2 — range plausibility with rewind buffer.
             // Damage packets don't carry a client-tick reference (would need
             // a patched-DLL extension), so we assume the hit happened
