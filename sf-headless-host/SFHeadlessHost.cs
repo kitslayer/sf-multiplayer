@@ -1796,11 +1796,10 @@ namespace SFHeadlessHost
                 Log.LogInfo($"[SF] rx#{_sfPacketsRx} type={msgType} bodyLen={bodyLen} ch={channel} from={from} steamID={steamID}");
 
             // ALKA-style anticheat — per-client packet rate observation. Logs
-            // when a client exceeds thresholds; doesn't drop packets yet (would
-            // need careful tuning to not stomp legit bursts). Phase 6.13+ can
-            // promote this to actually rate-limit once we have telemetry on
-            // healthy traffic shape.
-            AnticheatObserve(from, msgType);
+            // when a client exceeds thresholds. Drops the packet only when
+            // SF_ANTICHEAT_ENFORCE=1 is set (off by default — needs healthy
+            // traffic telemetry to tune without dropping legit bursts).
+            if (AnticheatObserve(from, msgType)) return;
 
             // Phase 6.12 — v26 PktPlayerInput is keyed by slot embedded in the
             // body, not by source IP+port (the SFClientRecon plugin sends from
@@ -1938,6 +1937,36 @@ namespace SFHeadlessHost
             }
         }
 
+        // /lobbies handler — read the multi-process registry directly so we can
+        // tell a player about OTHER lobbies running on this same host.
+        private string ListOtherLobbiesFromRegistry()
+        {
+            try
+            {
+                string dir = Environment.GetEnvironmentVariable("SF_LOBBIES_DIR") ?? "/tmp/sf-lobbies";
+                if (!System.IO.Directory.Exists(dir)) return "No other lobbies (registry not found).";
+                var entries = new List<string>();
+                string myCode = Environment.GetEnvironmentVariable("SF_LOBBY_CODE") ?? "";
+                foreach (var path in System.IO.Directory.GetFiles(dir, "*.conf"))
+                {
+                    string code = "?", port = "?";
+                    foreach (var line in System.IO.File.ReadAllLines(path))
+                    {
+                        var eq = line.IndexOf('=');
+                        if (eq < 0) continue;
+                        string k = line.Substring(0, eq), v = line.Substring(eq + 1);
+                        if (k == "code") code = v;
+                        else if (k == "port") port = v;
+                    }
+                    if (code == myCode) continue;
+                    entries.Add($"{code}:{port}");
+                }
+                if (entries.Count == 0) return "No other lobbies running.";
+                return "Other lobbies: " + string.Join(", ", entries.ToArray());
+            }
+            catch (Exception ex) { return $"(error: {ex.Message})"; }
+        }
+
         // Phase 6.16 v0.1 — basic damage validation (no rewind yet).
         // Body shape: byte attackerIdx, f32 damage, bool playParticles, ...
         // The full rewind-based authority is designed in
@@ -2024,8 +2053,19 @@ namespace SFHeadlessHost
                             _matchStarted = true;
                         }
                         break;
+                    case "/version":
+                        SendChatToPlayer(sender, $"sf-multiplayer {PluginVersion} (v26 protocol)");
+                        break;
+                    case "/players":
+                        int up = 0, sp = 0;
+                        foreach (var ckv in _sfClients) { up++; if (ckv.Value.Spawned) sp++; }
+                        SendChatToPlayer(sender, $"Players: {up} connected, {sp} spawned, rigs={SlotToRig.Count}");
+                        break;
+                    case "/lobbies":
+                        SendChatToPlayer(sender, ListOtherLobbiesFromRegistry());
+                        break;
                     case "/help":
-                        SendChatToPlayer(sender, "Commands: /code /ping /start /help");
+                        SendChatToPlayer(sender, "Commands: /code /ping /start /players /lobbies /version /help");
                         break;
                     default:
                         SendChatToPlayer(sender, "Unknown command. Type /help");
@@ -2059,12 +2099,25 @@ namespace SFHeadlessHost
             Log.LogInfo($"[telemetry chat] slot={cli.Slot} ch={channel} len={len} hex={hex} ascii='{ascii}'");
         }
 
-        // === ALKA-style anticheat — observation-only rate guard ===
-        // Per-client sliding window of packet timestamps. Currently logs
-        // warnings when thresholds are crossed; doesn't drop packets yet.
+        // === ALKA-style anticheat — observation + optional rate-limit ===
+        // Per-client sliding window of packet timestamps. By default we only
+        // observe + log; set SF_ANTICHEAT_ENFORCE=1 to actually drop excess
+        // packets (and return true from AnticheatObserve to signal "drop"
+        // — caller in SfDispatch then returns early).
+        //
         // Ported from server-go/anticheat.go but tuned conservatively (3-4x
         // typical vanilla SF traffic) so it surfaces real anomalies, not
         // legitimate gameplay bursts.
+        private static bool? _enforceCache;
+        private static bool AnticheatEnforce
+        {
+            get
+            {
+                if (_enforceCache.HasValue) return _enforceCache.Value;
+                _enforceCache = Environment.GetEnvironmentVariable("SF_ANTICHEAT_ENFORCE") == "1";
+                return _enforceCache.Value;
+            }
+        }
         private class RateGuard
         {
             public Queue<float> All        = new Queue<float>();
@@ -2079,8 +2132,11 @@ namespace SFHeadlessHost
         private const int MaxDamagePerSec     = 30;    // vanilla bursts <10
         private const int MaxObjectPerSec     = 480;   // boxes/chains can be chatty
         private readonly Dictionary<string, RateGuard> _rateGuards = new Dictionary<string, RateGuard>();
-        private void AnticheatObserve(IPEndPoint from, byte msgType)
+        // Returns true if the packet should be DROPPED (only under
+        // SF_ANTICHEAT_ENFORCE=1). Always observes regardless.
+        private bool AnticheatObserve(IPEndPoint from, byte msgType)
         {
+            bool overLimit = false;
             try
             {
                 string key = from.ToString();
@@ -2092,19 +2148,19 @@ namespace SFHeadlessHost
                 float now = Time.realtimeSinceStartup;
                 RotateQueue(g.All, now);
                 g.All.Enqueue(now);
-                if (g.All.Count > MaxAllPerSec) ReportViolation(g, key, "total", g.All.Count);
+                if (g.All.Count > MaxAllPerSec) { ReportViolation(g, key, "total", g.All.Count); overLimit = true; }
 
                 if (msgType == PktPlayerUpdate)
                 {
                     RotateQueue(g.PlayerUpd, now);
                     g.PlayerUpd.Enqueue(now);
-                    if (g.PlayerUpd.Count > MaxPlayerUpdPerSec) ReportViolation(g, key, "playerUpdate", g.PlayerUpd.Count);
+                    if (g.PlayerUpd.Count > MaxPlayerUpdPerSec) { ReportViolation(g, key, "playerUpdate", g.PlayerUpd.Count); overLimit = true; }
                 }
                 else if (msgType == PktPlayerTookDamage)
                 {
                     RotateQueue(g.Damage, now);
                     g.Damage.Enqueue(now);
-                    if (g.Damage.Count > MaxDamagePerSec) ReportViolation(g, key, "damage", g.Damage.Count);
+                    if (g.Damage.Count > MaxDamagePerSec) { ReportViolation(g, key, "damage", g.Damage.Count); overLimit = true; }
                 }
                 else if (msgType == PktObjectUpdate
                       || msgType == PktObjectSpawned
@@ -2115,10 +2171,11 @@ namespace SFHeadlessHost
                 {
                     RotateQueue(g.Object, now);
                     g.Object.Enqueue(now);
-                    if (g.Object.Count > MaxObjectPerSec) ReportViolation(g, key, "object", g.Object.Count);
+                    if (g.Object.Count > MaxObjectPerSec) { ReportViolation(g, key, "object", g.Object.Count); overLimit = true; }
                 }
             }
             catch { /* observation only — never let it crash the dispatch */ }
+            return overLimit && AnticheatEnforce;
         }
         private static void RotateQueue(Queue<float> q, float now)
         {
