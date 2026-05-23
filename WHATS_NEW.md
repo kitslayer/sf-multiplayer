@@ -31,6 +31,9 @@ Roughly 16 commits landed in one day. This file's a running tally so visitors an
 - **Phase 6.8 — Map-preset weapons broadcast**
   `CheckForGroundWeapons` added to `InvokeMultiplayerManagerInitChain`. Map-placed `WeaponPickUp` prefabs now broadcast via `GroundWeaponsInit` (msgType 31) on each scene load — clients see weapons at the level's designed positions.
 
+- **Phase 6.15 v1 — Chat commands** (`/code` `/ping` `/start` `/help`)
+  Body format confirmed from decompile (raw UTF-8). Server parses `/`-prefixed `PktPlayerTalked`, emits responses back via `SendChatToPlayer` (PktPlayerTalked with `steamID=0`, recipient's owner channel). `/code` reads from `SF_LOBBY_CODE` env var which `launch-lobby.sh` now sets. `/options`, `/join`, `/newlobby` deferred to Phase 6.13 v2 in-process sharding.
+
 ## Bug fixes (most absorbed from ALKA's [BUGS_BACKLOG](https://github.com/AlkaPrime12/Stickfight-TestingMultiplayer/blob/main/docs/BUGS_BACKLOG.md))
 
 - **Ice / crate / chain destruction broadcast to all (ALKA P0-3).**
@@ -69,11 +72,11 @@ Roughly 16 commits landed in one day. This file's a running tally so visitors an
 - Server-authoritative NSO snapshots (he has only the scene-shard part of his world-shard design)
 - HTTP `/lobbies` JSON endpoint
 - Snapshot smoothing on client
+- Chat commands actually implemented (he has them in design + DLL emit, server-side parser is now ours)
 
 **Behind him:**
 - Damage authority (server-side damage validation) — designed, not shipped
 - Server-side rewind buffer for lag-comp — designed, not shipped
-- Chat commands actually implemented — designed, telemetry collecting, parser pending
 - His one-click Windows `.bat` deploy scripts — we have Linux equivalents but no Windows yet
 - Active launcher binary (he has a Go launcher that auto-patches the DLL)
 - Workshop maps loading at runtime

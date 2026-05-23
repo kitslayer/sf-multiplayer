@@ -73,11 +73,10 @@ The current "mirror rig that teleports to client position" approach is acknowled
 - CSGO-style 100ms tick history; server rewinds positions to validate damage events
 - Gated behind anticheat-lite (slot↔SteamID validation, weapon plausibility) shipping first
 
-### Phase 6.15 — Chat-command admin interface — design only
-- See [`notes/phase6/14-chat-commands.md`](notes/phase6/14-chat-commands.md)
-- Patched DLL already emits `/start`, `/code`, `/newlobby`, etc. as `PktPlayerTalked` on owner-channel `(slot*2)+3`
-- Server side: parse → dispatch → send chat response
-- Half-day effort for v1 commands (`/start`, `/code`, `/newlobby`); `/join` waits on v2 in-process sharding
+### Phase 6.15 — Chat-command admin interface ✅ v1
+- v1 (shipped 2026-05-23): `/code`, `/room`, `/ping`, `/start`, `/help`. Server parses `/`-prefixed `PktPlayerTalked` (body = raw UTF-8 confirmed from decompile), responds via `SendChatToPlayer` on the requester's owner channel `(slot*2)+3`. Lobby code plumbed via `SF_LOBBY_CODE` env var set by `launch-lobby.sh`.
+- v1 docs: [`notes/phase6/14-chat-commands.md`](notes/phase6/14-chat-commands.md)
+- Next (v2): `/options`, `/join CODE`, `/newlobby`, `/public`, `/private`, `/invite USER` — these need multi-lobby coordination, gated on Phase 6.13 v2 in-process sharding.
 
 ### Phase 6.16+ — broader authority
 - Server-authoritative damage / hit registration (server validates damage events vs position+weapon)
