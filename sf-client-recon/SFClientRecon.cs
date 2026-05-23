@@ -59,6 +59,7 @@ namespace SFClientRecon
         // Pending snapshot (set on RX thread, applied on main thread).
         private readonly object _snapLock = new object();
         private List<SnapshotEntry> _pendingSnap;
+        private List<NsoSnapEntry>  _pendingNsoSnap;
         private uint _pendingTick;
         private uint _snapsReceived;
         private uint _snapsApplied;
@@ -71,6 +72,12 @@ namespace SFClientRecon
         {
             public int Slot;
             public float X, Y, Z;
+        }
+
+        private struct NsoSnapEntry
+        {
+            public ushort Id;
+            public float X, Y, Z, RotZ;
         }
 
         private void Awake()
@@ -157,27 +164,51 @@ namespace SFClientRecon
             if (bodyLen < 5) return;  // need at least tick + count
 
             uint tick = (uint)(pkt[bodyOff] | (pkt[bodyOff + 1] << 8) | (pkt[bodyOff + 2] << 16) | (pkt[bodyOff + 3] << 24));
-            byte count = pkt[bodyOff + 4];
+            byte playerCount = pkt[bodyOff + 4];
             int o = bodyOff + 5;
-            var list = new List<SnapshotEntry>(count);
-            int snapEntrySize = 1 + 12;
-            for (int i = 0; i < count; i++)
+            var list = new List<SnapshotEntry>(playerCount);
+            int playerEntrySize = 1 + 12;
+            for (int i = 0; i < playerCount; i++)
             {
-                if (o + snapEntrySize > bodyOff + bodyLen) break;
-                var e = new SnapshotEntry
+                if (o + playerEntrySize > bodyOff + bodyLen) break;
+                list.Add(new SnapshotEntry
                 {
                     Slot = pkt[o],
                     X = BitConverter.ToSingle(pkt, o + 1),
                     Y = BitConverter.ToSingle(pkt, o + 5),
                     Z = BitConverter.ToSingle(pkt, o + 9),
-                };
-                o += snapEntrySize;
-                list.Add(e);
+                });
+                o += playerEntrySize;
+            }
+
+            // v26.1 (Phase 6.14): NSO entries follow the player section.
+            // Old servers won't have these bytes; just leave nsoList empty.
+            List<NsoSnapEntry> nsoList = null;
+            if (o + 2 <= bodyOff + bodyLen)
+            {
+                ushort nsoCount = (ushort)(pkt[o] | (pkt[o + 1] << 8));
+                o += 2;
+                nsoList = new List<NsoSnapEntry>(nsoCount);
+                int nsoEntrySize = 2 + 16;
+                for (int i = 0; i < nsoCount; i++)
+                {
+                    if (o + nsoEntrySize > bodyOff + bodyLen) break;
+                    nsoList.Add(new NsoSnapEntry
+                    {
+                        Id   = (ushort)(pkt[o] | (pkt[o + 1] << 8)),
+                        X    = BitConverter.ToSingle(pkt, o + 2),
+                        Y    = BitConverter.ToSingle(pkt, o + 6),
+                        Z    = BitConverter.ToSingle(pkt, o + 10),
+                        RotZ = BitConverter.ToSingle(pkt, o + 14),
+                    });
+                    o += nsoEntrySize;
+                }
             }
 
             lock (_snapLock)
             {
                 _pendingSnap = list;
+                _pendingNsoSnap = nsoList;
                 _pendingTick = tick;
                 _snapsReceived++;
             }
@@ -187,20 +218,97 @@ namespace SFClientRecon
         {
             if (!_running) return;
             List<SnapshotEntry> snap;
+            List<NsoSnapEntry>  nsoSnap;
             uint tick;
             lock (_snapLock)
             {
-                snap = _pendingSnap;
-                tick = _pendingTick;
-                _pendingSnap = null;
+                snap    = _pendingSnap;
+                nsoSnap = _pendingNsoSnap;
+                tick    = _pendingTick;
+                _pendingSnap    = null;
+                _pendingNsoSnap = null;
             }
-            if (snap != null) ApplySnapshot(snap, tick);
+            if (snap != null)    ApplySnapshot(snap, tick);
+            if (nsoSnap != null) ApplyNsoSnapshot(nsoSnap, tick);
             // Phase 6.12 — send input packets at 60Hz once local slot is known.
             if (_txSocket != null && Time.realtimeSinceStartup - _lastInputSendAt >= InputSendInterval)
             {
                 _lastInputSendAt = Time.realtimeSinceStartup;
                 SendPlayerInputPacket();
             }
+        }
+
+        // Phase 6.14 — apply server-authoritative NSO positions (boxes,
+        // chains, ice debris). For now: snap (no smoothing). 6.14.1 will
+        // lerp between snapshots since broadcast rate is 30Hz but client
+        // Update is 60-144Hz.
+        //
+        // Maintain a cached id → NetworkSyncableObject map. Rebuild on miss
+        // since scene changes invalidate entries.
+        private readonly Dictionary<ushort, Component> _nsoCache = new Dictionary<ushort, Component>();
+        private int _nsoCacheRebuildAt;
+        private Type _nsoType;
+        private System.Reflection.PropertyInfo _nsoIndexProp;
+        private System.Reflection.FieldInfo _nsoIndexField;
+
+        private void ApplyNsoSnapshot(List<NsoSnapEntry> snap, uint tick)
+        {
+            if (snap.Count == 0) return;
+            try
+            {
+                if ((object)_nsoType == null)
+                {
+                    _nsoType = AccessTools.TypeByName("NetworkSyncableObject");
+                    if ((object)_nsoType == null) return;
+                    _nsoIndexProp = AccessTools.Property(_nsoType, "Index");
+                    _nsoIndexField = AccessTools.Field(_nsoType, "m_Index");
+                }
+                // Rebuild cache every 60 ticks (~2s at 30Hz) or on first run.
+                if (_nsoCache.Count == 0 || _nsoCacheRebuildAt <= 0)
+                {
+                    _nsoCache.Clear();
+                    var all = UnityEngine.Object.FindObjectsOfType(_nsoType);
+                    if (all != null)
+                    {
+                        foreach (var nso in all)
+                        {
+                            ushort id = 0;
+                            if ((object)_nsoIndexProp != null)
+                                id = (ushort)_nsoIndexProp.GetValue(nso, null);
+                            else if ((object)_nsoIndexField != null)
+                                id = (ushort)_nsoIndexField.GetValue(nso);
+                            _nsoCache[id] = nso as Component;
+                        }
+                    }
+                    _nsoCacheRebuildAt = 60;
+                }
+                _nsoCacheRebuildAt--;
+
+                int applied = 0;
+                foreach (var e in snap)
+                {
+                    if (!_nsoCache.TryGetValue(e.Id, out var comp)) continue;
+                    if ((object)comp == null) continue;
+                    var target = new Vector3(e.X, e.Y, e.Z);
+                    var rb = comp.GetComponent<Rigidbody>();
+                    if ((object)rb != null)
+                    {
+                        rb.position = target;
+                        rb.rotation = Quaternion.Euler(0f, 0f, e.RotZ);
+                        // Don't zero velocity — let local prediction continue
+                        // between snapshots so motion stays smooth.
+                    }
+                    else
+                    {
+                        comp.transform.position = target;
+                        comp.transform.rotation = Quaternion.Euler(0f, 0f, e.RotZ);
+                    }
+                    applied++;
+                }
+                if (_snapsApplied == 1 || _snapsApplied % 90 == 0)
+                    Log.LogInfo($"[P6.14] NSO snap tick={tick} applied {applied}/{snap.Count}");
+            }
+            catch (Exception ex) { Log.LogWarning($"[P6.14 NSO apply] {ex.Message}"); }
         }
 
         // Phase 6.12 — pack and send a PktPlayerInput packet to the oracle.

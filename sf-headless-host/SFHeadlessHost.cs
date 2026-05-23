@@ -1578,6 +1578,12 @@ namespace SFHeadlessHost
         // in P2PPackageHandler.CheckMessageType.
         private const byte PktWorldStateSnapshot            = 39;  // server → all clients, 30Hz
         private const byte PktPlayerInput                   = 40;  // client → server, 60Hz (Phase 6.12)
+        // === Patched-DLL extensions (kit's patched Assembly-CSharp.dll has
+        // these beyond stock SF's 0-38 range). We don't synthesize them, but
+        // we relay so peer clients see each other. From ALKA's
+        // relay_handlers.go (his P1-4 fix).
+        private const byte PktLerpPlayer                    = 56;  // empty body, triggers remote-lerp on NetworkPlayer
+        private const byte PktColorChanged                  = 57;  // HTML color string body (4-64 bytes)
 
         // Per-client connection state. Keyed by remote address:port string so
         // the same SF instance keeps its slot/SteamID across packets.
@@ -1833,6 +1839,8 @@ namespace SFHeadlessHost
                 case PktObjectUpdate:
                 case PktPlayerTalked:        // voice/ping blip; sender already triggered it locally
                 case PktOptionsChanged:      // lobby option toggles (ALKA BUGS_BACKLOG P0-4)
+                case PktLerpPlayer:          // patched-DLL ext, remote-lerp trigger (ALKA P1-4)
+                case PktColorChanged:        // patched-DLL ext, player color (ALKA P1-4)
                     RelayBodyToOthers(cli, msgType, data, bodyOffset, bodyLen, channel);
                     break;
 
@@ -2451,15 +2459,34 @@ namespace SFHeadlessHost
             BroadcastWorldStateSnapshot();
         }
 
+        // Cached NSO Index field — looked up lazily once a scene has NSOs.
+        private static FieldInfo _nsoIndexField;
+        private static System.Reflection.PropertyInfo _nsoIndexProp;
+        private static Type _nsoType;
+
         private void BroadcastWorldStateSnapshot()
         {
             try
             {
                 int n = 0;
                 foreach (var kv in SlotToRig) if ((object)kv.Value != null) n++;
-                if (n == 0) return;
 
-                int bodyLen = 4 + 1 + n * (1 + 12);
+                // Phase 6.14 — also pack NSO positions for server-determined
+                // box / chain / ice-debris falling. Only include NSOs whose
+                // rigidbody is non-kinematic (i.e. currently allowed to move).
+                // Pre-placed static crates/chains stay kinematic until struck
+                // and don't need bandwidth.
+                var nsoEntries = CollectActiveNsoSnapshot();
+
+                if (n == 0 && nsoEntries.Count == 0) return;
+
+                // Body layout v26.1:
+                //   u32 serverTick
+                //   u8  playerCount
+                //   players: [u8 slot, f32 x, f32 y, f32 z] × n              (13/each)
+                //   u16 nsoCount
+                //   NSOs:    [u16 id, f32 x, f32 y, f32 z, f32 rotZ] × m     (18/each)
+                int bodyLen = 4 + 1 + n * 13 + 2 + nsoEntries.Count * 18;
                 byte[] body = new byte[bodyLen];
                 int off = 0;
                 WriteU32LE(body, off, _serverTick); off += 4;
@@ -2474,6 +2501,16 @@ namespace SFHeadlessHost
                     WriteF32LE(body, off, p.y); off += 4;
                     WriteF32LE(body, off, p.z); off += 4;
                 }
+                WriteU16LE(body, off, (ushort)nsoEntries.Count); off += 2;
+                foreach (var e in nsoEntries)
+                {
+                    WriteU16LE(body, off, e.Id); off += 2;
+                    WriteF32LE(body, off, e.X); off += 4;
+                    WriteF32LE(body, off, e.Y); off += 4;
+                    WriteF32LE(body, off, e.Z); off += 4;
+                    WriteF32LE(body, off, e.RotZ); off += 4;
+                }
+
                 // Broadcast to ALL spawned clients on their v26 listener port
                 // (NOT their v25 ephemeral source port). The Phase 6.11
                 // SFClientRecon plugin binds UDP on V26_CLIENT_PORT and
@@ -2487,9 +2524,53 @@ namespace SFHeadlessHost
                     SendSfPacket(v26Ep, PktWorldStateSnapshot, body, 0, 0);
                 }
                 if (_serverTick == 1 || _serverTick % 90 == 0)
-                    Log.LogInfo($"[P6.10] Snapshot tick={_serverTick} n={n} bytes={bodyLen}");
+                    Log.LogInfo($"[P6.10/14] Snapshot tick={_serverTick} players={n} nsos={nsoEntries.Count} bytes={bodyLen}");
             }
-            catch (Exception e) { Log.LogWarning($"[P6.10] {e.Message}"); }
+            catch (Exception e) { Log.LogWarning($"[P6.10/14] {e.Message}"); }
+        }
+
+        private struct NsoSnap { public ushort Id; public float X, Y, Z, RotZ; }
+
+        // Gather active (non-kinematic) NSOs in the scene as snapshot entries.
+        // Skips kinematic NSOs (static crates/chains) to keep packet size down
+        // — those don't move so clients can keep their local position. Phase
+        // 6.14.1 will add per-NSO active-flag tracking so a recently-moved NSO
+        // stays in the snapshot for a few seconds after it settles.
+        private List<NsoSnap> CollectActiveNsoSnapshot()
+        {
+            var result = new List<NsoSnap>();
+            try
+            {
+                if ((object)_nsoType == null)
+                {
+                    _nsoType = AccessTools.TypeByName("NetworkSyncableObject");
+                    if ((object)_nsoType == null) return result;
+                    _nsoIndexProp = AccessTools.Property(_nsoType, "Index");
+                    _nsoIndexField = AccessTools.Field(_nsoType, "m_Index");
+                }
+                var all = UnityEngine.Object.FindObjectsOfType(_nsoType);
+                if (all == null) return result;
+                foreach (var nso in all)
+                {
+                    var comp = nso as Component;
+                    if ((object)comp == null) continue;
+                    var rb = comp.GetComponent<Rigidbody>();
+                    if ((object)rb == null) continue;
+                    if (rb.isKinematic) continue;
+
+                    ushort id = 0;
+                    if ((object)_nsoIndexProp != null)
+                        id = (ushort)_nsoIndexProp.GetValue(nso, null);
+                    else if ((object)_nsoIndexField != null)
+                        id = (ushort)_nsoIndexField.GetValue(nso);
+
+                    var p = comp.transform.position;
+                    var e = comp.transform.eulerAngles;
+                    result.Add(new NsoSnap { Id = id, X = p.x, Y = p.y, Z = p.z, RotZ = e.z });
+                }
+            }
+            catch (Exception ex) { Log.LogWarning($"[P6.14 NSO collect] {ex.Message}"); }
+            return result;
         }
 
         // Freeze NSO rigidbodies that fell out of the playable area.
@@ -2599,6 +2680,12 @@ namespace SFHeadlessHost
             buf[off + 1] = bytes[1];
             buf[off + 2] = bytes[2];
             buf[off + 3] = bytes[3];
+        }
+
+        private static void WriteU16LE(byte[] buf, int off, ushort v)
+        {
+            buf[off    ] = (byte)(v       & 0xFF);
+            buf[off + 1] = (byte)(v >>  8 & 0xFF);
         }
         private static void WriteU64LE(byte[] buf, int off, ulong v)
         {
