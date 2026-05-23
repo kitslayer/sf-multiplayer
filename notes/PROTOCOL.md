@@ -58,7 +58,7 @@ Total = 5 (prefix) + N (body) + 9 (suffix) = **N + 14**. Minimum packet = 14 byt
 | 30 | ObjectDestructionCollision | client → server | `u16 idx, collision data` | Channel 11. Relay to all. |
 | 31 | GroundWeaponsInit | server → all | `u16 count, [f32 x, f32 y, u16 weaponID, u16 syncID] × N` | Map-preset weapons. Emitted by `CheckForGroundWeapons`. |
 | 32 | MapInfo | server → client | map metadata | |
-| 33 | MapInfoSync | server → all | map sync data | |
+| 33 | MapInfoSync | server → all | `f32 startPosX, f32 startPosY, [N bytes data]` | Stock SF's separate sync path for `MapInfoSyncableBase`-derived map objects (`GhostPlatform`, `MoveAlongPathUsingForce`, `PillarHandler`, `PlayMoveAnimations`). 5Hz when active. Client dispatches by `Vector2(startPosX, startPosY)` dictionary lookup — bit-exact float compare, see P0-12 in BUGS_BACKLOG.md. Channel 0. |
 | 34 | WorkshopMapsLoaded | server → all | workshop map cycle | |
 | 35 | StartMatch | server → all | empty | Kick off round countdown |
 | 36 | ObjectHello | client → server | `u16 idx` | Client requesting initial object state |
@@ -156,16 +156,27 @@ f32 speed                   (units/sec; 0 → server uses default 60 u/s)
 
 ## Channel encoding
 
-The `u8 channel` byte at the end of the envelope has gameplay meaning for some msgTypes:
+The `u8 channel` byte at the end of the envelope has gameplay meaning for some msgTypes. **Ground truth is `P2PPackageHandler.GetChannelForMsgType` (`refs/decompiled/Assembly-CSharp/P2PPackageHandler.cs:310-344`)** — copy of stock SF's per-msgType routing, reproduced here verbatim:
 
-| Channel | Used by |
+| Channel | msgTypes routed here by stock SF |
 |---------|---------|
-| 0 | General traffic (handshake, most relays) |
-| 1 | Network player update |
-| 10 | NSO `ObjectUpdate` broadcast (Phase 6.5 critical — wrong channel breaks NSO dispatch) |
-| 11 | NSO `ObjectDestructionCollision` |
-| `slot*2 + 3` | Per-slot owner channel: `PlayerTalked`, `WeaponThrown` for that slot. Used for chat commands too. |
-| `slot*2 + 4` | Reserved (haven't observed traffic) |
+| 0 | `Ping`, `PingResponse`, `ClientInit`, `ClientJoined`, `ClientRequestingIndex`, `ClientRequestingToSpawn`, `ClientSpawned`, `MapInfoSync`, `PlayerForceAddedAndBlock` |
+| 1 | `MapChange`, `WeaponSpawned`, `WeaponWasPickedUp`, `ClientRequestingWeaponPickUp`, `ClientRequestWeaponDrop`, `WeaponDropped`, `ObjectSpawned`, `ObjectSimpleDestruction`, `ObjectInvokeDestructionEvent`, `GroundWeaponsInit`, `MapInfo`, `PlayerFallOut`, `OptionsChanged`, `KickPlayer`, `ClientAccepted`, `ClientRequestingAccepting`, `ClientReadyUp`, `StartMatch`, `WorkshopMapsLoaded` |
+| 10 | `ObjectUpdate` (NSO 5Hz delta, per `mUpdateChannel`) |
+| 11 | `ObjectDestructionCollision` (NSO destruction events) |
+| `slot*2 + 2` | `PlayerUpdate` (per-slot owner update; `NetworkPlayer.InitNetworkSpawnID` sets `mUpdateChannel = slot*2 + 2`) |
+| `slot*2 + 3` | Per-slot event channel: `PlayerTalked`, `WeaponThrown`, `RequestingWeaponThrow` (and chat commands ride on this). `mEventChannel = mUpdateChannel + 1` |
+
+**Important polling caveat**: stock SF's `P2PPackageHandler.CheckForPackagesOnChannel` polls BOTH channels 0 and 1 for the lobby/setup msgType set (`P2PPackageHandler.cs:110-116`):
+
+```csharp
+CheckForPackagesOnChannelInMainMenu();   // channel 0
+CheckForPackagesOnChannelInMainMenu(1);  // channel 1
+CheckForPackagesOnChannel(1);            // channel 1
+CheckForPackagesOnChannel();             // channel 0
+```
+
+So any of the channel-0 or channel-1 msgTypes will be dispatched regardless of which of the two they arrive on. Only the slot-routed channels (`slot*2+2`, `slot*2+3`, `10`, `11`) have tight routing — wrong channel = silent drop. This is why P0-1 in BUGS_BACKLOG.md was so painful (PlayerUpdate forwarded on channel 0 instead of slot*2+2).
 
 ## Future v26 IDs (reserved)
 

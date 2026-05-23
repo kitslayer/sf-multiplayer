@@ -164,17 +164,40 @@ PLAYER MOVEMENT INPUT (for future server-sim)
   Currently this drives the oracle's auth rig but the v26 path isn't yet
   the primary movement source — clients still send PktPlayerUpdate too.
 
-NSO POSITIONS (boxes, chains, ice, moving platforms)
+NSO POSITIONS (boxes, chains, ice, crates — NOT moving platforms; see below)
   Source of truth: ORACLE. Oracle is host (mHasControl=true via Phase 6.5
-    static patch). Clients are kinematic + mHasControl=false (stock
-    non-host behavior; we no longer patch them).
+    static patch). Clients (as of commit `6875908`) have dynamic NSOs but
+    mHasControl=false — local push has instant feedback, but client does
+    NOT broadcast. Oracle remains sole authority on canonical position;
+    v26 snapshot reconciles clients toward server state.
   Wire: oracle's NSO.TickSyncPos fires at 5Hz, calls
     SendMessageToAllClients(ObjectUpdate, channel=10). Our prefix forwards
-    to v25 clients with channel preserved.
+    to v25 clients with channel preserved. v26 WorldStateSnapshot adds
+    a global 30Hz snapshot covering all moving NSOs with a 1s keepalive.
   Server also reads incoming PktObjectUpdate from clients (legacy stock-SF
     pre-multiplayer-fix path) and applies to its NSOs via
     ApplyClientObjectUpdate, but with mHasControl=false on clients those
     packets shouldn't arrive anymore.
+  Open issue: see P0-11 (destruction race) and P0-13 (first-snapshot gap)
+    in BUGS_BACKLOG.md.
+
+LEVEL OBJECTS (GhostPlatform, MoveAlongPathUsingForce, PillarHandler,
+    PlayMoveAnimations — anything that subclasses MapInfoSyncableBase)
+  These are NOT NetworkSyncableObjects. They have an entirely separate
+    sync system in stock SF:
+    1. Awake registers each object in a Dictionary<Vector2, MapInfoSyncableBase>
+       keyed by world-space (position.y, position.z). Bit-exact float Equals.
+    2. Server's Update calls TickSyncPos every 1/5s, fires SyncMapData
+       which packs [f32 startPos.x][f32 startPos.y][bytes data] and broadcasts
+       via MapInfoSync (msgType 33, channel 0).
+    3. Client's OnMapDataRecieved reads the Vector2 + does dictionary lookup;
+       only if the key matches exactly does it call SetData on the object.
+  Source of truth: ORACLE (the only one with m_NetworkControl=true).
+  Wire: oracle's host-side SyncMapData → SendBroadcastPrefix → forward as
+    v25 msgType 33 on channel 0 → client's OnMapDataRecieved.
+  Open issue: see P0-12 in BUGS_BACKLOG.md — float32 ULP mismatch in the
+    Vector2 key causes silent lookup failures, leaving clients with frozen
+    initial state for affected platforms.
 
 NSO DESTRUCTION (ice break, chain link snap, crate shatter)
   Source of truth: whichever side detected the collision.
@@ -292,11 +315,17 @@ In-process sharding (one SF.exe, multiple match scenes) is designed in [`phase6/
 
 ## Known tradeoffs (current)
 
-- **Box-push feels laggy** on each client (~RTT) because we removed the client-side NSO patches. Pushing a box waits for the server's broadcast round-trip before it visually moves. Server authority in exchange. Phase 6.18 will add client-side prediction on local push.
+- **Box-push has instant local feedback** (commit `6875908`) thanks to the hybrid NSO patch: clients have dynamic NSOs (local push works immediately) but `mHasControl=false` so they don't broadcast — oracle stays sole authority for canonical position. Trade-off: introduces P0-11 (destruction race) which is open.
 - **Map-preset weapons spawn but per-map weapon allow-lists don't** — every map uses the global random weapon set. Phase 6.8 partial; full per-map allow-list awaits more research into SF's per-map config.
 - **Workshop maps** not loaded at runtime (only the 123 pre-dumped Landfall scenes). Phase 6.16+.
 - **Projectile hit registration** not server-side yet — clients still raycast their own bullets and emit PktPlayerTookDamage, which server validates by range. Phase 6.17 v0.2.
+- **`GhostPlatform` / `MapInfoSyncableBase` objects sync via stock SF's fragile Vector2-keyed dictionary path** — see P0-12. Not yet folded into our v26 snapshot.
 - **Anticheat is observation-only by default** — flip via `SF_ANTICHEAT_ENFORCE=1` once healthy traffic rates are dialled in.
+
+## Deep-dive references
+
+- [`AUDIT_2026-05-23.md`](AUDIT_2026-05-23.md) — full end-of-session audit covering destruction race, MapInfoSyncableBase precision, channel-routing false alarms, and first-snapshot-gap.
+- [`BUGS_BACKLOG.md`](BUGS_BACKLOG.md) — every bug we've hit with root cause + fix or open status.
 
 ## Recent critical bug history (with fixes)
 

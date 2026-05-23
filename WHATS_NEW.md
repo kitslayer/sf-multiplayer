@@ -1,6 +1,24 @@
 # What's new — 2026-05-23 session
 
-**60+ commits** landed in one day. Running tally so visitors can scan the deltas without scrolling git log. See [`notes/ARCHITECTURE.md`](notes/ARCHITECTURE.md) for the system overview, [`notes/PROTOCOL.md`](notes/PROTOCOL.md) for the wire-format spec, [`notes/BUGS_BACKLOG.md`](notes/BUGS_BACKLOG.md) for the bug incident log.
+**60+ commits** landed in one day. Running tally so visitors can scan the deltas without scrolling git log. See [`notes/ARCHITECTURE.md`](notes/ARCHITECTURE.md) for the system overview, [`notes/PROTOCOL.md`](notes/PROTOCOL.md) for the wire-format spec, [`notes/BUGS_BACKLOG.md`](notes/BUGS_BACKLOG.md) for the bug incident log, [`notes/AUDIT_2026-05-23.md`](notes/AUDIT_2026-05-23.md) for the end-of-session deep audit.
+
+## End-of-session audit (2026-05-23 evening)
+
+Three open issues identified during a research-only pass — see [`notes/AUDIT_2026-05-23.md`](notes/AUDIT_2026-05-23.md) for full evidence:
+
+- **P0-11** (destruction race) — the hybrid dynamic-NSO client patch in commit `6875908` interacts badly with the server-originated destruction filter; legitimate server-side breaks get dropped, producing "ghost boxes" on clients.
+- **P0-12** (`GhostPlatform` Vector2-key precision) — stock SF's `MapInfoSyncableBase` sync uses bit-exact float compare on world-space positions to look up platform objects. Float32 ULP mismatches between server and clients silently drop platform state updates.
+- **P0-13** (first-snapshot gap) — our v26 snapshot only includes NSOs whose position recently changed; a late-joining client sees stale positions for at-rest boxes until something pushes them again.
+
+Plus confirmed-correct: channel routing is right (false alarm flags now cross-verified against `P2PPackageHandler.GetChannelForMsgType` ground truth) and chains genuinely work fine.
+
+## Round-end delay trimmed (commit `f084df6`)
+
+User reported kills "take longer than usual to stop the match" — traced to two artificial waits in the death chain: 2.5s before MapChange + 3.0s before StartMatch = 5.5s total. Stock SF fires `ChangeMap` instantly from `GameManager.KillPlayer` when `playersAlive ≤ 1`. Trimmed to 0.5s + 2.0s (env-tunable via `SF_ROUND_END_DELAY` and `SF_NEXT_MATCH_DELAY`). New default: 2.5s total — less than half what it was.
+
+## `/tickrate` chat command + 60Hz default (commit `6875908`)
+
+Server's physics rate is now configurable live via `/tickrate N` chat command (range 20–240). Default raised from Unity's stock 50Hz to 60Hz on both server and client. SF's `Movement.cs` scales forces by `Time.deltaTime` (which equals `fixedDeltaTime` inside `FixedUpdate`), so per-second impulse is preserved across tickrate changes — safe to change live. Client FPS is fully independent of server tickrate (physics is fixed-step, snapshot broadcast is wall-clock-timed at 30Hz, input processing is packet-driven).
 
 ## End-state goal (confirmed 2026-05-23)
 

@@ -17,6 +17,11 @@ Live server end-to-end. Steam Stick Fight (Windows or Linux/Proton) connects to 
 - Server-side projectile sim is observability-only (v0.1) — clients still run their own raycasts for visuals; server-side hit registration (v0.2) is the next step
 - Per-map weapon allow-lists still ignored beyond what SF natively does — every map gets random-from-global, plus pre-placed weapons from `CheckForGroundWeapons`
 - Workshop maps not supported at runtime (just the 123 pre-dumped Landfall scenes)
+- **P0-11**: destruction race from the hybrid dynamic-NSO patch (server-originated destruction filter is too coarse). See [AUDIT_2026-05-23.md](notes/AUDIT_2026-05-23.md).
+- **P0-12**: `GhostPlatform` Vector2-key dictionary precision can silently drop platform state on clients.
+- **P0-13**: late-joining clients see stale positions for at-rest NSOs until something pushes them again.
+- **P0-14**: `MoveAlongPathUsingForce` and `PillarHandler` drift across clients because every client integrates platform physics locally and only abstract state is sync'd. **High severity** on maps with moving platforms.
+- **P0-15**: ice randomly breaks during snapshot-lerp reconciliation because swept lerp motion can fire `OnCollisionEnter` with high `relativeVelocity` → crosses force threshold → broadcasts a destruction.
 
 ## End-state goal — CONFIRMED 2026-05-23
 
