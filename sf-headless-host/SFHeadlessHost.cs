@@ -1866,8 +1866,11 @@ namespace SFHeadlessHost
                 // signal: client.SyncClientHealth applies the damage, sees
                 // damage==666.666, sets health=0, calls Die(). Without the echo
                 // back to the sender, void/lava damage never kills them.
-                // PlayerWonWithRicochet similarly broadcasts to all.
                 case PktPlayerTookDamage:
+                    if (!ValidateDamagePacket(cli, data, bodyOffset, bodyLen)) break;
+                    RelayBodyToAll(msgType, data, bodyOffset, bodyLen, channel);
+                    break;
+                // PlayerWonWithRicochet has no abuse vector worth validating yet.
                 case PktPlayerWonWithRicochet:
                     RelayBodyToAll(msgType, data, bodyOffset, bodyLen, channel);
                     break;
@@ -1933,6 +1936,42 @@ namespace SFHeadlessHost
             {
                 Log.LogWarning($"[SF] dispatch threw on msgType={msgType} from={from}: {ex.Message}");
             }
+        }
+
+        // Phase 6.16 v0.1 — basic damage validation (no rewind yet).
+        // Body shape: byte attackerIdx, f32 damage, bool playParticles, ...
+        // The full rewind-based authority is designed in
+        // notes/phase6/13-rewind-buffer.md. For now we just reject obvious
+        // anomalies so a malicious client can't one-shot people with
+        // arbitrary damage values.
+        private uint _damagePacketsDropped;
+        private bool ValidateDamagePacket(SfClient sender, byte[] data, int off, int len)
+        {
+            if (len < 5) return false;
+            byte attackerIdx = data[off];
+            float dmg = BitConverter.ToSingle(data, off + 1);
+            // Magnitude check — SF's killing-blow marker is 666.666; anything
+            // above 1000 is clearly out of band. Negative damage is healing
+            // and stock SF doesn't use it.
+            if (float.IsNaN(dmg) || float.IsInfinity(dmg) || dmg < 0f || dmg > 1000f)
+            {
+                _damagePacketsDropped++;
+                Log.LogWarning($"[anticheat damage] Reject damage={dmg} from slot={sender.Slot} (attacker idx={attackerIdx}). Dropped #{_damagePacketsDropped}");
+                return false;
+            }
+            // Attacker slot bound check.
+            if (attackerIdx > 3 && attackerIdx != 255)  // 255 = environment kill (lava/void)
+            {
+                _damagePacketsDropped++;
+                Log.LogWarning($"[anticheat damage] Reject — attacker idx {attackerIdx} out of range. Dropped #{_damagePacketsDropped}");
+                return false;
+            }
+            // Future (Phase 6.14.5 with rewind buffer): also validate
+            //   - attacker is alive at acked tick
+            //   - victim is alive at acked tick
+            //   - attacker had the claimed weapon at acked tick
+            //   - distance(attacker, victim) <= max-reach(weapon)
+            return true;
         }
 
         // Phase 6.15 — server-emitted chat. Used for command responses.
