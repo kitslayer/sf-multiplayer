@@ -1113,27 +1113,40 @@ namespace SFHeadlessHost
                 var nsoType = AccessTools.TypeByName("NetworkSyncableObject");
                 if ((object)nsoType == null) { Log.LogWarning("[CLIENT] NetworkSyncableObject type not found."); return; }
 
-                // Server-authority architecture: do NOT patch client-side NSO
-                // behavior. Stock SF makes non-host NSOs kinematic + sets
-                // mHasControl=false, so they don't run local physics and
-                // don't broadcast. They receive ObjectUpdate from the host
-                // (our oracle) and apply incoming positions.
+                // Hybrid client-side NSO behavior: dynamic rigidbodies (so
+                // pushing a box has instant local feedback — no RTT wait
+                // for server broadcast) BUT mHasControl=false (so we don't
+                // broadcast — oracle remains the sole authority for the
+                // canonical position).
                 //
-                // Previously we forced mHasControl=true + skipped
-                // DisableAllRigidBodies on every client. With multiple
-                // clients connected, EVERY client claimed authority over
-                // every NSO — they fought each other (each broadcasting
-                // their own physics result, each running local destruction-
-                // collision logic) → boxes desync'd between clients and
-                // randomly vanished from spurious local destruction events.
+                // Why this combination:
+                //   - Kinematic + mHasControl=false (pure server authority):
+                //     boxes don't move when you push them locally → laggy
+                //     feel as you wait for server snapshot to update
+                //   - Dynamic + mHasControl=true (old shim): every client
+                //     broadcast its own physics → cross-client position
+                //     fight + random destruction events
+                //   - Dynamic + mHasControl=false (THIS):
+                //     local push has instant feedback (dynamic body responds
+                //     to collision); no broadcast means no cross-client fight;
+                //     server's NSO.TickSyncPos / v26 snapshot still drive the
+                //     authoritative position, which the kinematic-aware lerp
+                //     in SFClientRecon reconciles toward.
                 //
-                // Pure server authority means: oracle's NSOs are dynamic +
-                // mHasControl=true, oracle's ghost rig sweeps physically
-                // push boxes, oracle's NSO.TickSyncPos broadcasts positions,
-                // clients receive + apply. The cost is local-push latency
-                // (~RTT to feel a box move) but cross-client consistency is
-                // perfect because only one source of truth exists.
-                Log.LogInfo("[CLIENT] No client NSO patches — pure server-authority for NSOs.");
+                // Patch 1: skip DisableAllRigidBodies so client NSOs stay dynamic.
+                var dis = AccessTools.Method(nsoType, "DisableAllRigidBodies");
+                if ((object)dis != null)
+                {
+                    harmony.Patch(dis, prefix: new HarmonyMethod(AccessTools.Method(typeof(Plugin), nameof(SkipPrefix))));
+                    Log.LogInfo("[CLIENT] Patched NetworkSyncableObject.DisableAllRigidBodies (skip — local NSOs stay dynamic for instant push feedback).");
+                }
+                else Log.LogWarning("[CLIENT] DisableAllRigidBodies method not found.");
+
+                // NO Patch 2 — mHasControl stays false (stock non-host).
+                // Means client doesn't broadcast NSO updates. Oracle is sole
+                // authority on canonical position; local dynamic physics is
+                // only for the user's own instant feedback.
+                Log.LogInfo("[CLIENT] Client-mode shim installed (dynamic NSOs, no broadcast).");
             }
             catch (Exception e)
             {
@@ -2124,8 +2137,36 @@ namespace SFHeadlessHost
                     case "/lobbies":
                         SendChatToPlayer(sender, ListOtherLobbiesFromRegistry());
                         break;
+                    case "/tickrate":
+                    case "/tick":
+                    {
+                        string arg = (space < 0 ? "" : text.Substring(space + 1).Trim());
+                        if (string.IsNullOrEmpty(arg))
+                        {
+                            float fd = Time.fixedDeltaTime;
+                            int hz = (fd > 0f) ? (int)System.Math.Round(1.0 / fd) : 0;
+                            SendChatToPlayer(sender, $"Server physics tickrate: {hz}Hz (fixedDeltaTime={fd:0.0000}s). Snapshot broadcast: 30Hz.");
+                        }
+                        else
+                        {
+                            int hz;
+                            if (!int.TryParse(arg, out hz) || hz < 20 || hz > 240)
+                            {
+                                SendChatToPlayer(sender, "Usage: /tickrate <20-240>. Default 50.");
+                            }
+                            else
+                            {
+                                float newFd = 1.0f / hz;
+                                float oldFd = Time.fixedDeltaTime;
+                                Time.fixedDeltaTime = newFd;
+                                Log.LogInfo($"[chat] /tickrate {hz}Hz — Time.fixedDeltaTime: {oldFd:0.0000} → {newFd:0.0000}");
+                                SendChatToPlayer(sender, $"Server physics tickrate set to {hz}Hz. (was {(int)System.Math.Round(1.0/oldFd)}Hz). Snapshot broadcast still 30Hz — client FPS is independent.");
+                            }
+                        }
+                        break;
+                    }
                     case "/help":
-                        SendChatToPlayer(sender, "Commands: /code /ping /start /restart /next /players /lobbies /version /help");
+                        SendChatToPlayer(sender, "Commands: /code /ping /start /restart /next /players /lobbies /tickrate /version /help");
                         break;
                     default:
                         SendChatToPlayer(sender, "Unknown command. Type /help");
@@ -4389,6 +4430,15 @@ namespace SFHeadlessHost
             {
                 Log.LogError($"SF server bind on {BindPort} threw: {e}");
                 return;
+            }
+            // Default tickrate: 60Hz on both server and client (was Unity's
+            // stock 50Hz). Client plugin sets the same in SFClientRecon.Awake.
+            // Operator can change live with /tickrate N.
+            Time.fixedDeltaTime = 1f / 60f;
+            {
+                float fd = Time.fixedDeltaTime;
+                int hz = (fd > 0f) ? (int)System.Math.Round(1.0 / fd) : 0;
+                Log.LogInfo($"Server physics: {hz}Hz (Time.fixedDeltaTime={fd:0.0000}s). Snapshot broadcast: 30Hz. Client FPS is independent.");
             }
             Log.LogInfo($"=== HEADLESS HOST READY on port {BindPort} ===");
         }

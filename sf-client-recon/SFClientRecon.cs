@@ -113,6 +113,14 @@ namespace SFClientRecon
             QualitySettings.vSyncCount = 0;
             Application.targetFrameRate = -1;
 
+            // Default physics tickrate: 60Hz on both client and server. SF's
+            // stock default is 50Hz; bumping to 60 makes local prediction
+            // match the per-tick step the server runs at (also 60 by default
+            // in our plugin), so reconciliation has less per-tick error to
+            // correct. Per-second force is preserved because Movement.cs
+            // scales by Time.deltaTime.
+            Time.fixedDeltaTime = 1f / 60f;
+
             // Resolve listener port — env var override for multi-instance testing.
             _listenPort = V26_DEFAULT_PORT;
             var envPort = Environment.GetEnvironmentVariable("SFCLIENTRECON_PORT");

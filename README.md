@@ -155,9 +155,9 @@ Issues and PRs welcome.
 
 ## Credits
 
+- **ALKA** ([@AlkaPrime12](https://github.com/AlkaPrime12)) — parallel work on [Stickfight-TestingMultiplayer](https://github.com/AlkaPrime12/Stickfight-TestingMultiplayer). Independent SF dedicated-server effort with overlapping goals; we've absorbed ideas and bug-fix patterns from his project. Mutual benefit.
 - **JoshuaDoes** ([@JoshuaDoes](https://github.com/JoshuaDoes)) — original [StickFightDev/StickFightDedicatedSrv](https://github.com/StickFightDev/StickFightDedicatedSrv) (dormant since July 2022). This repo started as a fork; the v25 relay + lobby + matchmaking core in [`legacy/StickFightDedicatedSrv/`](legacy/StickFightDedicatedSrv/) is from that project.
 - **Landfall Games** — for making Stick Fight in the first place. This is an unofficial community project not affiliated with or endorsed by Landfall.
-- **The SF competitive Discord** — for the ask + the testing.
 
 ## License
 
