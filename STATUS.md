@@ -58,10 +58,44 @@ Updated continuously by Claude as work progresses. Latest commit at top. Check t
 - [x] Install required apt deps on .115 (i386 libs + steam-installer + xvfb)
 - [x] Validate oracle boots cleanly on .115 (port bound, plugin log streams, UDP ping responds)
 - [x] Document `notes/DEPLOY.md` with apt deps + xvfb requirement
-- [ ] Commit + push xvfb fix + STATUS update
-- [ ] Test the lobby browser HTTP endpoint on .115
+- [x] Commit + push xvfb fix + STATUS update (commit `5b91159`)
+- [x] Test the lobby browser HTTP endpoint on .115 (running on :8080, `/healthz` + `/lobbies` both responding)
 - [ ] (optional) Document `install-sf-client.sh` usage in DEPLOY.md
 - [ ] (optional) Make `server-browser.html` discoverable via README
+
+## What you can do now
+
+Open `deploy/server-browser.html` in any browser (save it locally first). Enter:
+```
+http://192.168.1.115:8080/lobbies
+```
+and click "refresh". You'll see the MAIN lobby on .115. Click "copy linux" or "copy windows" to grab the launch options.
+
+Steam launch options for your Stick Fight (paste in Steam → Properties → Launch Options):
+```
+WINEDLLOVERRIDES="winhttp=n,b" %command% -address 192.168.1.115 -port 1337
+```
+(Or for Windows clients, drop the WINEDLLOVERRIDES part.)
+
+Then click Play. You'll connect to the .115 oracle.
+
+## Resource use measured on .115 (idle, no clients)
+
+```
+xvfb-run         2 MB RSS
+Xvfb            12 MB RSS
+wineserver      16 MB RSS, ~9% CPU
+StickFight.exe 424 MB RSS, ~59% CPU
+```
+
+Total ~450 MB RAM + ~70% of one core when idle. With players, expect ~500MB + ~80%.
+
+## .115 hardening still TODO
+
+- [ ] systemctl enable + auto-start on reboot (currently only `start`ed; needs `enable` so it survives `sudo reboot`). The unit file has WantedBy=multi-user.target which `enable` would wire up.
+- [ ] Open UDP port 1337 in the host firewall (LAN already reachable; for WAN access, may need NAT forwarding on the router)
+- [ ] Open TCP port 8080 same way (if exposing the lobby browser publicly — probably DON'T want this)
+- [ ] Log rotation on /tmp/sf-oracle-unity-11337.log (Unity log floods over time — see CRASH_INVESTIGATION about the 6.7M-line incident)
 
 ## Known open issues (carried from earlier)
 
