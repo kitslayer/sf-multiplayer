@@ -1631,6 +1631,8 @@ namespace SFHeadlessHost
             // this slot. Phase 6.12.2 will stamp this into outgoing snapshots
             // so the client can do reconciliation replay.
             public uint LastInputSeq;
+            // Phase 6.15.1 — has the server-emitted welcome chat been sent yet?
+            public bool SentWelcome;
         }
         private readonly Dictionary<string, SfClient> _sfClients = new Dictionary<string, SfClient>();
         private float _lastStateEmit;
@@ -2538,6 +2540,16 @@ namespace SFHeadlessHost
             {
                 _autoStartAt = Time.realtimeSinceStartup + 4.0f;
                 Log.LogInfo($"[SF] Auto-match-start scheduled in 4s.");
+            }
+
+            // Phase 6.15.1 — welcome message via chat. Sent once per spawn so
+            // the player knows the server's identity + commands available.
+            // ALKA's sendJoinHelpMessages does the same on the Go server side.
+            if (!cli.SentWelcome)
+            {
+                cli.SentWelcome = true;
+                string code = Environment.GetEnvironmentVariable("SF_LOBBY_CODE") ?? "?";
+                SendChatToPlayer(cli, $"Welcome to lobby {code}. Type /help for commands.");
             }
         }
 

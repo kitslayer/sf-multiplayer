@@ -31,8 +31,21 @@ Roughly 16 commits landed in one day. This file's a running tally so visitors an
 - **Phase 6.8 — Map-preset weapons broadcast**
   `CheckForGroundWeapons` added to `InvokeMultiplayerManagerInitChain`. Map-placed `WeaponPickUp` prefabs now broadcast via `GroundWeaponsInit` (msgType 31) on each scene load — clients see weapons at the level's designed positions.
 
-- **Phase 6.15 v1 — Chat commands** (`/code` `/ping` `/start` `/help`)
-  Body format confirmed from decompile (raw UTF-8). Server parses `/`-prefixed `PktPlayerTalked`, emits responses back via `SendChatToPlayer` (PktPlayerTalked with `steamID=0`, recipient's owner channel). `/code` reads from `SF_LOBBY_CODE` env var which `launch-lobby.sh` now sets. `/options`, `/join`, `/newlobby` deferred to Phase 6.13 v2 in-process sharding.
+- **Phase 6.15 v1 — Chat commands** (`/code` `/ping` `/start` `/players` `/lobbies` `/version` `/help`)
+  Body format confirmed from decompile (raw UTF-8). Server parses `/`-prefixed `PktPlayerTalked`, emits responses back via `SendChatToPlayer` (PktPlayerTalked with `steamID=0`, recipient's owner channel). `/code` reads `SF_LOBBY_CODE`; `/lobbies` reads `/tmp/sf-lobbies/*.conf`. `/options`, `/join`, `/newlobby` deferred to Phase 6.13 v2 in-process sharding.
+
+- **Phase 6.15.1 — Welcome chat on spawn**
+  Server emits "Welcome to lobby {code}. Type /help for commands." once per SfClient when they first hit `ClientRequestingToSpawn`. Mirrors ALKA's `sendJoinHelpMessages` UX.
+
+- **Phase 6.16 v0.1 — Damage validation**
+  Reject damage > 1000 / negative / NaN / Inf / attacker idx > 3 (except 255 = environment). First defensive floor; full rewind-buffer authority gated on Phase 6.14.5.
+
+- **Phase 6.12.2 prep — `lastInputSeq` in snapshot**
+  Wire format v26.2 bump: each player entry now 17 bytes (was 13). Server includes its last-acked `PktPlayerInput.sequenceNum` per slot so client can drive input replay rollback when it lands.
+
+- **`v26.2` and forward-only protocol**: snapshot entry size changed; both sides need matched builds.
+
+- **Anticheat enforce flag**: `SF_ANTICHEAT_ENFORCE=1` env var promotes the observer to drop packets when rate thresholds cross. Default off so legit traffic bursts aren't stomped before tuning.
 
 ## Bug fixes (most absorbed from ALKA's [BUGS_BACKLOG](https://github.com/AlkaPrime12/Stickfight-TestingMultiplayer/blob/main/docs/BUGS_BACKLOG.md))
 
