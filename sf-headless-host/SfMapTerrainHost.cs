@@ -86,16 +86,22 @@ namespace SFHeadlessHost
                     // Known concrete subclasses in stock SF: GhostPlatform,
                     // MoveAlongPathUsingForce, PillarHandler. Discovery loop catches any
                     // future subclasses too.
+                    // IMPORTANT: do NOT use `==` between System.Type instances — Mono 2.0
+                    // doesn't have System.Type.op_Equality and C# 9 emits a call to it.
+                    // Same landmine family as Environment.CurrentManagedThreadId.
+                    // Use ReferenceEquals (which compiles to a direct cmp opcode).
                     foreach (var asm in System.AppDomain.CurrentDomain.GetAssemblies())
                     {
                         System.Type[] types;
                         try { types = asm.GetTypes(); } catch { continue; }
                         foreach (var t in types)
                         {
-                            if (t == mapBase || !mapBase.IsAssignableFrom(t)) continue;
+                            if (ReferenceEquals(t, mapBase)) continue;
+                            if (!mapBase.IsAssignableFrom(t)) continue;
                             var subAwake = AccessTools.Method(t, "Awake");
-                            if ((object)subAwake != null && subAwake.DeclaringType == t)
-                                awakeMethods.Add(subAwake);
+                            if ((object)subAwake == null) continue;
+                            if (!ReferenceEquals(subAwake.DeclaringType, t)) continue;
+                            awakeMethods.Add(subAwake);
                         }
                     }
 
