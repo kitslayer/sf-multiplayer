@@ -14,6 +14,7 @@ Newcomer to the project? Read these in order:
 6. [`BUGS_BACKLOG.md`](BUGS_BACKLOG.md) — incident log of every non-trivial bug + root cause + fix or open status
 7. [`AUDIT_2026-05-23.md`](AUDIT_2026-05-23.md) — end-of-session deep audit covering open P0 bugs (destruction race, MapInfoSync precision, late-join gap, moving-platform drift, lerp-collision shatter)
 8. [`bug-investigations/`](bug-investigations/) — deep-dive root-cause analyses with evidence + fix sketches (one file per investigation)
+9. [`SF_VANILLA_INSPECTION.md`](SF_VANILLA_INSPECTION.md) — Unity Explorer setup + how to read vanilla SF runtime state for ground-truth comparison
 
 ## Operating manuals
 
