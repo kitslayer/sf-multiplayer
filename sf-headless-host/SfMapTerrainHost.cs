@@ -655,6 +655,14 @@ namespace SFHeadlessHost
                 SuppressScheduledOracleCountDown("PostMapLoad-grace");
                 LogMapTerrainProfile(scene);
                 ScheduleOraclePreCombatStart(scene);
+                // Mirror MarkSceneNsosMovedAfterSettle so NSO keepalive dicts
+                // get repopulated even when OnAnySceneLoadedRunSettle early-returned
+                // (e.g., stale buildIndex gate triggered, force-complete-via-timeout
+                // path). Without this, Bug B's NSO snapshot collapse can still
+                // happen for scenes loaded via the force-complete fallback.
+                // Companion to commit a70c5b3 (keepalive dict preservation).
+                try { MarkSceneNsosMovedAfterSettle(); }
+                catch (Exception e) { Log.LogWarning($"[v26.6] PostMapLoad MarkSceneNsos: {e.Message}"); }
             }
             finally
             {
