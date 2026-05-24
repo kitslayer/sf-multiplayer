@@ -183,7 +183,7 @@ Verify on VPS log: `mapSync=N`, `nsos>0` after Desert3 load, `[BOXES] Reset fall
 
 ## Client patched Assembly-CSharp (imported reference)
 
-UDP mod DLLs, hashes, decompiled networking sources, and install script from the CustomServers worktree live in [`client-mod/`](client-mod/). See [`client-mod/ASSEMBLY_VS_SF_MULTIPLAYER.md`](client-mod/ASSEMBLY_VS_SF_MULTIPLAYER.md) for what applies to the Miles oracle stack vs the old Go server.
+UDP mod DLLs, hashes, and decompiled networking sources from the CustomServers worktree are referenced in the design docs at [`notes/`](notes/) but the source artifacts are NOT yet in this repo (`client-mod/` directory was referenced but never committed). When/if they're imported, document the difference between that codepath and the Miles oracle stack vs the old Go server in a dedicated file.
 
 ## Where to start reading
 
