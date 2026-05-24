@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.IO;
 using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
@@ -17,8 +18,22 @@ namespace SFHeadlessHost
         private byte[] _cachedGroundWeaponsBody;
         private int _groundWeaponsEntryCount;
         private float _groundWeaponsRetryAt = -1f;
+        private int _groundWeaponsRetryPass;
         private float _mapSyncDiagNextAt = -1f;
         private int _mapSyncObjectsRegistered;
+        private float _mapSyncRetryAt = -1f;
+        private int _mapSyncRetryPass;
+        private const float MapSyncRetryIntervalSec = 4f;
+        private const int MapSyncRetryMaxPasses = 4;
+        private const float MapInfoBootstrapRetryIntervalSec = 4f;
+        private const int MapInfoBootstrapMaxPasses = 3;
+        /// <summary>Seconds after map load before weapons, countdown, MapInfo sync, sky spawns.</summary>
+        internal static float OraclePreCombatGraceSec = 3f;
+        private float _oraclePreCombatReadyAt = -1f;
+        private int _oraclePreCombatSceneIndex = -1;
+        private float _mapInfoBootstrapAt = -1f;
+        private int _mapInfoBootstrapPass;
+        private int _mapInfoLastBroadcastCount;
         private Type _mapSyncBaseType;
         private FieldInfo _mapSyncStartPosField;
         private MethodInfo _mapGetDataMethod;
@@ -26,11 +41,15 @@ namespace SFHeadlessHost
         private FieldInfo _mapNetworkControlField;
         private float _skyWeaponTickAt = -1f;
         private int _skyWeaponSpawnCount;
+        /// <summary>Realtime sky-weapon schedule — do not use randomWeaponCounter (stock GM.Update resets it).</summary>
+        private float _oracleNextSkyWeaponAt = -1f;
+        private const float OracleFirstSkyWeaponDelay = 2f;
+        private const float OracleSkyWeaponIntervalMin = 5f;
+        private const float OracleSkyWeaponIntervalMax = 8f;
         private static int _mapAwakeRegisterCount;
         private bool _oracleMapLoadInProgress;
         private float _oracleMapLoadStartedAt = -1f;
         private float _oracleMapLoadForceCompleteAt = -1f;
-        private bool _roundAdvanceQueuedWhileLoading;
         private const float OracleMapLoadForceCompleteSec = 8f;
 
         private struct MapStateSnap
@@ -55,18 +74,53 @@ namespace SFHeadlessHost
                         Log.LogInfo("[v26.6] Patched MapInfoSyncableBase.Awake (oracle network control + dict register).");
                     }
                 }
+                var mmType = AccessTools.TypeByName("MultiplayerManager");
+                if (RefOk(mmType))
+                {
+                    var onMapInfo = AccessTools.Method(mmType, "OnMapInfoRecieved");
+                    if (RefOk(onMapInfo))
+                    {
+                        harmony.Patch(onMapInfo, prefix: new HarmonyMethod(
+                            AccessTools.Method(typeof(Plugin), nameof(OnMapInfoRecievedPrefix))));
+                        Log.LogInfo("[v0.3.3] Patched MultiplayerManager.OnMapInfoRecieved (fan-out to all MapInfoOnlineTag).");
+                    }
+                }
             }
             catch (Exception e) { Log.LogWarning($"[v26.6] map terrain patches: {e.Message}"); }
         }
 
-        internal static void MapInfoSyncableBaseAwakePostfix(object __instance)
+        /// <summary>Stock only delivers MapInfo to the first MapInfoOnlineTag — lava maps need every tag.</summary>
+        internal static bool OnMapInfoRecievedPrefix(byte[] data)
         {
-            if (!_batchModeHost || __instance == null) return;
+            if (data == null || data.Length < 1) return true;
             try
             {
+                var tagType = AccessTools.TypeByName("MapInfoOnlineTag");
+                if (!RefOk(tagType)) return true;
+                var tags = UnityEngine.Object.FindObjectsOfType(tagType);
+                if (tags == null || tags.Length == 0) return true;
+                foreach (var tag in tags)
+                {
+                    var comp = tag as Component;
+                    if (!RefOk(comp)) continue;
+                    comp.SendMessage("RecieveMapInfo", data, SendMessageOptions.DontRequireReceiver);
+                }
+                return false;
+            }
+            catch { return true; }
+        }
+
+        internal static void MapInfoSyncableBaseAwakePostfix(object __instance)
+        {
+            if (!_batchModeHost || ReferenceEquals(__instance, null)) return;
+            try
+            {
+                EnsureOracleP2PNetworkReady("map-sync-awake");
+                SetMapSyncNetworkControlGlobal(true);
                 var t = __instance.GetType();
-                var netF = AccessTools.Field(t, "m_NetworkControl");
-                if ((object)netF != null) netF.SetValue(__instance, true);
+                var mapBase = AccessTools.TypeByName("MapInfoSyncableBase");
+                var netF = RefOk(mapBase) ? AccessTools.Field(mapBase, "m_NetworkControl") : AccessTools.Field(t, "m_NetworkControl");
+                if (RefOk(netF)) netF.SetValue(netF.IsStatic ? null : __instance, true);
                 var startF = AccessTools.Field(t, "m_StartPos");
                 if ((object)startF == null) return;
                 Vector2 sp = (Vector2)startF.GetValue(__instance);
@@ -76,8 +130,69 @@ namespace SFHeadlessHost
                 if ((object)mm == null) return;
                 var add = AccessTools.Method(mm.GetType(), "AddMapDataObject");
                 if ((object)add == null) return;
-                add.Invoke(mm, new object[] { sp, __instance });
+                UpsertMapDataObject(mm, add, sp, __instance as Component);
                 _mapAwakeRegisterCount++;
+            }
+            catch { }
+        }
+
+        internal static void EnsureOracleP2PNetworkReady(string reason)
+        {
+            if (!_batchModeHost) return;
+            try
+            {
+                var p2pType = AccessTools.TypeByName("P2PPackageHandler");
+                if (!RefOk(p2pType)) return;
+                object p2p = null;
+                var inst = AccessTools.Property(p2pType, "Instance");
+                if (RefOk(inst)) p2p = inst.GetValue(null, null);
+                if (!RefOk(p2p)) p2p = UnityEngine.Object.FindObjectOfType(p2pType);
+                if (!RefOk(p2p)) return;
+                var f = AccessTools.Field(p2pType, "mHasSentOrReceived");
+                if (RefOk(f) && !(bool)f.GetValue(p2p))
+                {
+                    f.SetValue(p2p, true);
+                    Log.LogInfo($"[v0.3.3] P2P mHasSentOrReceived=true ({reason}).");
+                }
+            }
+            catch (Exception e) { Log.LogWarning($"[v0.3.3] EnsureOracleP2PNetworkReady: {e.Message}"); }
+        }
+
+        internal static void SetMapSyncNetworkControlGlobal(bool on)
+        {
+            try
+            {
+                var mapBase = AccessTools.TypeByName("MapInfoSyncableBase");
+                if (!RefOk(mapBase)) return;
+                var netF = AccessTools.Field(mapBase, "m_NetworkControl");
+                if (RefOk(netF)) netF.SetValue(null, on);
+            }
+            catch { }
+        }
+
+        private static void UpsertMapDataObject(object mm, MethodInfo add, Vector2 sp, Component comp)
+        {
+            if (!RefOk(mm) || !RefOk(add) || !RefOk(comp)) return;
+            try
+            {
+                var dictF = AccessTools.Field(mm.GetType(), "mMapDataObjectToSync");
+                if (RefOk(dictF))
+                {
+                    var dict = dictF.GetValue(mm);
+                    if (RefOk(dict))
+                    {
+                        var contains = dict.GetType().GetMethod("ContainsKey");
+                        var setItem = dict.GetType().GetMethod("set_Item");
+                        if (RefOk(contains) && RefOk(setItem))
+                        {
+                            bool has = (bool)contains.Invoke(dict, new object[] { sp });
+                            if (has) setItem.Invoke(dict, new object[] { sp, comp });
+                            else add.Invoke(mm, new object[] { sp, comp });
+                            return;
+                        }
+                    }
+                }
+                add.Invoke(mm, new object[] { sp, comp });
             }
             catch { }
         }
@@ -153,19 +268,31 @@ namespace SFHeadlessHost
                 if ((object)matchTimeF != null) matchTimeF.SetValue(gmInst, 0f);
                 var rwcField = AccessTools.Field(gmType, "randomWeaponCounter");
                 if ((object)rwcField != null) rwcField.SetValue(gmInst, 2.0f);
-                Log.LogInfo($"[P6.5] RearmOracleCombatLoop({reason}): inFight=true matchTime=0 randomWeaponCounter=2.0");
+                ScheduleNextSkyWeapon(OracleFirstSkyWeaponDelay);
+                Log.LogInfo($"[P6.5] RearmOracleCombatLoop({reason}): inFight=true nextSkyWeapon in {OracleFirstSkyWeaponDelay:0.0}s");
                 _skyWeaponTickAt = Time.realtimeSinceStartup + 1.5f;
             }
             catch (Exception e) { Log.LogWarning($"[P6.5] RearmOracleCombatLoop({reason}): {e.Message}"); }
         }
 
+        internal void ScheduleNextSkyWeapon(float delaySec)
+        {
+            _oracleNextSkyWeaponAt = Time.realtimeSinceStartup + Mathf.Max(0.5f, delaySec);
+        }
+
         /// <summary>
-        /// Headless oracle: GameManager.Update often stalls matchTime / randomWeaponCounter after
-        /// round advance (logs showed matchTime≈2.43 and rwc≈1.19 forever). Manually tick both.
+        /// Headless oracle: stock GameManager.Update resets randomWeaponCounter every frame
+        /// (logs: rwc stuck at 2.0, no sky spawns after round 2). Use our own realtime timer.
         /// </summary>
+        internal bool IsOraclePreCombatGraceActive()
+        {
+            return _oraclePreCombatReadyAt > 0f && Time.realtimeSinceStartup < _oraclePreCombatReadyAt;
+        }
+
         internal void TickOracleCombatTimers()
         {
             if (!_matchStarted || !_batchModeHost) return;
+            if (IsOraclePreCombatGraceActive()) return;
             try
             {
                 var gmType = AccessTools.TypeByName("GameManager");
@@ -188,19 +315,16 @@ namespace SFHeadlessHost
                     matchTimeF.SetValue(gmInst, mt + Time.deltaTime);
                 }
 
-                var rwcF = AccessTools.Field(gmType, "randomWeaponCounter");
-                if (!RefOk(rwcF)) return;
-                float rwc = (float)rwcF.GetValue(gmInst);
-                rwc -= Time.deltaTime;
-                if (rwc <= 0f)
-                {
-                    rwc = 0f;
-                    SpawnRandomWeaponPrefix(gmInst);
-                    _skyWeaponSpawnCount++;
-                    if (_skyWeaponSpawnCount <= 8 || _skyWeaponSpawnCount % 10 == 0)
-                        Log.LogInfo($"[P6.5] CombatTimer: sky spawn #{_skyWeaponSpawnCount}");
-                }
-                rwcF.SetValue(gmInst, rwc);
+                if (_oracleNextSkyWeaponAt < 0f)
+                    ScheduleNextSkyWeapon(OracleFirstSkyWeaponDelay);
+                float now = Time.realtimeSinceStartup;
+                if (now < _oracleNextSkyWeaponAt) return;
+
+                SpawnRandomWeaponPrefix(gmInst);
+                _skyWeaponSpawnCount++;
+                if (_skyWeaponSpawnCount <= 8 || _skyWeaponSpawnCount % 10 == 0)
+                    Log.LogInfo($"[P6.5] CombatTimer: sky spawn #{_skyWeaponSpawnCount} (next in {OracleSkyWeaponIntervalMin:0}-{OracleSkyWeaponIntervalMax:0}s)");
+                ScheduleNextSkyWeapon(UnityEngine.Random.Range(OracleSkyWeaponIntervalMin, OracleSkyWeaponIntervalMax));
             }
             catch (Exception e) { Log.LogWarning($"[P6.5] TickOracleCombatTimers: {e.Message}"); }
         }
@@ -211,45 +335,102 @@ namespace SFHeadlessHost
             TickOracleCombatTimers();
         }
 
-        private void EnsureMapSyncObjectsRegistered()
+        /// <summary>
+        /// Stock InitMapDataObjects() is empty — registration only happens in Awake.
+        /// Headless often misses Awake; scan the loaded map scene (incl. inactive) and push state.
+        /// </summary>
+        internal int EnsureMapSyncObjectsRegistered(Scene sceneOverride = default(Scene), bool useSceneOverride = false)
         {
+            int added = 0;
             try
             {
-                if ((object)_mapSyncBaseType == null)
-                {
-                    _mapSyncBaseType = AccessTools.TypeByName("MapInfoSyncableBase");
-                    _mapSyncStartPosField = (object)_mapSyncBaseType != null
-                        ? AccessTools.Field(_mapSyncBaseType, "m_StartPos") : null;
-                }
-                if ((object)_mapSyncBaseType == null) return;
+                EnsureMapReflection();
+                if (!RefOk(_mapSyncBaseType)) return 0;
                 var mm = GetMultiplayerManagerInstance();
-                if ((object)mm == null) return;
-                var add = AccessTools.Method(mm.GetType(), "AddMapDataObject");
-                if ((object)add == null) return;
-                var all = UnityEngine.Object.FindObjectsOfType(_mapSyncBaseType);
-                int added = 0;
+                if (!RefOk(mm)) return 0;
+                var mmType = mm.GetType();
+                var add = AccessTools.Method(mmType, "AddMapDataObject");
+                var syncMap = AccessTools.Method(mmType, "SyncMapData");
+                if (!RefOk(add)) return 0;
+
+                Scene scene = default(Scene);
+                bool haveScene = useSceneOverride && sceneOverride.isLoaded;
+                if (haveScene) scene = sceneOverride;
+                else if (TryFindLoadedSceneForCurrentMapIndex(out scene)) haveScene = true;
+
+                var seen = new HashSet<int>();
+                void RegisterOne(Component comp)
+                {
+                    if (!RefOk(comp) || !RefOk(comp.gameObject)) return;
+                    int id = comp.GetInstanceID();
+                    if (!seen.Add(id)) return;
+                    var t = comp.GetType();
+                    var netF = AccessTools.Field(t, "m_NetworkControl");
+                    if (RefOk(netF)) netF.SetValue(comp, true);
+                    var mb = comp as MonoBehaviour;
+                    if (RefOk(mb) && !mb.enabled) mb.enabled = true;
+                    Vector2 sp = ReadMapSyncStartPos(comp);
+                    var startF = AccessTools.Field(t, "m_StartPos");
+                    if (RefOk(startF)) startF.SetValue(comp, sp);
+                    UpsertMapDataObject(mm, add, sp, comp);
+                    added++;
+                    if (RefOk(syncMap))
+                    {
+                        try { syncMap.Invoke(mm, new object[] { comp }); } catch { }
+                    }
+                }
+
+                if (haveScene)
+                {
+                    foreach (var root in scene.GetRootGameObjects())
+                    {
+                        if (!RefOk(root)) continue;
+                        var comps = root.GetComponentsInChildren(_mapSyncBaseType, true);
+                        if (comps != null)
+                            foreach (var obj in comps)
+                                if (obj is Component c) RegisterOne(c);
+                    }
+                }
+
+                var all = Resources.FindObjectsOfTypeAll(_mapSyncBaseType);
                 if (all != null)
                 {
                     foreach (var obj in all)
                     {
-                        if (obj == null) continue;
-                        var startF = AccessTools.Field(obj.GetType(), "m_StartPos");
-                        var netF = AccessTools.Field(obj.GetType(), "m_NetworkControl");
-                        if ((object)netF != null) netF.SetValue(obj, true);
-                        Vector2 sp = (object)startF != null
-                            ? QuantizeMapSyncKey((Vector2)startF.GetValue(obj))
-                            : QuantizeMapSyncKey(new Vector2(
-                                (obj as Component).transform.position.y,
-                                (obj as Component).transform.position.z));
-                        if ((object)startF != null) startF.SetValue(obj, sp);
-                        add.Invoke(mm, new object[] { sp, obj });
-                        added++;
+                        var c = obj as Component;
+                        if (!RefOk(c)) continue;
+                        if (haveScene && c.gameObject.scene != scene) continue;
+                        RegisterOne(c);
                     }
                 }
+
                 _mapSyncObjectsRegistered = added;
-                Log.LogInfo($"[v26.6] EnsureMapSyncObjectsRegistered: {added} MapInfoSyncableBase (awake-registers={_mapAwakeRegisterCount})");
+                Log.LogInfo($"[v26.6] EnsureMapSyncObjectsRegistered: {added} in scene={(haveScene ? scene.name : "?")} buildIndex={(haveScene ? scene.buildIndex : -1)} awake-hits={_mapAwakeRegisterCount}");
             }
             catch (Exception e) { Log.LogWarning($"[v26.6] EnsureMapSync: {e.Message}"); }
+            return added;
+        }
+
+        internal void ScheduleMapSyncRetries()
+        {
+            _mapSyncRetryPass = 0;
+            _mapSyncRetryAt = Time.realtimeSinceStartup + 2f;
+        }
+
+        private void TickMapSyncRetry()
+        {
+            if (_mapSyncRetryAt < 0f) return;
+            if (Time.realtimeSinceStartup < _mapSyncRetryAt) return;
+            _mapSyncRetryAt = -1f;
+            Scene scene;
+            TryFindLoadedSceneForCurrentMapIndex(out scene);
+            int n = EnsureMapSyncObjectsRegistered(scene);
+            Log.LogInfo($"[v26.6] MapSync retry pass {_mapSyncRetryPass}: registered={n}");
+            _mapSyncRetryPass++;
+            if (_mapSyncRetryPass < MapSyncRetryMaxPasses && n == 0)
+                _mapSyncRetryAt = Time.realtimeSinceStartup + MapSyncRetryIntervalSec;
+            else if (_mapSyncRetryPass < MapSyncRetryMaxPasses)
+                _mapSyncRetryAt = Time.realtimeSinceStartup + MapSyncRetryIntervalSec;
         }
 
         private void EnsurePreSpawnedWeaponsRegistered()
@@ -257,22 +438,42 @@ namespace SFHeadlessHost
             try
             {
                 var mm = GetMultiplayerManagerInstance();
-                if ((object)mm == null) return;
+                if (!RefOk(mm)) return;
                 var wpType = AccessTools.TypeByName("WeaponPickUp");
-                if ((object)wpType == null) return;
+                if (!RefOk(wpType)) return;
                 var add = AccessTools.Method(mm.GetType(), "AddPreSpawnedWeapon");
-                if ((object)add == null) return;
-                var all = UnityEngine.Object.FindObjectsOfType(wpType);
+                if (!RefOk(add)) return;
                 int n = 0;
-                if (all == null) return;
-                foreach (var wp in all)
+                Scene scene;
+                if (TryFindLoadedSceneForCurrentMapIndex(out scene) && scene.isLoaded)
                 {
-                    var comp = wp as Component;
-                    if ((object)comp == null) continue;
-                    var p = comp.transform.position;
-                    var pos = new Vector2(p.y, p.z);
-                    add.Invoke(mm, new object[] { pos, wp });
-                    n++;
+                    foreach (var root in scene.GetRootGameObjects())
+                    {
+                        if (!RefOk(root)) continue;
+                        var all = root.GetComponentsInChildren(wpType, true);
+                        if (all == null) continue;
+                        foreach (var wp in all)
+                        {
+                            var comp = wp as Component;
+                            if (!RefOk(comp)) continue;
+                            var p = comp.transform.position;
+                            add.Invoke(mm, new object[] { new Vector2(p.y, p.z), wp });
+                            n++;
+                        }
+                    }
+                }
+                if (n == 0)
+                {
+                    var found = UnityEngine.Object.FindObjectsOfType(wpType);
+                    if (found != null)
+                        foreach (var wp in found)
+                        {
+                            var comp = wp as Component;
+                            if (!RefOk(comp)) continue;
+                            var p = comp.transform.position;
+                            add.Invoke(mm, new object[] { new Vector2(p.y, p.z), wp });
+                            n++;
+                        }
                 }
                 if (n > 0) Log.LogInfo($"[v26.6] EnsurePreSpawnedWeaponsRegistered: {n} WeaponPickUp");
             }
@@ -300,6 +501,70 @@ namespace SFHeadlessHost
             _cachedGroundWeaponsBody = (byte[])body.Clone();
             _groundWeaponsEntryCount = body[0] | (body[1] << 8);
             Log.LogInfo($"[P6.8] Cached GroundWeaponsInit count={_groundWeaponsEntryCount} bytes={body.Length}");
+        }
+
+        /// <summary>
+        /// Factory / conveyor maps: CheckForGroundWeapons may not hit SendBroadcast cache.
+        /// Build GroundWeaponsInit from mTempPreSpawnedWeapons and push to clients.
+        /// </summary>
+        internal void TryBuildAndBroadcastGroundWeapons(string reason)
+        {
+            try
+            {
+                if (_cachedGroundWeaponsBody != null && _cachedGroundWeaponsBody.Length >= 2
+                    && _groundWeaponsEntryCount > 0)
+                {
+                    BroadcastGroundWeaponsToAllClients();
+                    return;
+                }
+                var mm = GetMultiplayerManagerInstance();
+                if (!RefOk(mm)) return;
+                var mmType = mm.GetType();
+                var tempF = AccessTools.Field(mmType, "mTempPreSpawnedWeapons");
+                if (!RefOk(tempF)) return;
+                var temp = tempF.GetValue(mm) as IDictionary;
+                if (temp == null || temp.Count == 0)
+                {
+                    EnsurePreSpawnedWeaponsRegistered();
+                    temp = tempF.GetValue(mm) as IDictionary;
+                }
+                if (temp == null || temp.Count == 0)
+                {
+                    Log.LogInfo($"[P6.8] TryBuildGroundWeapons({reason}): no pre-spawned weapons in scene.");
+                    return;
+                }
+                int n = temp.Count;
+                byte[] body = new byte[2 + 12 * n];
+                int o = 0;
+                WriteU16LE(body, o, (ushort)n);
+                o += 2;
+                var getWid = AccessTools.Method(mmType, "GetNextWeaponSpawnID");
+                var getSid = AccessTools.Method(mmType, "GetNextSyncableObjectSpawnID", new[] { typeof(bool) });
+                foreach (DictionaryEntry entry in temp)
+                {
+                    Vector2 key = (Vector2)entry.Key;
+                    WriteF32LE(body, o, key.x); o += 4;
+                    WriteF32LE(body, o, key.y); o += 4;
+                    ushort wid = 0, sid = 0;
+                    if (RefOk(getWid)) wid = (ushort)(int)getWid.Invoke(mm, null);
+                    if (RefOk(getSid)) sid = (ushort)(int)getSid.Invoke(mm, new object[] { true });
+                    WriteU16LE(body, o, wid); o += 2;
+                    WriteU16LE(body, o, sid); o += 2;
+                }
+                CacheGroundWeaponsBroadcast(body);
+                BroadcastGroundWeaponsToAllClients();
+                Log.LogInfo($"[P6.8] TryBuildGroundWeapons({reason}): built+broadcast {n} entries.");
+            }
+            catch (Exception e) { Log.LogWarning($"[P6.8] TryBuildGroundWeapons({reason}): {e.Message}"); }
+        }
+
+        internal void FlushGroundWeaponsAfterCheck(string reason)
+        {
+            InvokeCheckForGroundWeapons(reason);
+            if (_cachedGroundWeaponsBody == null || _groundWeaponsEntryCount <= 0)
+                TryBuildAndBroadcastGroundWeapons(reason + "-fallback");
+            else
+                BroadcastGroundWeaponsToAllClients();
         }
 
         private void SendCachedGroundWeaponsToClient(SfClient cli)
@@ -341,20 +606,316 @@ namespace SFHeadlessHost
                 Log.LogInfo($"[v26.6] PostMapLoad init scene='{scene.name}' buildIndex={scene.buildIndex} matchScene={_currentSceneIndex}");
                 ClearMapDataObjectsOnOracle();
                 _mapAwakeRegisterCount = 0;
+                EnsureOracleP2PNetworkReady("PostMapLoad");
+                SetMapSyncNetworkControlGlobal(true);
+                HoldOracleOutOfFight("PostMapLoad-grace");
                 try { InvokeMultiplayerManagerInitChain(); } catch { }
-                EnsureMapSyncObjectsRegistered();
-                InvokeCheckForGroundWeapons("post-map-settle");
-                BroadcastGroundWeaponsToAllClients();
-                foreach (var kv in _sfClients)
-                    if (kv.Value.Spawned) SendCachedGroundWeaponsToClient(kv.Value);
-                _groundWeaponsRetryAt = Time.realtimeSinceStartup + 3f;
-                RearmOracleCombatLoop("PostMapLoad");
-                try { InvokeOracleStartCountDown(); } catch (Exception e) { Log.LogWarning($"[P6.5] PostMapLoad StartCountDown: {e.Message}"); }
+                EnsureMapSyncObjectsRegistered(scene, true);
+                ScheduleMapSyncRetries();
+                SuppressScheduledOracleCountDown("PostMapLoad-grace");
+                LogMapTerrainProfile(scene);
+                ScheduleOraclePreCombatStart(scene);
             }
             finally
             {
                 FinishOracleMapLoad("PostMapLoad");
             }
+        }
+
+        internal void ScheduleMapInfoBootstrapRetries()
+        {
+            _mapInfoBootstrapAt = Time.realtimeSinceStartup + MapInfoBootstrapRetryIntervalSec;
+        }
+
+        internal void ScheduleOraclePreCombatStart(Scene scene)
+        {
+            _oraclePreCombatSceneIndex = scene.buildIndex;
+            _oraclePreCombatReadyAt = Time.realtimeSinceStartup + OraclePreCombatGraceSec;
+            Log.LogInfo($"[v0.3.4] Pre-combat grace {OraclePreCombatGraceSec:0.0}s — no weapons/countdown/MapInfo until then (scene={scene.name} idx={scene.buildIndex}).");
+        }
+
+        internal void TickOraclePreCombatGrace()
+        {
+            if (_oraclePreCombatReadyAt < 0f) return;
+            if (Time.realtimeSinceStartup < _oraclePreCombatReadyAt) return;
+            _oraclePreCombatReadyAt = -1f;
+            Scene scene;
+            if (!TryFindLoadedSceneForCurrentMapIndex(out scene) || scene.buildIndex != _oraclePreCombatSceneIndex)
+            {
+                Log.LogWarning($"[v0.3.4] Pre-combat grace fired but scene mismatch (wanted idx={_oraclePreCombatSceneIndex}).");
+                if (TryFindLoadedSceneForCurrentMapIndex(out scene))
+                    RunOraclePreCombatStart(scene, "grace-fallback");
+                return;
+            }
+            RunOraclePreCombatStart(scene, "grace-complete");
+        }
+
+        /// <summary>After grace: weapons, synced map anims (lava/factory/xmas), then countdown/combat.</summary>
+        internal void RunOraclePreCombatStart(Scene scene, string reason)
+        {
+            if (!scene.isLoaded) return;
+            Log.LogInfo($"[v0.3.4] Pre-combat start ({reason}) scene='{scene.name}' idx={scene.buildIndex}");
+            EnsureMapSyncObjectsRegistered(scene, true);
+            FlushGroundWeaponsAfterCheck("pre-combat");
+            foreach (var kv in _sfClients)
+                if (kv.Value.Spawned) SendCachedGroundWeaponsToClient(kv.Value);
+            _groundWeaponsRetryAt = Time.realtimeSinceStartup + 5f;
+            _groundWeaponsRetryPass = 0;
+            SuppressScheduledOracleCountDown("pre-combat");
+            try { InvokeOracleStartCountDown(); } catch (Exception e) { Log.LogWarning($"[P6.5] Pre-combat StartCountDown: {e.Message}"); }
+            RearmOracleCombatLoop("pre-combat");
+            _mapInfoBootstrapPass = 0;
+            _mapInfoLastBroadcastCount = BootstrapOracleMapInfoBroadcast(scene, "pre-combat");
+            if (_mapInfoLastBroadcastCount == 0)
+                ScheduleMapInfoBootstrapRetries();
+            RestartSyncedCodeAnimationsInScene(scene);
+            try { InvokeOracleBossMapSetup(); } catch (Exception e) { Log.LogWarning($"[P6.5] Pre-combat boss setup: {e.Message}"); }
+        }
+
+        internal static void HoldOracleOutOfFight(string reason)
+        {
+            if (!_batchModeHost) return;
+            try
+            {
+                var gmType = AccessTools.TypeByName("GameManager");
+                if (!RefOk(gmType)) return;
+                object gmInst = null;
+                var ig = AccessTools.PropertyGetter(gmType, "Instance");
+                if (RefOk(ig)) gmInst = ig.Invoke(null, null);
+                if (!RefOk(gmInst)) gmInst = UnityEngine.Object.FindObjectOfType(gmType);
+                if (!RefOk(gmInst)) return;
+                var inFightF = AccessTools.Field(gmType, "inFight");
+                if (RefOk(inFightF)) inFightF.SetValue(gmInst, false);
+                var rwcF = AccessTools.Field(gmType, "randomWeaponCounter");
+                if (RefOk(rwcF)) rwcF.SetValue(gmInst, 99f);
+                Log.LogInfo($"[v0.3.4] HoldOracleOutOfFight({reason}): inFight=false (grace window).");
+            }
+            catch (Exception e) { Log.LogWarning($"[v0.3.4] HoldOracleOutOfFight: {e.Message}"); }
+        }
+
+        private struct MapTerrainProfile
+        {
+            public int CodeAnimTotal, CodeAnimSync, CodeAnimLocal;
+            public int EnablePerPlayer, MapSyncTotal, Ghost, MovePath, Pillar, MapSyncOther;
+        }
+
+        internal void LogMapTerrainProfile(Scene scene)
+        {
+            var p = CollectMapTerrainProfile(scene);
+            Log.LogInfo($"[v0.3.4] Map profile '{scene.name}' idx={scene.buildIndex}: " +
+                $"codeAnim sync={p.CodeAnimSync} local={p.CodeAnimLocal} enablePerPlayer={p.EnablePerPlayer} " +
+                $"mapSync={p.MapSyncTotal} (ghost={p.Ghost} move={p.MovePath} pillar={p.Pillar} other={p.MapSyncOther})");
+        }
+
+        private MapTerrainProfile CollectMapTerrainProfile(Scene scene)
+        {
+            var p = new MapTerrainProfile();
+            if (!scene.isLoaded) return p;
+            var codeType = AccessTools.TypeByName("CodeAnimation");
+            var eoppType = AccessTools.TypeByName("EnableObjectsPerPlayer");
+            EnsureMapReflection();
+            foreach (var root in scene.GetRootGameObjects())
+            {
+                if (!RefOk(root)) continue;
+                if (RefOk(codeType))
+                {
+                    var anims = root.GetComponentsInChildren(codeType, true);
+                    if (anims != null)
+                        foreach (var o in anims)
+                        {
+                            p.CodeAnimTotal++;
+                            var mb = o as MonoBehaviour;
+                            if (!RefOk(mb)) continue;
+                            var shallF = AccessTools.Field(codeType, "m_ShallSync");
+                            bool sync = RefOk(shallF) && (bool)shallF.GetValue(mb);
+                            if (sync) p.CodeAnimSync++; else p.CodeAnimLocal++;
+                        }
+                }
+                if (RefOk(eoppType))
+                {
+                    var eopps = root.GetComponentsInChildren(eoppType, true);
+                    if (eopps != null) p.EnablePerPlayer += eopps.Length;
+                }
+                if (RefOk(_mapSyncBaseType))
+                {
+                    var syncs = root.GetComponentsInChildren(_mapSyncBaseType, true);
+                    if (syncs != null)
+                        foreach (var o in syncs)
+                        {
+                            p.MapSyncTotal++;
+                            var c = o as Component;
+                            if (!RefOk(c)) continue;
+                            string tn = c.GetType().Name;
+                            if (tn.IndexOf("Ghost", StringComparison.OrdinalIgnoreCase) >= 0) p.Ghost++;
+                            else if (tn.IndexOf("MoveAlong", StringComparison.OrdinalIgnoreCase) >= 0) p.MovePath++;
+                            else if (tn.IndexOf("Pillar", StringComparison.OrdinalIgnoreCase) >= 0) p.Pillar++;
+                            else p.MapSyncOther++;
+                        }
+                }
+            }
+            return p;
+        }
+
+        private static void RestartSyncedCodeAnimationsInScene(Scene scene)
+        {
+            var codeType = AccessTools.TypeByName("CodeAnimation");
+            if (!RefOk(codeType)) return;
+            int restarted = 0;
+            foreach (var root in scene.GetRootGameObjects())
+            {
+                if (!RefOk(root)) continue;
+                var anims = root.GetComponentsInChildren(codeType, true);
+                if (anims == null) continue;
+                foreach (var o in anims)
+                {
+                    var mb = o as MonoBehaviour;
+                    if (!RefOk(mb)) continue;
+                    var shallF = AccessTools.Field(codeType, "m_ShallSync");
+                    if (RefOk(shallF) && !(bool)shallF.GetValue(mb)) continue;
+                    try
+                    {
+                        var play = AccessTools.Method(codeType, "Play");
+                        if (RefOk(play)) { play.Invoke(mb, null); restarted++; }
+                    }
+                    catch { }
+                }
+            }
+            if (restarted > 0)
+                Log.LogInfo($"[v0.3.4] Restarted {restarted} synced CodeAnimation(s) on server (lava/conveyor/etc).");
+        }
+
+        internal void TickOracleMapInfoBootstrap()
+        {
+            if (_mapInfoBootstrapAt < 0f) return;
+            if (Time.realtimeSinceStartup < _mapInfoBootstrapAt) return;
+            _mapInfoBootstrapAt = -1f;
+            Scene scene;
+            if (!TryFindLoadedSceneForCurrentMapIndex(out scene))
+            {
+                if (_mapInfoBootstrapPass < MapInfoBootstrapMaxPasses)
+                    ScheduleMapInfoBootstrapRetries();
+                _mapInfoBootstrapPass++;
+                return;
+            }
+            int n = BootstrapOracleMapInfoBroadcast(scene, "retry-" + _mapInfoBootstrapPass);
+            Log.LogInfo($"[v0.3.3] MapInfo bootstrap retry pass {_mapInfoBootstrapPass}: broadcasts={n}");
+            _mapInfoLastBroadcastCount = n;
+            _mapInfoBootstrapPass++;
+            if (_mapInfoBootstrapPass < MapInfoBootstrapMaxPasses && n == 0)
+                ScheduleMapInfoBootstrapRetries();
+        }
+
+        /// <summary>
+        /// MapInfo (msg 32): synced CodeAnimation (lava, factory belts, xmas props), EnableObjectsPerPlayer.
+        /// MapInfoSync (33) + v26 snapshot: GhostPlatform, MoveAlongPath, PillarHandler — not sent here.
+        /// </summary>
+        internal int BootstrapOracleMapInfoBroadcast(Scene scene, string reason)
+        {
+            if (!_batchModeHost || !scene.isLoaded) return 0;
+            EnsureOracleP2PNetworkReady("mapinfo-" + reason);
+            SetMapSyncNetworkControlGlobal(true);
+            int sent = 0;
+            int codeAnim = 0, eopp = 0;
+            try
+            {
+                var mm = GetMultiplayerManagerInstance();
+                if (!RefOk(mm)) return 0;
+                var sendMapInfo = AccessTools.Method(mm.GetType(), "SendMapInfo");
+                if (!RefOk(sendMapInfo)) return 0;
+                var seenGo = new HashSet<int>();
+
+                foreach (var root in scene.GetRootGameObjects())
+                {
+                    if (!RefOk(root)) continue;
+                    foreach (var mb in EnumerateMapInfoProviders(root))
+                    {
+                        if (!RefOk(mb) || !seenGo.Add(mb.gameObject.GetInstanceID())) continue;
+                        byte[] payload = TryBuildMapInfoPayload(mb);
+                        if (payload == null || payload.Length == 0) continue;
+                        try
+                        {
+                            sendMapInfo.Invoke(mm, new object[] { payload });
+                            if ((object)Instance != null)
+                                Instance.ForwardBroadcastToV25Clients(32, payload, 0, 0);
+                            sent++;
+                            if (mb.GetType().Name == "CodeAnimation") codeAnim++;
+                            else if (mb.GetType().Name == "EnableObjectsPerPlayer") eopp++;
+                        }
+                        catch (Exception ex)
+                        {
+                            Log.LogWarning($"[v0.3.4] MapInfo send failed on {mb.gameObject.name}: {ex.Message}");
+                        }
+                    }
+                }
+                Log.LogInfo($"[v0.3.4] MapInfo ({reason}) scene='{scene.name}' idx={scene.buildIndex} sent={sent} (codeAnim={codeAnim} enablePerPlayer={eopp})");
+            }
+            catch (Exception e) { Log.LogWarning($"[v0.3.4] BootstrapOracleMapInfoBroadcast: {e.Message}"); }
+            return sent;
+        }
+
+        private static IEnumerable<MonoBehaviour> EnumerateMapInfoProviders(GameObject root)
+        {
+            var codeType = AccessTools.TypeByName("CodeAnimation");
+            var eoppType = AccessTools.TypeByName("EnableObjectsPerPlayer");
+            if (RefOk(codeType))
+            {
+                var anims = root.GetComponentsInChildren(codeType, true);
+                if (anims != null)
+                    foreach (var o in anims)
+                        if (o is MonoBehaviour mb) yield return mb;
+            }
+            if (RefOk(eoppType))
+            {
+                var eopps = root.GetComponentsInChildren(eoppType, true);
+                if (eopps != null)
+                    foreach (var o in eopps)
+                        if (o is MonoBehaviour mb) yield return mb;
+            }
+        }
+
+        private static byte[] TryBuildMapInfoPayload(MonoBehaviour mb)
+        {
+            if (!RefOk(mb)) return null;
+            var t = mb.GetType();
+            if (t.Name == "CodeAnimation")
+            {
+                var shallSyncF = AccessTools.Field(t, "m_ShallSync");
+                if (RefOk(shallSyncF) && !(bool)shallSyncF.GetValue(mb)) return null;
+                var durationF = AccessTools.Field(t, "duration");
+                float duration = RefOk(durationF) ? (float)durationF.GetValue(mb) : 1f;
+                var rv = mb.GetComponent(AccessTools.TypeByName("RandomValue"));
+                if (RefOk(rv))
+                {
+                    var valF = AccessTools.Field(rv.GetType(), "value");
+                    if (RefOk(valF)) duration *= (float)valF.GetValue(rv);
+                }
+                var addRandF = AccessTools.Field(t, "aditionalRandomDuration");
+                if (RefOk(addRandF))
+                    duration += UnityEngine.Random.Range(0f, (float)addRandF.GetValue(mb));
+                byte nameLen = (byte)mb.gameObject.name.Length;
+                if (nameLen == 0) return null;
+                byte[] array = new byte[4 + nameLen];
+                using (var output = new MemoryStream(array))
+                using (var bw = new BinaryWriter(output))
+                {
+                    bw.Write(nameLen);
+                    bw.Write(duration);
+                }
+                return array;
+            }
+            if (t.Name == "EnableObjectsPerPlayer")
+            {
+                var objectsF = AccessTools.Field(t, "objects");
+                if (!RefOk(objectsF)) return null;
+                var objects = objectsF.GetValue(mb) as GameObject[];
+                if (objects == null || objects.Length == 0) return null;
+                byte nameLen = (byte)mb.gameObject.name.Length;
+                byte[] array = new byte[4] { nameLen, 0, 0, 0 };
+                for (int j = 0; j < 3; j++)
+                    array[j + 1] = (byte)UnityEngine.Random.Range(0, objects.Length);
+                return array;
+            }
+            return null;
         }
 
         internal void FinishOracleMapLoad(string reason)
@@ -363,15 +924,6 @@ namespace SFHeadlessHost
             _oracleMapLoadForceCompleteAt = -1f;
             _oracleMapLoadStartedAt = -1f;
             Log.LogInfo($"[v26.6] Oracle map load finished ({reason}) scene={_currentSceneIndex}");
-            if (_roundAdvanceQueuedWhileLoading)
-            {
-                _roundAdvanceQueuedWhileLoading = false;
-                if ((object)Instance != null)
-                {
-                    Log.LogInfo("[SF] Processing queued round advance after map load.");
-                    Instance.TryScheduleRoundAdvance("queued-after-map-load");
-                }
-            }
         }
 
         /// <summary>When SceneManager does not re-fire loaded (same map reload), still complete init.</summary>
@@ -405,12 +957,6 @@ namespace SFHeadlessHost
             return false;
         }
 
-        internal void QueueRoundAdvanceWhileMapLoading()
-        {
-            _roundAdvanceQueuedWhileLoading = true;
-            Log.LogInfo("[SF] Round advance queued — will run when oracle map load completes.");
-        }
-
         internal bool IsOracleMapLoadInProgress() => _oracleMapLoadInProgress;
 
         internal void TickOracleMapLoadTimeout()
@@ -437,7 +983,9 @@ namespace SFHeadlessHost
             _oracleCountDownFired = false;
             _nsoInventoryAt = -1f;
             _nsoInventoryDone = false;
-            _groundWeaponsRetryAt = Time.realtimeSinceStartup + 6f;
+            _groundWeaponsRetryAt = -1f;
+            _oraclePreCombatReadyAt = -1f;
+            _groundWeaponsRetryPass = 0;
             Log.LogInfo($"[v26.6] Oracle will load additive scene {_currentSceneIndex} ({reason})");
         }
 
@@ -446,7 +994,10 @@ namespace SFHeadlessHost
             if (_groundWeaponsRetryAt < 0f) return;
             if (Time.realtimeSinceStartup < _groundWeaponsRetryAt) return;
             _groundWeaponsRetryAt = -1f;
-            InvokeCheckForGroundWeapons("post-match-retry");
+            FlushGroundWeaponsAfterCheck("post-match-retry-pass" + _groundWeaponsRetryPass);
+            _groundWeaponsRetryPass++;
+            if (_groundWeaponsRetryPass < 3)
+                _groundWeaponsRetryAt = Time.realtimeSinceStartup + 5f;
         }
 
         private void LogMapSyncDiagnostics(int posCount, int stateCount)
@@ -596,7 +1147,6 @@ namespace SFHeadlessHost
                 try
                 {
                     var p = comp.transform.position;
-                    if (p.y < -30f) continue;
                     Vector2 startPos = ReadMapSyncStartPos(comp);
                     result.Add(new MapSyncSnap
                     {
