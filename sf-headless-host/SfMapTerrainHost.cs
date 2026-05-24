@@ -827,7 +827,7 @@ namespace SFHeadlessHost
                 foreach (var root in scene.GetRootGameObjects())
                 {
                     if (!RefOk(root)) continue;
-                    foreach (var mb in EnumerateMapInfoProviders(root))
+                    foreach (var mb in BuildMapInfoProviderList(root))
                     {
                         if (!RefOk(mb) || !seenGo.Add(mb.gameObject.GetInstanceID())) continue;
                         byte[] payload = TryBuildMapInfoPayload(mb);
@@ -853,8 +853,18 @@ namespace SFHeadlessHost
             return sent;
         }
 
-        private static IEnumerable<MonoBehaviour> EnumerateMapInfoProviders(GameObject root)
+        // NOTE: must be eager List<T>, NOT an IEnumerable<T> iterator with `yield return`.
+        // The C# 9 compiler lowers `IEnumerable<T>` iterators into a state-machine class
+        // whose GetEnumerator() references Environment.CurrentManagedThreadId — a .NET 4.5+
+        // property that does NOT exist on Mono 2.0.50727 (Unity 5.6.3). The call throws
+        // MissingMethodException, the outer catch swallows it, and MapInfo broadcasts
+        // silently fail for scripted maps (lava, factory belts, xmas animations).
+        // See: notes/bug-investigations/2026-05-24_v0.3.4-session-bugs.md (Bug A).
+        // IEnumerator (non-generic Unity coroutine) is SAFE — only IEnumerable<T> is
+        // poisonous on Mono 2.0.
+        private static List<MonoBehaviour> BuildMapInfoProviderList(GameObject root)
         {
+            var result = new List<MonoBehaviour>();
             var codeType = AccessTools.TypeByName("CodeAnimation");
             var eoppType = AccessTools.TypeByName("EnableObjectsPerPlayer");
             if (RefOk(codeType))
@@ -862,15 +872,16 @@ namespace SFHeadlessHost
                 var anims = root.GetComponentsInChildren(codeType, true);
                 if (anims != null)
                     foreach (var o in anims)
-                        if (o is MonoBehaviour mb) yield return mb;
+                        if (o is MonoBehaviour mb) result.Add(mb);
             }
             if (RefOk(eoppType))
             {
                 var eopps = root.GetComponentsInChildren(eoppType, true);
                 if (eopps != null)
                     foreach (var o in eopps)
-                        if (o is MonoBehaviour mb) yield return mb;
+                        if (o is MonoBehaviour mb) result.Add(mb);
             }
+            return result;
         }
 
         private static byte[] TryBuildMapInfoPayload(MonoBehaviour mb)
