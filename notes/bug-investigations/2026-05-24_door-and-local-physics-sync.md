@@ -141,12 +141,36 @@ void OnPktDoorImpulse(byte playerSlot, byte doorIndex, Vector3 impulse) {
 This same approach works for any local-physics object that lacks NSO but matters for gameplay:
 
 - Doors (Castle maps)
-- Hanging chains (Castle, Ice maps)
+- Hanging chains (Castle maps, confirmed below)
 - Dangling ropes (some Workshop maps)
 - Spring-back levers (Castle maps)
 - Decorative cloth / banners (lower priority, but cheap to add)
 
 Discovery rule: scan for `Rigidbody + Joint + !NetworkSyncableObject`. Apply same impulse-sync mechanism to all of them.
+
+### Confirmed: hanging chains follow the identical pattern
+
+Inspected Castle_Chain1 and Castle_Chain2 segments in Castle9 (Map21) — 11 chain segments total, anchored to a `HangChain` parent (just a Transform). Each segment has:
+
+```
+[Transform]
+[SpriteRenderer]
+[Rigidbody]
+[ConfigurableJoint]
+[ConstantForce]
+```
+
+Identical component set to doors. No `NetworkSyncableObject`, no `RigidBodyIndexHolder`, no `DestructiblePiece`. Pure local spring physics.
+
+Runtime confirmation that they actively swing: positions shift ~5-6 units across ~1-second-apart FINDOBJ queries (e.g. Castle_Chain2(3) at y=5.0,z=-8.1 then y=-0.1,z=-2.9 ← mid-swing). Desync vs the other client guaranteed by the same mechanism that desyncs doors.
+
+**One discovery pass catches all of them.** No special-cased "Door" or "Chain" classes needed in the sync plugin.
+
+### Out of scope (different family)
+
+These are **breakable** chains and ice — they have `DestructiblePiece` (often `eventDestruction=true`) AND `NetworkSyncableObject`. Different sync model — they ARE network-synced by vanilla, just sometimes incorrectly (the OPEN-2/OPEN-3 "chains random break" bugs). That's a separate investigation, governed by destruction-event filtering (see [`2026-05-24_v0.3.4-session-bugs.md`](2026-05-24_v0.3.4-session-bugs.md) Bug-A-relations and `ShouldSkipServerOriginatedDestruction` filter).
+
+Door/swing-chain sync (this doc) and breakable-chain destruction filtering are orthogonal problems with different fixes.
 
 ## Bandwidth + perf
 
