@@ -58,13 +58,14 @@ namespace SFClientRecon
     // Skip-on-batchmode: the oracle's headless SF instance also loads this
     // plugin (it's in the same plugins/ dir) — we no-op there.
     [BepInPlugin(PluginGuid, PluginName, PluginVersion)]
-    public class Plugin : BaseUnityPlugin
+    public partial class Plugin : BaseUnityPlugin
     {
         public const string PluginGuid = "com.stickfightdev.client-recon";
         public const string PluginName = "SFClientRecon";
-        public const string PluginVersion = "0.1.0";
+        public const string PluginVersion = "0.2.9";
 
         internal static ManualLogSource Log;
+        internal static bool RefOk(object o) => !ReferenceEquals(o, null);
         // Default v26 listener port. Overridable via SFCLIENTRECON_PORT env
         // var for multi-instance same-machine testing (each instance picks a
         // different port). Server discovers the actual port from our PlayerInput
@@ -155,6 +156,10 @@ namespace SFClientRecon
             // scales by Time.deltaTime.
             Time.fixedDeltaTime = 1f / 60f;
 
+            var nsoSmoothEnv = Environment.GetEnvironmentVariable("SFCLIENTRECON_NSO_SMOOTH");
+            if (!string.IsNullOrEmpty(nsoSmoothEnv) && float.TryParse(nsoSmoothEnv, out var nsr) && nsr > 1f)
+                _nsoSmoothRate = nsr;
+
             // Resolve listener port — env var override for multi-instance testing.
             _listenPort = V26_DEFAULT_PORT;
             var envPort = Environment.GetEnvironmentVariable("SFCLIENTRECON_PORT");
@@ -206,6 +211,10 @@ namespace SFClientRecon
                 else Log.LogWarning("[P0-15] DestructiblePiece type not found.");
             }
             catch (Exception e) { Log.LogWarning($"[P0-15] DestructiblePiece patch failed: {e.Message}"); }
+
+            InstallClientTerrainPatches();
+            InstallOracleLobbyConnectPatches();
+            InstallNsoClientPushPatches();
 
             Log.LogInfo($"{PluginName} {PluginVersion}: starting v26 snapshot listener on UDP :{_listenPort}. vSync off, FPS uncapped.");
             try
@@ -363,11 +372,15 @@ namespace SFClientRecon
                 }
             }
 
+            List<MapStateSnapEntry> mapStateList = null;
+            ParseMapStateSection(pkt, ref o, bodyOff + bodyLen, out mapStateList);
+
             lock (_snapLock)
             {
                 _pendingSnap = list;
                 _pendingNsoSnap = nsoList;
                 _pendingMapSyncSnap = mapSyncList;
+                _pendingMapStateSnap = mapStateList;
                 _pendingTick = tick;
                 _snapsReceived++;
             }
@@ -379,31 +392,43 @@ namespace SFClientRecon
             List<SnapshotEntry> snap;
             List<NsoSnapEntry>  nsoSnap;
             List<MapSyncSnapEntry> mapSyncSnap;
+            List<MapStateSnapEntry> mapStateSnap;
             uint tick;
             lock (_snapLock)
             {
                 snap    = _pendingSnap;
                 nsoSnap = _pendingNsoSnap;
                 mapSyncSnap = _pendingMapSyncSnap;
+                mapStateSnap = _pendingMapStateSnap;
                 tick    = _pendingTick;
                 _pendingSnap    = null;
                 _pendingNsoSnap = null;
                 _pendingMapSyncSnap = null;
+                _pendingMapStateSnap = null;
             }
             if (snap != null)    ApplySnapshot(snap, tick);
             if (nsoSnap != null) ApplyNsoSnapshot(nsoSnap, tick);
             if (mapSyncSnap != null) ApplyMapSyncSnapshot(mapSyncSnap, tick);
+            if (mapStateSnap != null) ApplyMapStateSnapshot(mapStateSnap);
 
             // Phase 6.11.2 — between snapshots, exponentially lerp current
             // positions toward latest targets so the visual feel is smooth
             // instead of teleporting every 33ms (30Hz snapshot rate).
             SmoothTowardTargets();
+            TickNsoClientPushRelay();
+            TickFastCombatInput();
 
             // Phase 6.12 — send input packets at 60Hz once local slot is known.
             if (_socket != null && _serverEp != null && Time.realtimeSinceStartup - _lastInputSendAt >= InputSendInterval)
             {
                 _lastInputSendAt = Time.realtimeSinceStartup;
                 SendPlayerInputPacket();
+            }
+            else if (_serverEp != null && FindLocalSlot() < 0
+                     && Time.realtimeSinceStartup - _lastInputWarnAt > 5f)
+            {
+                _lastInputWarnAt = Time.realtimeSinceStartup;
+                Log.LogWarning("[P6.12] No local slot yet — PlayerInput not sent. Wait for spawn.");
             }
         }
 
@@ -412,13 +437,24 @@ namespace SFClientRecon
         // Lower = smoother (more lag, less jitter). 15/s is a reasonable middle
         // ground at 30Hz snapshot rate (settles ~95% of error in 200ms).
         private const float SmoothRate = 15f;
+        private float _nsoSmoothRate = 100f;
+        private const float NsoSnapDistance = 0.5f;
+        private float _lastInputWarnAt = -1f;
+        private static Type _weaponPickUpTypeClient;
         private readonly Dictionary<int, Vector3> _playerTargets = new Dictionary<int, Vector3>();
         private struct PoseTarget { public Vector3 Pos; public Quaternion Rot; }
         private readonly Dictionary<ushort, PoseTarget> _nsoTargets = new Dictionary<ushort, PoseTarget>();
+        // Briefly make pushed crates non-kinematic for local collision feedback
+        // (no mHasControl — server remains authoritative via v26 snapshots).
+        // v0.2.1 — client NSOs stay kinematic; no _nsoClientDynamicUntil (caused ice/box chaos).
+        private static Type _clientDpType;
+        private static System.Reflection.FieldInfo _clientDpSimpleField;
+        private static System.Reflection.FieldInfo _clientDpEventField;
         private void SmoothTowardTargets()
         {
             if (_playerTargets.Count == 0 && _nsoTargets.Count == 0 && _mapSyncTargets.Count == 0) return;
-            float t = 1f - Mathf.Exp(-SmoothRate * Time.deltaTime);
+            float playerT = 1f - Mathf.Exp(-SmoothRate * Time.deltaTime);
+            float nsoT = 1f - Mathf.Exp(-_nsoSmoothRate * Time.deltaTime);
             try
             {
                 // Players: smooth every slot that has a target recorded.
@@ -442,8 +478,8 @@ namespace SFClientRecon
                                 if (!_playerTargets.TryGetValue(pi, out var target)) continue;
                                 var npComp = np as Component;
                                 var rb = npComp.GetComponent<Rigidbody>() ?? npComp.GetComponentInChildren<Rigidbody>();
-                                if ((object)rb != null) rb.position = Vector3.Lerp(rb.position, target, t);
-                                else npComp.transform.position = Vector3.Lerp(npComp.transform.position, target, t);
+                                if ((object)rb != null) rb.position = Vector3.Lerp(rb.position, target, playerT);
+                                else npComp.transform.position = Vector3.Lerp(npComp.transform.position, target, playerT);
                             }
                         }
                     }
@@ -455,16 +491,39 @@ namespace SFClientRecon
                     foreach (var kv in _nsoTargets)
                     {
                         if (!_nsoCache.TryGetValue(kv.Key, out var comp) || (object)comp == null) continue;
+                        if (IsChainStyleDestructibleRoot(comp.gameObject)) continue;
+                        if (IsIceOnlyDestructibleRoot(comp.gameObject)) continue;
+                        if (IsWeaponNsoRootClient(comp.gameObject)) continue;
                         var rb = comp.GetComponent<Rigidbody>();
                         if ((object)rb != null)
                         {
-                            rb.position = Vector3.Lerp(rb.position, kv.Value.Pos, t);
-                            rb.rotation = Quaternion.Slerp(rb.rotation, kv.Value.Rot, t);
+                            // Kinematic lerp only — never flip isKinematic=false (P0-5 / ice regression).
+                            if (!rb.isKinematic) rb.isKinematic = true;
+                            float dist = Vector3.Distance(rb.position, kv.Value.Pos);
+                            if (dist > NsoSnapDistance)
+                            {
+                                rb.position = kv.Value.Pos;
+                                rb.rotation = kv.Value.Rot;
+                            }
+                            else
+                            {
+                                rb.position = Vector3.Lerp(rb.position, kv.Value.Pos, nsoT);
+                                rb.rotation = Quaternion.Slerp(rb.rotation, kv.Value.Rot, nsoT);
+                            }
                         }
                         else
                         {
-                            comp.transform.position = Vector3.Lerp(comp.transform.position, kv.Value.Pos, t);
-                            comp.transform.rotation = Quaternion.Slerp(comp.transform.rotation, kv.Value.Rot, t);
+                            float dist = Vector3.Distance(comp.transform.position, kv.Value.Pos);
+                            if (dist > NsoSnapDistance)
+                            {
+                                comp.transform.position = kv.Value.Pos;
+                                comp.transform.rotation = kv.Value.Rot;
+                            }
+                            else
+                            {
+                                comp.transform.position = Vector3.Lerp(comp.transform.position, kv.Value.Pos, nsoT);
+                                comp.transform.rotation = Quaternion.Slerp(comp.transform.rotation, kv.Value.Rot, nsoT);
+                            }
                         }
                         // P0-15 — moved to ApplyNsoSnapshot below; only mark
                         // recentLerpAt when a snapshot delivers a LARGE
@@ -484,8 +543,8 @@ namespace SFClientRecon
                     {
                         if (!_mapSyncCache.TryGetValue(kv.Key, out var comp) || (object)comp == null) continue;
                         var rb = comp.GetComponent<Rigidbody>();
-                        if ((object)rb != null) rb.position = Vector3.Lerp(rb.position, kv.Value, t);
-                        else comp.transform.position = Vector3.Lerp(comp.transform.position, kv.Value, t);
+                        if ((object)rb != null) rb.position = Vector3.Lerp(rb.position, kv.Value, nsoT);
+                        else comp.transform.position = Vector3.Lerp(comp.transform.position, kv.Value, nsoT);
                     }
                 }
             }
@@ -543,6 +602,8 @@ namespace SFClientRecon
                 foreach (var e in snap)
                 {
                     if (!_nsoCache.TryGetValue(e.Id, out var nsoComp) || (object)nsoComp == null) continue;
+                    if (IsWeaponNsoRootClient(nsoComp.gameObject)) continue;
+                    if (IsIceOnlyDestructibleRoot(nsoComp.gameObject)) continue;
                     Vector3 newTarget = new Vector3(e.X, e.Y, e.Z);
                     // P0-15 — only flag for destruction-suppression when the
                     // snapshot delivered a LARGE position jump. The
@@ -568,6 +629,67 @@ namespace SFClientRecon
                     Log.LogInfo($"[P6.14] NSO snap tick={tick} targeted {applied}/{snap.Count}");
             }
             catch (Exception ex) { Log.LogWarning($"[P6.14 NSO apply] {ex.Message}"); }
+        }
+
+        private static bool IsWeaponNsoRootClient(GameObject root)
+        {
+            if ((object)root == null) return false;
+            if ((object)_weaponPickUpTypeClient == null)
+            {
+                try { _weaponPickUpTypeClient = AccessTools.TypeByName("WeaponPickUp"); } catch { }
+            }
+            return (object)_weaponPickUpTypeClient != null
+                && root.GetComponentInChildren(_weaponPickUpTypeClient, true) != null;
+        }
+
+        private static bool IsIceOnlyDestructibleRoot(GameObject root)
+        {
+            if ((object)_clientDpType == null)
+            {
+                _clientDpType = AccessTools.TypeByName("DestructiblePiece");
+                if ((object)_clientDpType != null)
+                {
+                    _clientDpSimpleField = AccessTools.Field(_clientDpType, "simpleDestruction");
+                    _clientDpEventField = AccessTools.Field(_clientDpType, "eventDestruction");
+                }
+            }
+            if ((object)_clientDpType == null) return false;
+            var dps = root.GetComponentsInChildren(_clientDpType);
+            if (dps == null || dps.Length == 0) return false;
+            bool any = false;
+            foreach (var dp in dps)
+            {
+                if ((object)dp == null) continue;
+                any = true;
+                bool simple = (object)_clientDpSimpleField != null && (bool)_clientDpSimpleField.GetValue(dp);
+                bool ev = (object)_clientDpEventField != null && (bool)_clientDpEventField.GetValue(dp);
+                if (!simple || ev) return false;
+            }
+            return any;
+        }
+
+        private static bool IsChainStyleDestructibleRoot(GameObject root)
+        {
+            if ((object)_clientDpType == null)
+            {
+                _clientDpType = AccessTools.TypeByName("DestructiblePiece");
+                if ((object)_clientDpType != null)
+                {
+                    _clientDpSimpleField = AccessTools.Field(_clientDpType, "simpleDestruction");
+                    _clientDpEventField = AccessTools.Field(_clientDpType, "eventDestruction");
+                }
+            }
+            if ((object)_clientDpType == null) return false;
+            var dps = root.GetComponentsInChildren(_clientDpType);
+            if (dps == null || dps.Length == 0) return false;
+            foreach (var dp in dps)
+            {
+                if ((object)dp == null) continue;
+                bool simple = (object)_clientDpSimpleField != null && (bool)_clientDpSimpleField.GetValue(dp);
+                bool ev = (object)_clientDpEventField != null && (bool)_clientDpEventField.GetValue(dp);
+                if (!simple && !ev) return true;
+            }
+            return false;
         }
 
         // P0-14 — apply MapInfoSyncableBase positions. Cache by m_StartPos
@@ -603,7 +725,7 @@ namespace SFClientRecon
                         {
                             var c = obj as Component;
                             if ((object)c == null) continue;
-                            Vector2 key = (Vector2)_mapSyncStartPosField.GetValue(obj);
+                            Vector2 key = QuantizeMapSyncKeyClient((Vector2)_mapSyncStartPosField.GetValue(obj));
                             _mapSyncCache[key] = c;
                             // First-sight: force the rigidbody kinematic so local
                             // physics (AddForce in MoveAlongPathUsingForce; spring
@@ -621,7 +743,7 @@ namespace SFClientRecon
                 int applied = 0;
                 foreach (var e in snap)
                 {
-                    Vector2 key = new Vector2(e.StartX, e.StartY);
+                    Vector2 key = QuantizeMapSyncKeyClient(new Vector2(e.StartX, e.StartY));
                     if (!_mapSyncCache.ContainsKey(key)) continue;
                     _mapSyncTargets[key] = new Vector3(e.X, e.Y, e.Z);
                     applied++;
@@ -724,12 +846,12 @@ namespace SFClientRecon
         // whether to suppress the destruction broadcast. Dictionary is
         // pruned lazily by the prefix to avoid unbounded growth.
         private static readonly Dictionary<int, float> _recentLerpAt = new Dictionary<int, float>();
-        private const float LerpSuppressWindowSec = 0.15f;
+        private const float LerpSuppressWindowSec = 0.35f;
         // P0-15 — only flag NSOs whose snapshot target arrived more than
         // this far from the local position. Below this threshold the lerp
         // motion is gentle enough that the resulting OnCollisionEnter has
         // low relativeVelocity (force < threshold) anyway.
-        private const float NsoLargeLerpThreshold = 0.3f;
+        private const float NsoLargeLerpThreshold = 0.45f;
 
         // Phase 6.21 — cached WeaponPickUp Type for the destruction guard.
         // Lazy-resolved on FIRST PREFIX CALL (not static-init) so we don't
@@ -764,6 +886,13 @@ namespace SFClientRecon
                 var rootT = rb.transform.root;
                 if ((object)rootT == null) return true;
 
+                // Ice only breaks from LOCAL player rig — not from boxes/lerped NSOs/weapons.
+                if (IsIceDestructibleTarget(__instance))
+                {
+                    if (!IsLocalPlayerCollisionRigidbody(rb))
+                        return false;
+                }
+
                 // (2) — skip if the colliding body's root has a WeaponPickUp
                 // anywhere in its hierarchy. WeaponPickUp lives on the
                 // weapon prefab's root in stock SF.
@@ -777,6 +906,18 @@ namespace SFClientRecon
                     if (_weaponSkipCount == 1 || _weaponSkipCount % 20 == 0)
                         Log.LogInfo($"[Phase 6.21] Suppressed destruction from WeaponPickUp collision (#{_weaponSkipCount}) on '{__instance?.name}'");
                     return false;
+                }
+
+                // Non-ice destructibles: block NSO/chain roots that aren't the local player.
+                if (!IsIceDestructibleTarget(__instance))
+                {
+                    if (IsChainStyleDestructibleRoot(rootT.gameObject)
+                        || IsWeaponNsoRootClient(rootT.gameObject))
+                        return false;
+                    if (!IsLocalPlayerCollisionRigidbody(rb)
+                        && (IsIceOnlyDestructibleRoot(rootT.gameObject)
+                            || rootT.GetComponent(AccessTools.TypeByName("NetworkSyncableObject")) != null))
+                        return false;
                 }
 
                 float now = Time.realtimeSinceStartup;
@@ -1010,20 +1151,37 @@ namespace SFClientRecon
             try
             {
                 var ctrlType = AccessTools.TypeByName("Controller");
-                if ((object)ctrlType == null) return -1;
-                var ctrls = UnityEngine.Object.FindObjectsOfType(ctrlType);
-                if (ctrls == null) return -1;
-                var hasCtrlF = AccessTools.Field(ctrlType, "mHasControl");
-                var pidF = AccessTools.Field(ctrlType, "playerID");
-                if ((object)hasCtrlF == null || (object)pidF == null) return -1;
-                foreach (var c in ctrls)
+                if ((object)ctrlType != null)
                 {
-                    bool has = (bool)hasCtrlF.GetValue(c);
-                    if (!has) continue;
-                    int pid = (int)pidF.GetValue(c);
-                    _localSlot = pid;
-                    Log.LogInfo($"[P6.11] Discovered localSlot={pid}.");
-                    return pid;
+                    var ctrls = UnityEngine.Object.FindObjectsOfType(ctrlType);
+                    var hasCtrlF = AccessTools.Field(ctrlType, "mHasControl");
+                    var pidF = AccessTools.Field(ctrlType, "playerID");
+                    if (ctrls != null && (object)hasCtrlF != null && (object)pidF != null)
+                    {
+                        foreach (var c in ctrls)
+                        {
+                            if (!(bool)hasCtrlF.GetValue(c)) continue;
+                            _localSlot = (int)pidF.GetValue(c);
+                            Log.LogInfo($"[P6.11] Discovered localSlot={_localSlot} (Controller).");
+                            return _localSlot;
+                        }
+                    }
+                }
+                var npType = AccessTools.TypeByName("NetworkPlayer");
+                if ((object)npType != null)
+                {
+                    var pidField = AccessTools.Field(npType, "playerID");
+                    var hasCtrlNp = AccessTools.Field(npType, "mHasControl");
+                    foreach (var np in UnityEngine.Object.FindObjectsOfType(npType))
+                    {
+                        if ((object)hasCtrlNp != null && !(bool)hasCtrlNp.GetValue(np)) continue;
+                        if ((object)pidField != null)
+                        {
+                            _localSlot = (int)pidField.GetValue(np);
+                            Log.LogInfo($"[P6.11] Discovered localSlot={_localSlot} (NetworkPlayer).");
+                            return _localSlot;
+                        }
+                    }
                 }
             }
             catch (Exception e) { Log.LogWarning($"FindLocalSlot: {e.Message}"); }
