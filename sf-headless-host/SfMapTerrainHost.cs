@@ -66,13 +66,47 @@ namespace SFHeadlessHost
                 var mapBase = AccessTools.TypeByName("MapInfoSyncableBase");
                 if ((object)mapBase != null)
                 {
-                    var awake = AccessTools.Method(mapBase, "Awake");
-                    if ((object)awake != null)
+                    // MapInfoSyncableBase is an abstract MonoBehaviour with virtual Awake().
+                    // In Mono 2.0 + Unity 5.6.3, Harmony patches on virtual methods of
+                    // abstract MonoBehaviour base classes are bypassed by Unity's
+                    // SendMessage dispatch — the postfix on the base never fires for
+                    // concrete subclass Awake calls. Symptom: every EnsureMapSyncObjects
+                    // log entry reported `awake-hits=0`. See Bug D in
+                    // notes/bug-investigations/2026-05-24_v0.3.4-session-bugs.md.
+                    //
+                    // Fix: patch each concrete subclass's Awake too. The FindObjectsOfType
+                    // fallback in EnsureMapSyncObjectsRegistered already catches them, but
+                    // hooking Awake lets the postfix fire DURING scene-load instead of
+                    // after, which is the design intent (m_NetworkControl=true assigned
+                    // before any SF code reads the flag).
+                    var awakeMethods = new System.Collections.Generic.HashSet<System.Reflection.MethodInfo>();
+                    var baseAwake = AccessTools.Method(mapBase, "Awake");
+                    if ((object)baseAwake != null) awakeMethods.Add(baseAwake);
+
+                    // Known concrete subclasses in stock SF: GhostPlatform,
+                    // MoveAlongPathUsingForce, PillarHandler. Discovery loop catches any
+                    // future subclasses too.
+                    foreach (var asm in System.AppDomain.CurrentDomain.GetAssemblies())
                     {
-                        harmony.Patch(awake, postfix: new HarmonyMethod(
-                            AccessTools.Method(typeof(Plugin), nameof(MapInfoSyncableBaseAwakePostfix))));
-                        Log.LogInfo("[v26.6] Patched MapInfoSyncableBase.Awake (oracle network control + dict register).");
+                        System.Type[] types;
+                        try { types = asm.GetTypes(); } catch { continue; }
+                        foreach (var t in types)
+                        {
+                            if (t == mapBase || !mapBase.IsAssignableFrom(t)) continue;
+                            var subAwake = AccessTools.Method(t, "Awake");
+                            if ((object)subAwake != null && subAwake.DeclaringType == t)
+                                awakeMethods.Add(subAwake);
+                        }
                     }
+
+                    var postfix = new HarmonyMethod(AccessTools.Method(typeof(Plugin), nameof(MapInfoSyncableBaseAwakePostfix)));
+                    int patched = 0;
+                    foreach (var m in awakeMethods)
+                    {
+                        try { harmony.Patch(m, postfix: postfix); patched++; }
+                        catch (Exception ex) { Log.LogWarning($"[v26.6] map-terrain Awake patch on {m.DeclaringType?.Name}: {ex.Message}"); }
+                    }
+                    Log.LogInfo($"[v26.6] Patched MapInfoSyncableBase + {patched - 1} subclass Awake methods (total {patched} patches).");
                 }
                 var mmType = AccessTools.TypeByName("MultiplayerManager");
                 if (RefOk(mmType))
