@@ -3110,9 +3110,16 @@ namespace SFHeadlessHost
             _mapSyncObjectsRegistered = 0;
             _oraclePreCombatReadyAt = -1f;
             _oraclePreCombatSceneIndex = -1;
+            // NOTE: _nsoLastBroadcastPos and _nsoLastMovedAt are NOT cleared here.
+            // They're keyed by NSO ushort Index which gets reassigned per scene;
+            // stale entries for retired indices are harmless because
+            // CollectActiveNsoSnapshot finds live components fresh via
+            // FindObjectsOfType each tick. PRIOR BEHAVIOR (clearing them) caused
+            // a permanent post-round-advance lockout where nsos=0 between
+            // keyframes because no per-NSO entry could ever satisfy
+            // `recentlyActive` again — see Bug B in
+            // notes/bug-investigations/2026-05-24_v0.3.4-session-bugs.md.
             _nsoSpawnPos.Clear();
-            _nsoLastBroadcastPos.Clear();
-            _nsoLastMovedAt.Clear();
             _nsoByIndexCache.Clear();
             _nsoCacheLastRebuildAt = -1f;
             ClearAuthoritativeRigsForRoundAdvance();
