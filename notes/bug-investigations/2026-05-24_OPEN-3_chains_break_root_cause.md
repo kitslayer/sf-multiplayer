@@ -163,11 +163,65 @@ foreach (var nso in all) {
 
 Reproduce in oracle play: leave a Castle10 match running idle for ~60 seconds. With fixes in place, chains should remain intact unless explicitly shot. Without fixes (current state), some chains likely break during the idle window.
 
-## Related to OPEN-2 (ice randomly breaks)
+## OPEN-2 confirmed: ice has the same root cause
 
-Ice destructibles use the same `DestructiblePiece` mechanism. Likely the same three hypotheses apply. Fix 1 + Fix 3 should improve both OPEN-2 and OPEN-3 simultaneously.
+Live probe of `Cube.005` in Ice1 (Map4) shows ice destructibles share the architecture with chains but with notable differences:
 
-The difference between chains (Castle10 visible here) and ice (Ice maps not yet probed): chains have `eventDestruction=False, simpleDestruction=True`. Ice has `eventDestruction=True` for chain-style group destruction. ALKA's `IsChainStyleDestructibleRoot` filter in `ShouldSkipServerOriginatedDestruction` already accounts for this distinction. The hypotheses above apply to both.
+```
+[DestructiblePiece]
+  forceThreshold       = 15          ← non-zero (chains had 0)
+  simpleDestruction    = False       ← BOTH flags off
+  eventDestruction     = False
+  iceDestructionAudio  = present
+  m_OnlyRecieveInitState = False    ← ice IS continuously position-synced (chains weren't)
+  m_AllowForceFromClient = True
+  RBIH.mIndex = 0  mInited = True
+```
+
+The implications:
+
+1. **OnCollisionEnter break path is closed for ice** (line 130 check requires `simpleDestruction || eventDestruction`, neither is true). Players physically colliding with ice does NOT break it.
+2. **Ice breaks via direct `DestructiblePiece.Collide()` invocation** (decompile line 138 et al — separate code path that doesn't gate on the flags).
+3. Vanilla bullets call Collide explicitly via the raycast hit handler with calibrated force.
+4. ALKA's `ApplyExplosiveBlastAt` calls Collide with `force=Vector3.up * 15f, multiplier=10f` → effective force `15 × 10 = 150`, **trivially exceeds ice's threshold of 15**. **Every ice block within 5u of any explosion breaks**, regardless of intent or LoS.
+
+Plus, ice has `m_OnlyRecieveInitState=False` meaning our oracle DOES position-sync ice continuously — adding Hypothesis C (snapshot apply jostle) as a secondary candidate for ice specifically.
+
+**OPEN-2 and OPEN-3 share root cause: `ApplyExplosiveBlastAt`'s blanket OverlapSphere invocation of Collide.** Fix 1 above (filter targets) resolves both simultaneously. Add a check that respects vanilla's intended target list:
+
+```csharp
+foreach (var col in cols) {
+    var dp = col.GetComponent(dpType) ?? col.GetComponentInParent(dpType);
+    if (dp == null) continue;
+
+    // vanilla doesn't auto-break ice/chains from explosions in the blanket way
+    // we do. Only target things vanilla blast-damages: simpleDestruction crates
+    // with a non-trivial threshold, and event-style chain-destructible roots that
+    // the grenade explicitly hit (via LoS).
+    bool simple = (bool)AccessTools.Field(dpType, "simpleDestruction").GetValue(dp);
+    bool eventD = (bool)AccessTools.Field(dpType, "eventDestruction").GetValue(dp);
+    float fThresh = (float)AccessTools.Field(dpType, "forceThreshold").GetValue(dp);
+
+    // skip: chains (threshold=0, simpleDestruction=True, on chain layer)
+    if (simple && fThresh < 0.01f) continue;
+    // skip: ice (both flags false — relies on direct vanilla-bullet path, not explosions)
+    if (!simple && !eventD) continue;
+    // additionally: LoS check between explosion center and target
+    if (Physics.Linecast(center, dp.transform.position, out var hit) && hit.transform != dp.transform) continue;
+
+    // ...existing Collide call
+}
+```
+
+This preserves the explosion's intended effect (crates near grenades blast apart) while not over-destroying chains and ice that vanilla never blast-destroys.
+
+### Note on chain vs ice distinction
+
+Chains and ice break differently in vanilla:
+- **Chain segment** (Castle10): `simpleDestruction=True`, `forceThreshold=0`. Break via OnCollisionEnter when hit by *another rigidbody*. Vanilla bullets bypass via direct Collide. (Player collisions excluded by layer.)
+- **Ice block** (Ice1, Cube.005): both flags false, `forceThreshold=15`. NO OnCollisionEnter break path. Break ONLY via direct Collide call (typically from vanilla bullet raycast hit handler).
+
+ALKA's `IsChainStyleDestructibleRoot` filter checks for `simpleDestruction && !eventDestruction` (chain-style) — which **does NOT match ice** (both flags false). So the existing chain-filter logic doesn't currently shield ice. Need to add an ice-style category.
 
 ## Open questions
 
