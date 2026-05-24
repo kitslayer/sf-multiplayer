@@ -111,10 +111,36 @@ Two parallel Goldberg-emulated instances joined via Quick Match. Inspector reads
 
 | State | Host vanilla | Client vanilla | Our oracle (server) | Our oracle (client) |
 |---|---|---|---|---|
-| `mHasControl` | **True** | **False** | True (forced via P6.5 patch) | **True (forced — DIVERGES from vanilla)** |
+| `mHasControl` (static, process-wide) | **True** | **False** | True (forced via P6.5 patch) | **True (forced — DIVERGES from vanilla)** |
+| `mIsListening` (per-NSO instance) | True | True | unknown | True (set by SfNsoClientPush.DisableAllRigidBodies_PushPrefix) |
+| `mCurrentSendTickCount` (per-NSO) | counts up | stays at 0 | counts up | unknown — but if mHasControl=true the publish loop runs |
 | Rigidbody integration | full local physics | mostly kinematic + lerp | full local physics | competing: physics + lerp (SmoothTowardTargets fights) |
 | Broadcasts state | yes (host owns) | no | yes | yes (also tries to broadcast — fights with server snapshots) |
 | Lerps toward incoming pos | no | yes | no | yes (via `_nsoTargets`) |
+
+### Live runtime verification (2-instance side-by-side comparative dump)
+
+Using a custom SfBridge plugin pasted into each instance's Unity Explorer C# Console, fetched the SAME crate (`Crate (10)`, scene=Desert6, instance ID 72058, m_Index=20) from both processes simultaneously:
+
+```
+                            HOST            CLIENT
+m_Index                     20              20         (same NSO across wire — confirmed)
+mIsListening                True            True       (both listen — not just client)
+mDontSyncPos                False           False
+mSendRatePerSecond          5               5
+mSendRate                   0.2             0.2
+mCurrentSendTickCount       0.0662661       0          (HOST publishes, CLIENT doesn't)
+Position                    identical
+Layer                       23              23         (not yet layer-24'd; pos.y > -11)
+```
+
+The asymmetry is entirely driven by the **static** `mHasControl`. Per-NSO `mIsListening` is the same on both. Host counts up its `mCurrentSendTickCount` (publishing 5Hz state); client's counter stays at 0 (not publishing).
+
+This refines the fix considerably:
+
+**Just don't flip `mHasControl=true` on clients in our oracle setup.** Don't touch `mIsListening` — leave it at whatever vanilla wants. Don't change anything else. The whole "client wrestles its own physics" cascade collapses because the static authority flag governs everything else.
+
+Exact line to remove or comment out: `sf-client-recon/SFClientRecon.cs:1603-1610` (the NSO.Start postfix that sets `mHasControl=true`). Maybe also the `m_AllowForceFromClient=true` patch alongside (depending on what we want to do with the SendAddedForce mechanism).
 
 ## Divergence vs oracle setup (Bug F confirmation)
 
