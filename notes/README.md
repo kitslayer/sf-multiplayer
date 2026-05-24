@@ -13,6 +13,7 @@ Newcomer to the project? Read these in order:
 5. [`OBJECT_SYNC.md`](OBJECT_SYNC.md) — definitive guide to SF's three world-object sync mechanisms (NSO, MapInfoSyncableBase, DestructiblePiece). Read this BEFORE debugging any "boxes/platforms/ice misbehave" issue.
 6. [`BUGS_BACKLOG.md`](BUGS_BACKLOG.md) — incident log of every non-trivial bug + root cause + fix or open status
 7. [`AUDIT_2026-05-23.md`](AUDIT_2026-05-23.md) — end-of-session deep audit covering open P0 bugs (destruction race, MapInfoSync precision, late-join gap, moving-platform drift, lerp-collision shatter)
+8. [`bug-investigations/`](bug-investigations/) — deep-dive root-cause analyses with evidence + fix sketches (one file per investigation)
 
 ## Operating manuals
 
