@@ -223,6 +223,97 @@ Chains and ice break differently in vanilla:
 
 ALKA's `IsChainStyleDestructibleRoot` filter checks for `simpleDestruction && !eventDestruction` (chain-style) — which **does NOT match ice** (both flags false). So the existing chain-filter logic doesn't currently shield ice. Need to add an ice-style category.
 
+## NEW finding: `networkForce=true` bypasses destruction message broadcast
+
+Reading the full `DestructiblePiece.Collide(Vector3 force, float multiplier, bool networkForce=false)` decompile:
+
+```csharp
+if (MatchmakingHandler.IsNetworkMatch && !networkForce) {
+    // ... sends SendDestructMessage to network, sets mSentDestructionForThisPiece flag
+    return;  // RETURNS — falls through ONLY if networkForce=true
+}
+
+// These run when networkForce=true:
+if (simpleDestruction) { /* destroy joints + colliders */ }
+if (eventDestruction)  { /* invoke destructionEvent */ }
+// neither: ice cascade-shatter at bottom of method
+```
+
+ALKA's `ApplyExplosiveBlastAt` passes `networkForce=true`, which means:
+
+1. **Network destruction message is NOT sent** (the `SendDestructMessage` line is in the skipped early-return branch).
+2. **Local-destruction logic runs immediately** — server's local ice/chains break instantly.
+3. **Clients don't receive a destruction event** for the same explosion (unless they also independently call ApplyExplosiveBlastAt).
+
+This creates TWO problems simultaneously:
+
+- **Over-destruction**: server breaks every chain/ice within 5u of any explosion (the original Bug B).
+- **Cross-client desync**: only the server sees the break immediately. Clients see the ice as intact UNTIL the server's NSO position-sync catches up to the now-falling ice rigidbody (could be several snapshot ticks of inconsistency).
+
+### Why `networkForce=true` was used
+
+The intent was probably: "the server is processing the explosion, it doesn't need to send another network message because everyone will receive the explosion broadcast and re-process locally." But:
+
+- If clients DON'T re-run `ApplyExplosiveBlastAt` locally: only server destructs, clients stay intact → desync until position-sync.
+- If clients DO re-run locally on their end: they each fire `Collide(force, 10, true)` independently → flag is bypassed → destruction is APPLIED, not sent. Each side runs its own destruction. Outcomes should match if forces are identical.
+
+Both paths are buggy:
+- (a) server-only destruction → desync
+- (b) duplicate client destruction → potentially correct outcomes but no validation, and the explosion might originate from a client-emitted event in the first place, leading to chain-react explosions multiplying.
+
+### Refined fix
+
+The cleanest mechanism that preserves server-authoritative behavior:
+
+```csharp
+private void ApplyExplosiveBlastAt(Vector3 center, float radius, float blastForce) {
+    var cols = Physics.OverlapSphere(center, radius);
+    var dpType = AccessTools.TypeByName("DestructiblePiece");
+    var collideM = (object)dpType != null ? AccessTools.Method(dpType, "Collide") : null;
+
+    foreach (var col in cols) {
+        // Apply physics push (existing code, this is fine)
+        var rb = col.attachedRigidbody;
+        if ((object)rb != null && !rb.isKinematic)
+            rb.AddExplosionForce(blastForce, center, radius, 0.5f);
+
+        // Destruction: do NOT pass networkForce=true; let vanilla's
+        // network sync path send proper SendDestructMessage broadcasts.
+        // Add filters for vanilla-fragile destructibles.
+        if ((object)collideM == null) continue;
+        var dp = col.GetComponent(dpType) ?? col.GetComponentInParent(dpType);
+        if ((object)dp == null) continue;
+
+        // Filter: skip destructibles vanilla wouldn't have blast-destroyed
+        var fThreshF = AccessTools.Field(dpType, "forceThreshold");
+        var simpleF = AccessTools.Field(dpType, "simpleDestruction");
+        var eventF  = AccessTools.Field(dpType, "eventDestruction");
+        float fThresh = (float)fThreshF.GetValue(dp);
+        bool simple = (bool)simpleF.GetValue(dp);
+        bool eventD = (bool)eventF.GetValue(dp);
+
+        // chains (forceThreshold=0, simpleDestruction=true) → vanilla doesn't blast them
+        if (simple && fThresh < 0.01f) continue;
+        // ice (neither flag) → vanilla doesn't blast them either; bullets only
+        if (!simple && !eventD) continue;
+        // LoS check: don't blast through walls
+        if (Physics.Linecast(center, dp.transform.position, out var hit))
+            if (hit.transform != dp.transform && hit.transform.root != dp.transform.root) continue;
+
+        // PASS networkForce=false so SendDestructMessage broadcasts to all clients
+        collideM.Invoke(dp, new object[] { Vector3.up * 15f, 10f, false });
+    }
+}
+```
+
+Key changes:
+1. **`networkForce=false`** — lets vanilla's network sync handle propagation. All clients see the same destruction at the same time.
+2. **Filter chains** (forceThreshold ≈ 0) — vanilla never blast-destroys them
+3. **Filter ice** (both flags false) — same reasoning, requires direct bullet path in vanilla
+4. **LoS check** — explosion shouldn't break things behind walls
+
+Net effect: explosions still damage what they should (crates, breakable pillars, event-style destructibles like floor tiles), but stop the random chain/ice destruction. And the destruction event propagates properly to all clients via vanilla's network sync (no more "host sees broken, client sees intact" lag).
+
 ## Open questions
 
 - Does the oracle's projectile sim actually instantiate Rigidbody bullets, or just simulate positions? Need to read `SFHeadlessHost.cs` projectile-related sections.
