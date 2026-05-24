@@ -60,19 +60,73 @@ A second crate variant **`Crate (3)`** in the same scene has the same physics se
 
 The init-once flag confirms RigidBodyIndexHolder.InitIndex was called during scene load. Stock SF uses this byte index in `NetworkPlayer.SendAddedForce(index, vector, ForceMode)` to identify which rigidbody to apply force to on remote clients (see `CollisionDamage.cs:28`).
 
-### `NetworkSyncableObject` (still to capture)
+### `NetworkSyncableObject` — solo, single instance (initial capture)
 
-Not yet sampled — non-blocking, would just confirm `m_Index` (ushort, separate from RBIH byte) and `mIsListening`. Add in a follow-up if needed.
+C# Console REPL on instance 1 (solo lobby, before any Quick Match):
+
+```
+mHasControl=True
+```
+
+Static field. Returns True even in solo mode — because solo SF treats the local player as the host. Note this is different from the 2-player case below.
+
+### `NetworkSyncableObject` — 2-player joined (Goldberg LAN match)
+
+Two parallel Goldberg-emulated instances joined via Quick Match. Inspector reads on a Crate's NetworkSyncableObject component:
+
+**Host (instance 1, "yellow", account `sf_test_local2`):**
+
+| Field | Value |
+|---|---|
+| `mHasControl` | **True** |
+| `mIsListening` | **True** |
+| `m_AllowForceFromClient` | True |
+| `m_VelocitySync` | False |
+| `m_UsesMoveAlongPathUsingForce` | True |
+| `Index` | 19 (ushort) |
+| `ListeningForPackages` | True |
+| `firstPassFlag` | False |
+| `m_DeadZone` | 0.1 |
+| `m_DirectionFractor` | 0.005 |
+| `m_EndPos` | (-0.0007, -6.6777, 1.5073) |
+
+**Client (instance 2, "blue", account `sf_test_local2_p2`):**
+
+| Field | Value |
+|---|---|
+| `mHasControl` | **False** |
+| `mIsLerping` | True (was actively lerping toward incoming position at sample time) |
+| `m_VelocitySync` | False |
+| `m_UsesMoveAlongPathUsingForce` | True |
+| `m_TimeBetweenPackages` | 0.2485 (~4Hz update from host) |
+| `m_TimeOfLastPackage` | 3676.666 (game-time of most recent state from host) |
+| `m_DirectionFractor` | 0.005 |
+| `mCurrentSendTickCount` | 0 |
+| `mDontSyncPos` | False |
+| `mHasRecievedHelloPackage` | False (the hello-message handshake) |
+
+(Different `Object.name` between sides — host showed `Crate (3)` instance 71162, client showed `Crate (6)` instance 72940. Worth re-confirming same network entity by matching `m_Index` — host = 19, client value not captured yet.)
+
+### Authority model summary
+
+| State | Host vanilla | Client vanilla | Our oracle (server) | Our oracle (client) |
+|---|---|---|---|---|
+| `mHasControl` | **True** | **False** | True (forced via P6.5 patch) | **True (forced — DIVERGES from vanilla)** |
+| Rigidbody integration | full local physics | mostly kinematic + lerp | full local physics | competing: physics + lerp (SmoothTowardTargets fights) |
+| Broadcasts state | yes (host owns) | no | yes | yes (also tries to broadcast — fights with server snapshots) |
+| Lerps toward incoming pos | no | yes | no | yes (via `_nsoTargets`) |
 
 ## Divergence vs oracle setup (Bug F confirmation)
 
-| Field | Vanilla | Oracle server (.115) | Oracle client | Diverges? |
-|---|---|---|---|---|
-| `Rigidbody.isKinematic` | False | False (matches vanilla) | **TRUE permanently** (SmoothTowardTargets forces it at `SFClientRecon.cs:500-501` every frame) | **YES** |
-| `Rigidbody.interpolation` | None | None (untouched) | None (untouched) | no |
-| `Rigidbody.mass` | 1500 | 1500 (prefab) | 1500 (prefab) | no |
-| `Rigidbody.useGravity` | True | True (untouched) | irrelevant when kinematic | effectively yes (kinematic ignores gravity) |
-| Force-sync mechanism | `NetworkPlayer.SendAddedForce(byte index, Vector3 vel, ForceMode)` per `CollisionDamage.cs:28` | not implemented | not implemented | **YES — entire mechanism absent** |
+| Field | Vanilla host | Vanilla client | Oracle server (.115) | Oracle client | Diverges? |
+|---|---|---|---|---|---|
+| `NSO.mHasControl` (static per-process) | **True** | **False** | True | **True (forced)** | **YES — client side is wrong** |
+| `Rigidbody.isKinematic` | False (active sim) | mostly False but mIsLerping switches behaviors | False (matches host) | **TRUE permanently** (SmoothTowardTargets forces it) | **YES** |
+| `Rigidbody.interpolation` | None | None | None | None | no |
+| `Rigidbody.mass` | 1500 | 1500 | 1500 | 1500 | no |
+| `Rigidbody.useGravity` | True | True | True | irrelevant when kinematic | effectively yes |
+| Force-sync mechanism | `NetworkPlayer.SendAddedForce` (broadcasts on collision) | applies received force | not implemented | not implemented | **YES — mechanism absent** |
+| Lerp toward remote state | no (it IS the authority) | yes (`mIsLerping=True` continuously) | n/a | yes but with kinematic flip | partially |
 
 ## What this confirms
 
@@ -111,11 +165,26 @@ New v26 message type: `PktPlayerCollideForce { byte playerSlot, byte rbIndex, Ve
 
 Worth doing Path 1 first (1-line plugin fix) to unblock the immediate symptom, then evaluate whether Path 2 is needed.
 
+## Architectural implication (added after 2-player capture)
+
+Our oracle's "both sides are server" pattern (forcing `MultiplayerManager.IsServer=true` and therefore `NSO.mHasControl=true` on every connected client) is **not** how vanilla SF works. Vanilla picks ONE owner (the host) and everyone else is `mHasControl=false`. The non-owners lerp toward incoming state and never broadcast outgoing.
+
+To match vanilla's quality without losing server authority:
+
+- **Server** (the oracle on .115): `mHasControl=true`. This is the "host" in vanilla terms.
+- **All connected clients**: `mHasControl=false`. They should lerp, not broadcast.
+
+Our current `SFClientRecon.cs:1603-1610` postfix that forces `mHasControl=true` on every NSO start at the client should be **removed** (let it default to false). The smoother's existing lerp-toward-target logic at `SFClientRecon.cs:500-501` is fine — it matches what vanilla `mIsLerping=true` clients do. The conflict goes away because there's no local-side physics integration to fight with.
+
+This single change is potentially the root fix for the "boxes feel wrong" family of symptoms — it preserves the smoother's behavior while eliminating the double-authority race. Worth testing in isolation before adding the more complex `SendAddedForce`-style protocol additions.
+
 ## Open questions
 
-- Does Crate(3) (with `IgnorePlayerWhenOffScreen`) have any physics differences from Crate2(6)? Worth sampling.
-- What is `NetworkSyncableObject.mHasControl` (static) on vanilla solo? Stock code says `MultiplayerManager.IsServer` controls it — in solo no-network match, IsServer is probably false. In our oracle setup we force IsServer=true on both sides, which flips mHasControl=true everywhere.
-- Does SF's `NetworkPlayer.SendAddedForce` work in solo mode? If MatchmakingHandler.IsNetworkMatch is false (which it is in solo), SF might short-circuit the network broadcast and apply force locally only — confirming why solo "feels right" (no network = no divergence possible).
+- Does Crate(3) (with `IgnorePlayerWhenOffScreen`) have any physics differences from Crate2(6) at runtime? Quick check.
+- Does removing the `mHasControl=true` force on clients actually fix Bug F symptoms in oracle play, or does it expose other code paths that assumed the force was in place?
+- Vanilla client shows `mIsLerping=True` continuously — does the oracle's snapshot apply path drive an equivalent flag, or do we bypass SF's own lerp infrastructure entirely?
+- Vanilla host shows `mIsListening=True` (unexpected — would have predicted False since host publishes, doesn't listen). Means the host has its OWN local copy of the listener path active, possibly for the case of being kicked / re-joining. Doesn't change our fix model but worth knowing.
+- `m_AllowForceFromClient=True` on this crate — vanilla supports per-NSO opt-in for client-side forces. Use this as the gate in a future `PktPlayerCollideForce` v26 message implementation: only forward client-emitted forces for NSOs where `m_AllowForceFromClient=true`.
 
 ## Methodology
 
