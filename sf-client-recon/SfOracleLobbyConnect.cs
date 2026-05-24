@@ -78,6 +78,9 @@ namespace SFClientRecon
                     var startMatch = AccessTools.Method(_gmType, "StartMatch");
                     if (RefOk(startMatch))
                         harmony.Patch(startMatch, prefix: new HarmonyMethod(typeof(Plugin), nameof(GameManager_StartMatch_OraclePrefix)));
+                    var startCountDown = AccessTools.Method(_gmType, "StartCountDown");
+                    if (RefOk(startCountDown))
+                        harmony.Patch(startCountDown, prefix: new HarmonyMethod(typeof(Plugin), nameof(GameManager_StartCountDown_OraclePrefix)));
                 }
 
                 Log.LogInfo("[oracle-lobby] Patched Quick/Host Match → UDP oracle (no Steam lobby).");
@@ -223,13 +226,55 @@ namespace SFClientRecon
                         ?? UnityEngine.Object.FindObjectOfType(_gmType);
                     if (RefOk(inst) && RefOk(stillMenuF))
                         stillMenuF.SetValue(inst, false);
-                    var loadingF = AccessTools.Field(_gmType, "isLoading");
-                    if (RefOk(inst) && RefOk(loadingF) && (bool)loadingF.GetValue(inst))
-                        Log.LogInfo("[oracle-lobby] OnMatchStart while isLoading=true — countdown may wait for map load.");
                 }
-                Log.LogInfo("[oracle-lobby] OnMatchStart → StartCountDown ran (boss/minigame hooks).");
+                Log.LogInfo("[oracle-lobby] OnMatchStart (countdown deferred until map load if needed).");
             }
             catch (Exception e) { Log.LogWarning($"[oracle-lobby] OnMatchStart postfix: {e.Message}"); }
+        }
+
+        internal static bool _countDownDeferred;
+
+        /// <summary>Halloween/boss: StartCountDown while isLoading skips pumpkin spawn — wait for load.</summary>
+        internal static bool GameManager_StartCountDown_OraclePrefix(object __instance)
+        {
+            if (!_oracleConnectMode || !RefOk(__instance)) return true;
+            try
+            {
+                var loadingF = AccessTools.Field(__instance.GetType(), "isLoading");
+                if (!RefOk(loadingF) || !(bool)loadingF.GetValue(__instance)) return true;
+                if (_countDownDeferred) return false;
+                if (Instance != null)
+                {
+                    _countDownDeferred = true;
+                    Instance.StartCoroutine(DeferredStartCountDownWhenLoaded(__instance));
+                    Log.LogInfo("[oracle-lobby] StartCountDown deferred — map still loading (boss/Halloween).");
+                }
+                return false;
+            }
+            catch { return true; }
+        }
+
+        private static IEnumerator DeferredStartCountDownWhenLoaded(object gmInst)
+        {
+            float deadline = Time.realtimeSinceStartup + 20f;
+            var loadingF = RefOk(_gmType) ? AccessTools.Field(_gmType, "isLoading") : null;
+            while (Time.realtimeSinceStartup < deadline)
+            {
+                bool loading = RefOk(loadingF) && RefOk(gmInst) && (bool)loadingF.GetValue(gmInst);
+                if (!loading) break;
+                yield return null;
+            }
+            _countDownDeferred = false;
+            try
+            {
+                var m = AccessTools.Method(_gmType, "StartCountDown");
+                if (RefOk(m) && RefOk(gmInst))
+                {
+                    m.Invoke(gmInst, null);
+                    Log.LogInfo("[oracle-lobby] StartCountDown after map load (pumpkin/boss hooks).");
+                }
+            }
+            catch (Exception e) { Log.LogWarning($"[oracle-lobby] deferred StartCountDown: {e.Message}"); }
         }
 
         internal static bool GameManager_StartMatch_OraclePrefix(object __instance)

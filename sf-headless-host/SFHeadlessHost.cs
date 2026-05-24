@@ -68,6 +68,7 @@ namespace SFHeadlessHost
     //   SFHEADLESS_DEBUG      — "1" enables verbose tick logging.
     //   SF_ROUND_END_DELAY    — seconds before MapChange after a kill (default 0.5).
     //   SF_NEXT_MATCH_DELAY   — seconds before StartMatch after MapChange (default 2.0).
+    //   SF_PRE_COMBAT_DELAY   — seconds after map load before weapons/countdown/MapInfo (default 3.0).
     //   SF_ANTICHEAT_ENFORCE  — "1" turns anticheat into drop-mode (default observe-only).
     //   SF_LOBBY_CODE         — 4-char lobby code returned by /code chat command.
     [BepInPlugin(PluginGuid, PluginName, PluginVersion)]
@@ -75,7 +76,7 @@ namespace SFHeadlessHost
     {
         public const string PluginGuid = "com.stickfightdev.headless-host";
         public const string PluginName = "SFHeadlessHost";
-        public const string PluginVersion = "0.2.9";
+        public const string PluginVersion = "0.3.4";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance;
@@ -92,6 +93,9 @@ namespace SFHeadlessHost
         // long enough for clients to load the scene and respawn. Stock SF's
         // k_MAX_SECONDS_UNTIL_AUTO_START is 3s. SF_NEXT_MATCH_DELAY env override.
         internal static float NextMatchDelaySec = 2.0f;
+        // Minimum seconds on a map before another kill can advance the round (stops double MapChange / skip).
+        internal static float RoundMinPlaySec = 12f;
+        private float _roundAdvanceBlockedUntil = -1f;
         private float _pendingClientStartMatchAt = -1f;
         private bool _pendingClientStartMatchFired;
 
@@ -138,6 +142,7 @@ namespace SFHeadlessHost
             Log.LogInfo($"{PluginName} {PluginVersion}: batchmode detected, bootstrapping headless host.");
             _batchModeHost = true;
             InstallMapTerrainAuthorityPatches();
+            EnsureOracleP2PNetworkReady("batchmode-boot");
 
             // Phase 6.9 — settle on scene load (ported from CustomServers).
             // Stock PrepareMapForTravel never runs its kinematic-settle branch
@@ -822,6 +827,15 @@ namespace SFHeadlessHost
         private static bool _oracleStartMatchFired;
         private static float _oracleCountDownAt = -1f;
         private static bool _oracleCountDownFired;
+
+        /// <summary>PostMapLoad runs StartCountDown; cancel the duplicate scheduled tick.</summary>
+        internal static void SuppressScheduledOracleCountDown(string reason)
+        {
+            _oracleCountDownAt = -1f;
+            _oracleCountDownFired = true;
+            Log.LogInfo($"[P6.5] Suppressed scheduled StartCountDown ({reason}).");
+        }
+
         private static void InvokeOracleStartCountDown()
         {
             try
@@ -858,10 +872,9 @@ namespace SFHeadlessHost
                 // Also reset randomWeaponCounter so a weapon will spawn soon.
                 var rwcField = AccessTools.Field(gmType, "randomWeaponCounter");
                 if ((object)rwcField != null)
-                {
                     rwcField.SetValue(gmInst, 2.0f);
-                    Log.LogInfo("[P6.5] randomWeaponCounter = 2.0 (first weapon spawn ~2s from now).");
-                }
+                if ((object)Instance != null)
+                    Instance.ScheduleNextSkyWeapon(OracleFirstSkyWeaponDelay);
 
                 // Phase 6.9: manually invoke the network branch of
                 // PrepareMapForTravel that SF's host normally runs (and which
@@ -898,8 +911,12 @@ namespace SFHeadlessHost
 
         private System.Collections.IEnumerator DelayedMapTerrainInitCoroutine()
         {
-            yield return new WaitForSeconds(2f);
-            EnsureMapSyncObjectsRegistered();
+            yield return new WaitForSeconds(OraclePreCombatGraceSec);
+            Scene scene;
+            if (TryFindLoadedSceneForCurrentMapIndex(out scene))
+                EnsureMapSyncObjectsRegistered(scene, true);
+            else
+                EnsureMapSyncObjectsRegistered();
             InvokeCheckForGroundWeapons("scene-loaded-delay");
             _groundWeaponsRetryAt = Time.realtimeSinceStartup + 4f;
         }
@@ -1066,13 +1083,51 @@ namespace SFHeadlessHost
                 if ((object)Instance != null)
                 {
                     Instance.EnsureMapSyncObjectsRegistered();
-                    Instance.InvokeCheckForGroundWeapons("InitChain");
+                    Instance.FlushGroundWeaponsAfterCheck("InitChain");
                 }
             }
             catch (Exception e)
             {
                 Log.LogError($"[P6.9] InvokeMultiplayerManagerInitChain threw: {e}");
             }
+        }
+
+        /// <summary>Boss/Halloween maps: wake CustomMap handlers after scene + countdown init.</summary>
+        private static void InvokeOracleBossMapSetup()
+        {
+            if (!_batchModeHost) return;
+            try
+            {
+                int sceneIdx = (object)Instance != null ? Instance._currentSceneIndex : 0;
+                if (sceneIdx < 100 || sceneIdx > 109) return;
+                var behaviours = UnityEngine.Object.FindObjectsOfType<MonoBehaviour>();
+                if (behaviours == null) return;
+                int invoked = 0;
+                foreach (var mb in behaviours)
+                {
+                    if ((object)mb == null) continue;
+                    string tn = mb.GetType().Name;
+                    if (tn.IndexOf("CustomMap", StringComparison.OrdinalIgnoreCase) < 0
+                        && tn.IndexOf("Boss", StringComparison.OrdinalIgnoreCase) < 0
+                        && tn.IndexOf("Halloween", StringComparison.OrdinalIgnoreCase) < 0
+                        && tn.IndexOf("Pumpkin", StringComparison.OrdinalIgnoreCase) < 0)
+                        continue;
+                    foreach (var m in mb.GetType().GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+                    {
+                        if (ReferenceEquals(m, null) || m.GetParameters().Length != 0) continue;
+                        string mn = m.Name;
+                        if (mn == "Awake" || mn == "Start" || mn.IndexOf("Init", StringComparison.OrdinalIgnoreCase) >= 0
+                            || mn.IndexOf("Spawn", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            try { m.Invoke(mb, null); invoked++; } catch { }
+                            break;
+                        }
+                    }
+                }
+                if (invoked > 0)
+                    Log.LogInfo($"[P6.5] Boss map setup: invoked {invoked} handler(s) on scene {sceneIdx}.");
+            }
+            catch (Exception e) { Log.LogWarning($"[P6.5] InvokeOracleBossMapSetup: {e.Message}"); }
         }
 
         // One-shot NetworkSyncableObject inventory — fires once after match-start
@@ -1893,8 +1948,7 @@ namespace SFHeadlessHost
                     {
                         _pendingRearmCombatAt = -1f;
                         RearmOracleCombatLoop("delayed-post-StartMatch");
-                        InvokeCheckForGroundWeapons("post-StartMatch");
-                        BroadcastGroundWeaponsToAllClients();
+                        FlushGroundWeaponsAfterCheck("post-StartMatch");
                     }
                     TickOracleMapLoadTimeout();
                     TickPeriodicWeaponRearm();
@@ -1935,6 +1989,9 @@ namespace SFHeadlessHost
                         TickNsoFallGuard();
                         TickStaleNsoFreezer();
                         TickGroundWeaponsRetry();
+                        TickMapSyncRetry();
+                        TickOracleMapInfoBootstrap();
+                        TickOraclePreCombatGrace();
                     }
                     // Phase 6.17 — advance virtual projectiles each frame.
                     TickProjectiles();
@@ -2957,10 +3014,15 @@ namespace SFHeadlessHost
         private void TryScheduleRoundAdvance(string reason)
         {
             if (_pendingRoundAdvanceAt >= 0f) return;
+            float now = Time.realtimeSinceStartup;
+            if (_roundAdvanceBlockedUntil > 0f && now < _roundAdvanceBlockedUntil)
+            {
+                Log.LogInfo($"[SF] Round advance ignored ({reason}): map grace {(_roundAdvanceBlockedUntil - now):0.0}s left.");
+                return;
+            }
             if (IsOracleMapLoadInProgress())
             {
-                QueueRoundAdvanceWhileMapLoading();
-                Log.LogInfo($"[SF] Round advance queued ({reason}): oracle map load in progress.");
+                Log.LogInfo($"[SF] Round advance ignored ({reason}): oracle map load in progress.");
                 return;
             }
             if (!_matchStarted)
@@ -2968,7 +3030,7 @@ namespace SFHeadlessHost
                 Log.LogDebug($"[SF] Round advance ignored ({reason}): match not started.");
                 return;
             }
-            _pendingRoundAdvanceAt = Time.realtimeSinceStartup + RoundEndDelaySec;
+            _pendingRoundAdvanceAt = now + RoundEndDelaySec;
             Log.LogInfo($"[SF] Round advance scheduled ({reason}) in {RoundEndDelaySec:0.0}s — clients={CountInitializedSfClients()} soloTest={IsSoloTestLobby()}");
         }
 
@@ -3010,6 +3072,7 @@ namespace SFHeadlessHost
             _recentMaps.Enqueue(nextScene);
             while (_recentMaps.Count > _recentMapsAvoidWindow) _recentMaps.Dequeue();
             _currentSceneIndex = nextScene;
+            _roundAdvanceBlockedUntil = Time.realtimeSinceStartup + RoundMinPlaySec;
             bool solo = IsSoloTestLobby();
             Log.LogInfo($"[SF] Round advance #{_roundCounter}: MapChange → scene {nextScene} (winner=255, soloTest={solo})");
             // ChangeMap body: [byte winnerIndex=255 (no winner)][byte mapType=0 (Landfall)][int32 sceneIndex LE]
@@ -3031,6 +3094,7 @@ namespace SFHeadlessHost
             _cachedGroundWeaponsBody = null;
             _groundWeaponsEntryCount = 0;
             _skyWeaponSpawnCount = 0;
+            _oracleNextSkyWeaponAt = -1f;
             ScheduleOracleReloadCurrentMap("AdvanceRound");
             // Reset Spawned flags so next ClientRequestingToSpawn is honored.
             foreach (var kv in _sfClients) kv.Value.Spawned = false;
@@ -3044,6 +3108,8 @@ namespace SFHeadlessHost
             _nsoInventoryDone = false;
             _nsoInventoryAt = -1f;
             _mapSyncObjectsRegistered = 0;
+            _oraclePreCombatReadyAt = -1f;
+            _oraclePreCombatSceneIndex = -1;
             _nsoSpawnPos.Clear();
             _nsoLastBroadcastPos.Clear();
             _nsoLastMovedAt.Clear();
@@ -3384,6 +3450,7 @@ namespace SFHeadlessHost
             _pendingClientStartMatchAt = Time.realtimeSinceStartup + Mathf.Max(5f, NextMatchDelaySec + 2f);
             _pendingClientStartMatchFired = false;
             _matchStarted = true;
+            _roundAdvanceBlockedUntil = Time.realtimeSinceStartup + RoundMinPlaySec;
             _sceneLoadRealtime = Time.realtimeSinceStartup;
             try
             {
@@ -3422,9 +3489,8 @@ namespace SFHeadlessHost
             // is treated as a fresh round-start rather than a respawn.
             foreach (var kv in _sfClients) kv.Value.Spawned = false;
             Log.LogInfo("[SF] Broadcast StartMatch");
-            // Sky weapons + ground weapons re-arm after clients load the new scene.
-            _pendingRearmCombatAt = Time.realtimeSinceStartup + 0.5f;
-            _groundWeaponsRetryAt = Time.realtimeSinceStartup + 4f;
+            // Weapons/combat re-arm only after PostMapLoad pre-combat grace (RunOraclePreCombatStart).
+            _pendingRearmCombatAt = -1f;
         }
 
         // Phase 6.12 — inbound v26 PktPlayerInput from SFClientRecon plugin.
@@ -5715,8 +5781,12 @@ namespace SFHeadlessHost
                 RoundEndDelaySec = fv;
             if (float.TryParse(Environment.GetEnvironmentVariable("SF_NEXT_MATCH_DELAY"), out fv) && fv >= 0f && fv <= 10f)
                 NextMatchDelaySec = fv;
+            if (float.TryParse(Environment.GetEnvironmentVariable("SF_ROUND_MIN_PLAY"), out fv) && fv >= 3f && fv <= 60f)
+                RoundMinPlaySec = fv;
+            if (float.TryParse(Environment.GetEnvironmentVariable("SF_PRE_COMBAT_DELAY"), out fv) && fv >= 1f && fv <= 10f)
+                OraclePreCombatGraceSec = fv;
 
-            Log.LogInfo($"Config: BindPort={BindPort} BridgePort={BridgePort} InitialScene={InitialScene} Verbose={Verbose} RoundEndDelay={RoundEndDelaySec:0.0}s NextMatchDelay={NextMatchDelaySec:0.0}s");
+            Log.LogInfo($"Config: BindPort={BindPort} BridgePort={BridgePort} InitialScene={InitialScene} Verbose={Verbose} RoundEndDelay={RoundEndDelaySec:0.0}s NextMatchDelay={NextMatchDelaySec:0.0}s RoundMinPlay={RoundMinPlaySec:0.0}s PreCombatGrace={OraclePreCombatGraceSec:0.0}s");
         }
 
         // Harmony postfix on NetworkSocketServer ctor. The stock ctor sets
