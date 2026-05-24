@@ -1783,6 +1783,7 @@ namespace SFHeadlessHost
         private uint  _heartbeatLastInput;
 
         private int _updateErrorTicks;
+        private string _updateErrorFirstStackTrace;
         private void Update()
         {
             try
@@ -1793,9 +1794,18 @@ namespace SFHeadlessHost
             {
                 _updateErrorTicks++;
                 // Don't kill the boot state; just log periodically so we can see what's wrong.
+                // Print full stack trace separately — `{e}` formatting via Mono sometimes
+                // elides frames. Capture first stack trace + log it on every rate-limited
+                // print so it survives in long-running log truncation. Resolves diagnostic
+                // half of Bug #45 in notes/bug-investigations/2026-05-24_v0.3.4-session-bugs.md.
+                if (_updateErrorFirstStackTrace == null)
+                    _updateErrorFirstStackTrace = e.StackTrace ?? "(no stack)";
                 if (_updateErrorTicks <= 5 || _updateErrorTicks % 300 == 0)
                 {
-                    Log.LogError($"SFHeadlessHost.Update (count={_updateErrorTicks}): {e}");
+                    Log.LogError($"SFHeadlessHost.Update (count={_updateErrorTicks}) {e.GetType().Name}: {e.Message}");
+                    Log.LogError($"  inner: {e.InnerException?.GetType().Name}: {e.InnerException?.Message}");
+                    Log.LogError($"  stack[first]: {_updateErrorFirstStackTrace}");
+                    Log.LogError($"  stack[current]: {e.StackTrace}");
                 }
             }
         }
