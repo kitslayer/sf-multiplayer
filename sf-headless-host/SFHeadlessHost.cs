@@ -4197,6 +4197,31 @@ namespace SFHeadlessHost
             return speed < 50f || weaponType == 5 || weaponType == 6 || weaponType == 7 || weaponType == 8;
         }
 
+        // P6.17 — server-side explosion physics. Applies AddExplosionForce to
+        // nearby dynamic rigidbodies + calls DestructiblePiece.Collide on
+        // destructibles in radius.
+        //
+        // Two bugs fixed 2026-05-24 (see notes/bug-investigations/2026-05-24_OPEN-3_chains_break_root_cause.md):
+        //
+        // 1. Chains/ice were being randomly destroyed by any nearby explosion.
+        //    Vanilla SF chains have forceThreshold=0 (any non-zero force breaks
+        //    them) and ice has forceThreshold=15 (this method's effective force
+        //    of 15*10=150 trivially exceeds it). The blanket OverlapSphere +
+        //    blanket Collide() invocation triggered destruction on every
+        //    chain/ice in range. Vanilla bullets that DON'T break chains/ice
+        //    are raycasts that hit specific targets — they don't blanket-blast.
+        //    Filter added below to skip vanilla-fragile destructibles.
+        //
+        // 2. networkForce=true was being passed, which makes Collide bypass
+        //    its network branch (SendDestructMessage). Destruction was applied
+        //    locally on the server only, and the destruction event was never
+        //    sent to clients — clients only saw the break via the subsequent
+        //    NSO position-sync (ice falls below world, position lerps down).
+        //    networkForce=false now lets vanilla broadcast the destruction
+        //    event properly, so all clients see the same break at the same time.
+        //
+        // 3. Added LoS check via Physics.Linecast — explosions should not
+        //    blast through walls.
         private void ApplyExplosiveBlastAt(Vector3 center, float radius, float blastForce)
         {
             try
@@ -4205,25 +4230,49 @@ namespace SFHeadlessHost
                 if (cols == null) return;
                 var dpType = AccessTools.TypeByName("DestructiblePiece");
                 var collideM = (object)dpType != null ? AccessTools.Method(dpType, "Collide") : null;
-                int n = 0;
+                var fThreshF = (object)dpType != null ? AccessTools.Field(dpType, "forceThreshold") : null;
+                var simpleF  = (object)dpType != null ? AccessTools.Field(dpType, "simpleDestruction") : null;
+                var eventF   = (object)dpType != null ? AccessTools.Field(dpType, "eventDestruction") : null;
+                int affected = 0, skippedChain = 0, skippedIce = 0, skippedLoS = 0;
                 foreach (var col in cols)
                 {
                     if ((object)col == null) continue;
+
+                    // Always apply explosion impulse (visual feedback for any dynamic body)
                     var rb = col.attachedRigidbody;
                     if ((object)rb != null && !rb.isKinematic)
                         rb.AddExplosionForce(blastForce, center, radius, 0.5f);
-                    if ((object)collideM != null && (object)dpType != null)
+
+                    // For destructibles: filter before calling Collide
+                    if ((object)collideM == null || (object)dpType == null) continue;
+                    var dp = col.GetComponent(dpType) ?? col.GetComponentInParent(dpType);
+                    if ((object)dp == null) continue;
+
+                    // Skip vanilla-fragile destructibles: chains (simpleDestruction with threshold≈0)
+                    // and ice (both flags false). Vanilla bullets break these via direct raycast
+                    // hit calls; blanket explosion damage is OUR bug, not vanilla behavior.
+                    bool simple = (object)simpleF  != null && (bool)simpleF.GetValue(dp);
+                    bool eventD = (object)eventF   != null && (bool)eventF.GetValue(dp);
+                    float thresh = (object)fThreshF != null ? (float)fThreshF.GetValue(dp) : 0f;
+
+                    if (simple && thresh < 0.01f) { skippedChain++; continue; }   // chains
+                    if (!simple && !eventD)       { skippedIce++;   continue; }   // ice
+
+                    // LoS check: don't blast through walls
+                    Vector3 dpPos = ((Component)dp).transform.position;
+                    if (Physics.Linecast(center, dpPos, out var hit) && hit.collider != col &&
+                        (hit.transform.root != ((Component)dp).transform.root))
                     {
-                        var dp = col.GetComponent(dpType) ?? col.GetComponentInParent(dpType);
-                        if ((object)dp != null)
-                        {
-                            collideM.Invoke(dp, new object[] { Vector3.up * 15f, 10f, true });
-                            n++;
-                        }
+                        skippedLoS++; continue;
                     }
+
+                    // Pass networkForce=false so SendDestructMessage broadcasts to all clients.
+                    // Previously this was `true` which suppressed the network destruction event.
+                    collideM.Invoke(dp, new object[] { Vector3.up * 15f, 10f, false });
+                    affected++;
                 }
-                if (n > 0)
-                    Log.LogInfo($"[P6.17] Explosion at {center} radius={radius} affected {n} destructibles");
+                if (affected > 0 || skippedChain > 0 || skippedIce > 0 || skippedLoS > 0)
+                    Log.LogInfo($"[P6.17] Explosion at {center} r={radius}: affected={affected} skipChain={skippedChain} skipIce={skippedIce} skipLoS={skippedLoS}");
             }
             catch (Exception e) { Log.LogWarning($"[P6.17 explosion] {e.Message}"); }
         }
