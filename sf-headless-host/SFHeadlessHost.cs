@@ -71,11 +71,11 @@ namespace SFHeadlessHost
     //   SF_ANTICHEAT_ENFORCE  — "1" turns anticheat into drop-mode (default observe-only).
     //   SF_LOBBY_CODE         — 4-char lobby code returned by /code chat command.
     [BepInPlugin(PluginGuid, PluginName, PluginVersion)]
-    public class Plugin : BaseUnityPlugin
+    public partial class Plugin : BaseUnityPlugin
     {
         public const string PluginGuid = "com.stickfightdev.headless-host";
         public const string PluginName = "SFHeadlessHost";
-        public const string PluginVersion = "0.1.0";
+        public const string PluginVersion = "0.2.9";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance;
@@ -92,6 +92,8 @@ namespace SFHeadlessHost
         // long enough for clients to load the scene and respawn. Stock SF's
         // k_MAX_SECONDS_UNTIL_AUTO_START is 3s. SF_NEXT_MATCH_DELAY env override.
         internal static float NextMatchDelaySec = 2.0f;
+        private float _pendingClientStartMatchAt = -1f;
+        private bool _pendingClientStartMatchFired;
 
         private void Awake()
         {
@@ -134,6 +136,14 @@ namespace SFHeadlessHost
                 return;
             }
             Log.LogInfo($"{PluginName} {PluginVersion}: batchmode detected, bootstrapping headless host.");
+            _batchModeHost = true;
+            InstallMapTerrainAuthorityPatches();
+
+            // Phase 6.9 — settle on scene load (ported from CustomServers).
+            // Stock PrepareMapForTravel never runs its kinematic-settle branch
+            // on the oracle; without this, chains stress-break and crates fall.
+            SceneManager.sceneLoaded -= OnAnySceneLoadedRunSettle;
+            SceneManager.sceneLoaded += OnAnySceneLoadedRunSettle;
 
             // P0-12 — install on the server side too. AddMapDataObject runs
             // in MapInfoSyncableBase.Awake on the oracle's scene; without
@@ -291,6 +301,15 @@ namespace SFHeadlessHost
                 TryPatch(harmony, "MultiplayerManager.ReadyUp (postfix log)",
                     (object)mmType != null ? AccessTools.Method(mmType, "ReadyUp") : null,
                     postfix: nameof(ReadyUpPostfix));
+
+                var ppTypeHeadless = AccessTools.TypeByName("P2PPackageHandler");
+                if (_batchModeHost && (object)ppTypeHeadless != null)
+                {
+                    var isPkt = AccessTools.Method(ppTypeHeadless, "IsPacketAvailable");
+                    if ((object)isPkt != null)
+                        TryPatch(harmony, "P2PPackageHandler.IsPacketAvailable (headless null-guard)",
+                            isPkt, prefix: nameof(IsPacketAvailableHeadlessPrefix));
+                }
 
                 if (_p65MissingPatches.Count == 0)
                 {
@@ -541,6 +560,11 @@ namespace SFHeadlessHost
                 var mmInst = UnityEngine.Object.FindObjectOfType(mmType);
                 if ((object)mmInst == null)
                 {
+                    var all = Resources.FindObjectsOfTypeAll(mmType);
+                    if (all != null && all.Length > 0) mmInst = all[0];
+                }
+                if ((object)mmInst == null)
+                {
                     if (_srwCallCount <= 3)
                         Log.LogWarning("[P6.5 SRW] MultiplayerManager instance is null; skipping.");
                     return false;
@@ -641,7 +665,11 @@ namespace SFHeadlessHost
                 // For ObjectUpdate, log the index every time so we can see
                 // which scene NSOs are broadcasting (the index is the first
                 // 2 bytes of the body, ushort LE).
-                if (msgType == 26 && data != null && data.Length >= 2 && _p65ObjUpdateIdxLogCount < 30)
+                    if (msgType == 31 && data != null && (object)Instance != null)
+                        Instance.CacheGroundWeaponsBroadcast(data);
+                    if (msgType == 33 && sample)
+                        Log.LogInfo($"[v26.6] Host MapInfoSync forward count={_p65BroadcastByType[msgType]} bodyLen={data?.Length ?? 0}");
+                    if (msgType == 26 && data != null && data.Length >= 2 && _p65ObjUpdateIdxLogCount < 30)
                 {
                     ushort idx = (ushort)(data[0] | (data[1] << 8));
                     if (!_p65ObjUpdateSeenIndices.Contains(idx))
@@ -714,10 +742,14 @@ namespace SFHeadlessHost
                     // fires OnCollisionEnter → SendDestructMessage → server.
                     if (msgType == 28 || msgType == 29 || msgType == 30)
                     {
-                        skip = true;
-                        if (_p65DestructionFilterCount < 5 || _p65DestructionFilterCount % 50 == 0)
-                            Log.LogInfo($"[destruction] Skip server-originated msgType={msgType} (#{_p65DestructionFilterCount}) — only client-initiated destructions are forwarded");
-                        _p65DestructionFilterCount++;
+                        skip = (object)Instance != null
+                            && Instance.ShouldSkipServerOriginatedDestruction(data, data?.Length ?? 0);
+                        if (skip)
+                        {
+                            if (_p65DestructionFilterCount < 5 || _p65DestructionFilterCount % 50 == 0)
+                                Log.LogInfo($"[destruction] Skip server-originated msgType={msgType} (#{_p65DestructionFilterCount}) — killbox/chain-load");
+                            _p65DestructionFilterCount++;
+                        }
                     }
                     if (!skip) Instance.ForwardBroadcastToV25Clients(msgType, data, ignoreUID, channel);
                 }
@@ -802,19 +834,26 @@ namespace SFHeadlessHost
                 if ((object)gmInst == null) gmInst = UnityEngine.Object.FindObjectOfType(gmType);
                 if ((object)gmInst == null) { Log.LogWarning("[P6.5] GameManager instance not found (countdown)"); return; }
 
-                // Brute-force: set GameManager.inFight = true directly. The
-                // CountDownCoroutine path depends on mCountDownHandler (UI
-                // element) and m_CustomMapInfoHandler which may be null in
-                // batchmode. Bypass them entirely.
+                var startCountDown = AccessTools.Method(gmType, "StartCountDown");
+                bool countDownOk = false;
+                if ((object)startCountDown != null)
+                {
+                    try
+                    {
+                        startCountDown.Invoke(gmInst, null);
+                        countDownOk = true;
+                        Log.LogInfo("[P6.5] Invoked GameManager.StartCountDown() on oracle (boss/minigame coroutines).");
+                    }
+                    catch (Exception e)
+                    {
+                        Log.LogWarning($"[P6.5] StartCountDown threw: {e.InnerException?.Message ?? e.Message}");
+                    }
+                }
                 var inFightField = AccessTools.Field(gmType, "inFight");
-                if ((object)inFightField != null)
+                if (!countDownOk && (object)inFightField != null)
                 {
                     inFightField.SetValue(gmInst, true);
-                    Log.LogInfo("[P6.5] Forced GameManager.inFight = true (bypassing countdown UI).");
-                }
-                else
-                {
-                    Log.LogWarning("[P6.5] GameManager.inFight field not found");
+                    Log.LogInfo("[P6.5] Fallback: GameManager.inFight = true (no countdown UI in batchmode).");
                 }
                 // Also reset randomWeaponCounter so a weapon will spawn soon.
                 var rwcField = AccessTools.Field(gmType, "randomWeaponCounter");
@@ -835,6 +874,128 @@ namespace SFHeadlessHost
             {
                 Log.LogError($"[P6.5] InvokeOracleStartCountDown threw: {e}");
             }
+        }
+
+        // Phase 6.9 — settle phase at Landfall map load. Freezes all RBs briefly,
+        // then re-enables dynamics only on pushable crates (not chain-style ice).
+        private void OnAnySceneLoadedRunSettle(Scene scene, LoadSceneMode mode)
+        {
+            if (scene.name == "MainScene" || string.IsNullOrEmpty(scene.name)) return;
+            if ((object)Instance != null && scene.buildIndex != Instance._currentSceneIndex)
+            {
+                Log.LogInfo($"[P6.9 settle] Skip stale scene '{scene.name}' buildIndex={scene.buildIndex} (match={Instance._currentSceneIndex}).");
+                if (Instance.IsOracleMapLoadInProgress())
+                    Instance.ForceCompleteOracleMapLoadIfNeeded("stale-settle-skip");
+                return;
+            }
+            _sceneLoadRealtime = Time.realtimeSinceStartup;
+            _nsoSpawnPos.Clear();
+            _nsoPeriodicKeyframeNextAt = Time.realtimeSinceStartup + 1f;
+            Log.LogInfo($"[P6.9 settle] Scene loaded: '{scene.name}' (buildIndex={scene.buildIndex}); starting settle coroutine.");
+            StartCoroutine(SettlePhaseCoroutine(scene));
+            StartCoroutine(DelayedMapTerrainInitCoroutine());
+        }
+
+        private System.Collections.IEnumerator DelayedMapTerrainInitCoroutine()
+        {
+            yield return new WaitForSeconds(2f);
+            EnsureMapSyncObjectsRegistered();
+            InvokeCheckForGroundWeapons("scene-loaded-delay");
+            _groundWeaponsRetryAt = Time.realtimeSinceStartup + 4f;
+        }
+
+        private System.Collections.IEnumerator SettlePhaseCoroutine(Scene scene)
+        {
+            yield return null;
+            var rootGOs = scene.GetRootGameObjects();
+            var allRBs = new List<Rigidbody>();
+            foreach (var go in rootGOs)
+            {
+                if ((object)go == null) continue;
+                allRBs.AddRange(go.GetComponentsInChildren<Rigidbody>(true));
+            }
+            int n = allRBs.Count;
+            Log.LogInfo($"[P6.9 settle] Scene '{scene.name}': freezing {n} rigidbodies for settle phase.");
+            bool[] wasKinematic = new bool[n];
+            for (int i = 0; i < n; i++)
+            {
+                var rb = allRBs[i];
+                if ((object)rb == null) continue;
+                wasKinematic[i] = rb.isKinematic;
+                rb.isKinematic = true;
+                rb.velocity = Vector3.zero;
+                rb.angularVelocity = Vector3.zero;
+            }
+            float settleSec = n > 50 ? 2.5f : 1.5f;
+            yield return new WaitForSecondsRealtime(settleSec);
+            var dpType = AccessTools.TypeByName("DestructiblePiece");
+            var dontEnableType = AccessTools.TypeByName("DontEnableRig");
+            FieldInfo simpleField = (object)dpType != null ? AccessTools.Field(dpType, "simpleDestruction") : null;
+            FieldInfo eventField = (object)dpType != null ? AccessTools.Field(dpType, "eventDestruction") : null;
+            int reEnabled = 0;
+            for (int i = 0; i < n; i++)
+            {
+                var rb = allRBs[i];
+                if ((object)rb == null) continue;
+                if (wasKinematic[i]) continue;
+                bool stayKinematic = false;
+                if ((object)dpType != null)
+                {
+                    var dp = rb.GetComponent(dpType);
+                    if ((object)dp != null)
+                    {
+                        bool simple = (object)simpleField != null && (bool)simpleField.GetValue(dp);
+                        bool ev = (object)eventField != null && (bool)eventField.GetValue(dp);
+                        if (!simple && !ev) stayKinematic = true;
+                    }
+                }
+                if ((object)dontEnableType != null && rb.GetComponent(dontEnableType) != null) stayKinematic = true;
+                if (!stayKinematic)
+                {
+                    rb.isKinematic = false;
+                    reEnabled++;
+                }
+            }
+            Log.LogInfo($"[P6.9 settle] Settle complete for '{scene.name}': {reEnabled}/{n} rigidbodies re-enabled dynamic.");
+            yield return new WaitForFixedUpdate();
+            yield return new WaitForFixedUpdate();
+            MarkSceneNsosMovedAfterSettle();
+            if ((object)Instance != null)
+                Instance.RunPostMapLoadServerInit(scene);
+        }
+
+        // After settle, seed snapshot tracking so quiescent crates still broadcast once.
+        private void MarkSceneNsosMovedAfterSettle()
+        {
+            try
+            {
+                if ((object)_nsoType == null)
+                {
+                    _nsoType = AccessTools.TypeByName("NetworkSyncableObject");
+                    if ((object)_nsoType == null) return;
+                    _nsoIndexProp = AccessTools.Property(_nsoType, "Index");
+                    _nsoIndexField = AccessTools.Field(_nsoType, "m_Index");
+                }
+                var all = UnityEngine.Object.FindObjectsOfType(_nsoType);
+                if (all == null) return;
+                float now = Time.realtimeSinceStartup;
+                foreach (var nso in all)
+                {
+                    var comp = nso as Component;
+                    if ((object)comp == null) continue;
+                    ushort id = 0;
+                    if ((object)_nsoIndexProp != null)
+                        id = (ushort)_nsoIndexProp.GetValue(nso, null);
+                    else if ((object)_nsoIndexField != null)
+                        id = (ushort)_nsoIndexField.GetValue(nso);
+                    var p = comp.transform.position;
+                    _nsoLastBroadcastPos[id] = p;
+                    _nsoLastMovedAt[id] = now;
+                    if (p.y > -30f && !IsChainStyleDestructibleRoot(comp.gameObject) && !IsWeaponNsoRoot(comp.gameObject))
+                        _nsoSpawnPos[id] = p;
+                }
+            }
+            catch (Exception ex) { Log.LogWarning($"[P6.9 settle] MarkSceneNsosMovedAfterSettle: {ex.Message}"); }
         }
 
         // Phase 6.9 — manual invoke of MultiplayerManager.InitMapDataObjects +
@@ -861,11 +1022,17 @@ namespace SFHeadlessHost
                     catch (Exception e) { Log.LogError($"[P6.9] InitMapDataObjects threw: {e.InnerException?.Message ?? e.Message}"); }
                 }
 
+                var clientsField = AccessTools.Field(mmType, "mConnectedClients");
+                var clientsArr = (object)clientsField != null ? clientsField.GetValue(mmInst) as Array : null;
                 var readyUp = AccessTools.Method(mmType, "ReadyUp");
-                if ((object)readyUp != null)
+                if ((object)readyUp != null && clientsArr != null && clientsArr.Length > 0)
                 {
                     try { readyUp.Invoke(mmInst, null); Log.LogInfo("[P6.9] ReadyUp invoked manually."); }
                     catch (Exception e) { Log.LogError($"[P6.9] ReadyUp threw: {e.InnerException?.Message ?? e.Message}"); }
+                }
+                else
+                {
+                    Log.LogInfo("[P6.9] Skipping ReadyUp — mConnectedClients empty on oracle (expected).");
                 }
 
                 // InitSyncedObjects is the critical one — runs NSO.Init on every
@@ -895,6 +1062,11 @@ namespace SFHeadlessHost
                 {
                     try { checkGround.Invoke(mmInst, null); Log.LogInfo("[P6.8] CheckForGroundWeapons invoked manually — map-preset weapons broadcast."); }
                     catch (Exception e) { Log.LogError($"[P6.8] CheckForGroundWeapons threw: {e.InnerException?.Message ?? e.Message}"); }
+                }
+                if ((object)Instance != null)
+                {
+                    Instance.EnsureMapSyncObjectsRegistered();
+                    Instance.InvokeCheckForGroundWeapons("InitChain");
                 }
             }
             catch (Exception e)
@@ -1179,7 +1351,7 @@ namespace SFHeadlessHost
                 var mwType = AccessTools.TypeByName("MapWrapper");
                 if ((object)mwType == null) { Log.LogWarning("[P6.5] MapWrapper type not found"); return; }
 
-                int sceneIdx = 6;
+                int sceneIdx = (object)Instance != null ? Instance._currentSceneIndex : 6;
                 var mapWrapper = Activator.CreateInstance(mwType);
                 var mtField = AccessTools.Field(mwType, "MapType");
                 var mdField = AccessTools.Field(mwType, "MapData");
@@ -1344,6 +1516,34 @@ namespace SFHeadlessHost
         }
         // Generic skip-prefix: return false to skip the original method.
         internal static bool SkipPrefix() => false;
+
+        // Headless oracle: channels[channel] can be null → 40k+ NullRef/frame in ListenForPackages.
+        internal static bool IsPacketAvailableHeadlessPrefix(object __instance, int channel, ref bool __result)
+        {
+            if (!_batchModeHost) return true;
+            try
+            {
+                var chField = AccessTools.Field(__instance.GetType(), "channels");
+                if ((object)chField == null) { __result = false; return false; }
+                var channels = chField.GetValue(__instance) as Array;
+                if (channels == null || channel < 0 || channel >= channels.Length)
+                {
+                    __result = false;
+                    return false;
+                }
+                if (channels.GetValue(channel) == null)
+                {
+                    __result = false;
+                    return false;
+                }
+            }
+            catch
+            {
+                __result = false;
+                return false;
+            }
+            return true;
+        }
 
         // NSO.Start postfix on client: force the static mHasControl=true so
         // the client's NSO.LateUpdate broadcasts position deltas.
@@ -1675,6 +1875,13 @@ namespace SFHeadlessHost
                         _pendingRoundAdvanceAt = -1f;
                         AdvanceRound();
                     }
+                    if (_pendingClientStartMatchAt > 0f && Time.realtimeSinceStartup >= _pendingClientStartMatchAt && !_pendingClientStartMatchFired)
+                    {
+                        _pendingClientStartMatchAt = -1f;
+                        _pendingClientStartMatchFired = true;
+                        BroadcastStartMatch();
+                        Log.LogInfo("[SF] Deferred StartMatch sent to clients (post MapChange load window).");
+                    }
                     // After MapChange settles, send StartMatch to kick the next round's countdown.
                     if (_pendingStartMatchAt > 0f && Time.realtimeSinceStartup >= _pendingStartMatchAt)
                     {
@@ -1682,6 +1889,16 @@ namespace SFHeadlessHost
                         BroadcastStartMatch();
                         Log.LogInfo("[SF] Round advance: StartMatch sent.");
                     }
+                    if (_pendingRearmCombatAt > 0f && Time.realtimeSinceStartup >= _pendingRearmCombatAt)
+                    {
+                        _pendingRearmCombatAt = -1f;
+                        RearmOracleCombatLoop("delayed-post-StartMatch");
+                        InvokeCheckForGroundWeapons("post-StartMatch");
+                        BroadcastGroundWeaponsToAllClients();
+                    }
+                    TickOracleMapLoadTimeout();
+                    TickPeriodicWeaponRearm();
+                    TickOracleSkyWeaponSpawner();
                     // Push the latest per-slot inputs into each spawned rig's
                     // CharacterActions. Done every frame even if no new input
                     // arrived — analog sticks need their last value held so
@@ -1711,7 +1928,14 @@ namespace SFHeadlessHost
                         Log.LogInfo($"heartbeat: scene={SceneManager.GetActiveScene().name} tick={_heartbeatTicks} | clients={connected} spawned={spawned} | rx={pktRate:0.0}/s snap={snapRate:0.0}/s input={inputRate:0.0}/s | rigs={SlotToRig.Count} matchStarted={_matchStarted}");
                     }
                     // Phase 6.5 — periodic state probe (only after match has started).
-                    if (_matchStarted) { StateProbe(); TickNsoProbe(); TickStaleNsoFreezer(); }
+                    if (_matchStarted)
+                    {
+                        StateProbe();
+                        TickNsoProbe();
+                        TickNsoFallGuard();
+                        TickStaleNsoFreezer();
+                        TickGroundWeaponsRetry();
+                    }
                     // Phase 6.17 — advance virtual projectiles each frame.
                     TickProjectiles();
                     // Phase 6.10 — 30Hz authoritative-state broadcast (msgType 39).
@@ -2091,6 +2315,10 @@ namespace SFHeadlessHost
                         TryProcessChatCommand(cli, data, bodyOffset, bodyLen);
                     }
                     RelayBodyToOthers(cli, msgType, data, bodyOffset, bodyLen, channel);
+                    // Solo QA: void/lava often sends FallOut without a reliable 666 relay
+                    // (only one client — no "others" to relay). Still advance the oracle map.
+                    if (msgType == PktPlayerFallOut)
+                        TryScheduleSoloTestRoundAdvance("solo-fallout");
                     break;
 
                 case PktObjectUpdate:
@@ -2363,6 +2591,7 @@ namespace SFHeadlessHost
                         _pendingRoundAdvanceAt = -1f;
                         BroadcastMapChange(_currentSceneIndex);
                         _pendingStartMatchAt = Time.realtimeSinceStartup + NextMatchDelaySec;
+                        ScheduleOracleReloadCurrentMap("chat-/map");
                         foreach (var kv in _sfClients) kv.Value.Spawned = false;
                         break;
                     }
@@ -2680,15 +2909,75 @@ namespace SFHeadlessHost
             if (msgType == PktPlayerTookDamage && len >= 5)
             {
                 float dmg = BitConverter.ToSingle(body, 1);
-                if (System.Math.Abs(dmg - 666.666f) < 0.01f && _pendingRoundAdvanceAt < 0f)
-                {
-                    _pendingRoundAdvanceAt = Time.realtimeSinceStartup + RoundEndDelaySec;
-                    Log.LogInfo($"[SF] Killing-blow detected (damage={dmg}); scheduling round advance in {RoundEndDelaySec:0.0}s.");
-                }
+                if (System.Math.Abs(dmg - 666.666f) < 0.01f)
+                    TryScheduleRoundAdvance($"killing-blow dmg={dmg:0.###}");
             }
         }
         private int _relayAllCount;
         private float _pendingRoundAdvanceAt = -1f;
+
+        private int CountInitializedSfClients()
+        {
+            int n = 0;
+            foreach (var kv in _sfClients)
+                if (kv.Value.Initialized) n++;
+            return n;
+        }
+
+        /// <summary>One connected player in an active match — solo physics/map QA.</summary>
+        private bool IsSoloTestLobby() => _matchStarted && CountInitializedSfClients() == 1;
+
+        private float _pendingRearmCombatAt = -1f;
+        private float _lastPeriodicRearmAt = -1f;
+
+        private void TickPeriodicWeaponRearm()
+        {
+            if (!_matchStarted) return;
+            float now = Time.realtimeSinceStartup;
+            if (_lastPeriodicRearmAt < 0f) _lastPeriodicRearmAt = now;
+            if (now - _lastPeriodicRearmAt < 4f) return;
+            _lastPeriodicRearmAt = now;
+            try
+            {
+                var gmType = AccessTools.TypeByName("GameManager");
+                if ((object)gmType == null) return;
+                object gmInst = null;
+                var ig = AccessTools.PropertyGetter(gmType, "Instance");
+                if ((object)ig != null) gmInst = ig.Invoke(null, null);
+                if ((object)gmInst == null) return;
+                var inFightF = AccessTools.Field(gmType, "inFight");
+                bool inFight = (object)inFightF != null && (bool)inFightF.GetValue(gmInst);
+                if (inFight) return;
+                Log.LogInfo("[P6.5] Periodic rearm: inFight was false mid-match.");
+                RearmOracleCombatLoop("periodic");
+            }
+            catch { }
+        }
+
+        private void TryScheduleRoundAdvance(string reason)
+        {
+            if (_pendingRoundAdvanceAt >= 0f) return;
+            if (IsOracleMapLoadInProgress())
+            {
+                QueueRoundAdvanceWhileMapLoading();
+                Log.LogInfo($"[SF] Round advance queued ({reason}): oracle map load in progress.");
+                return;
+            }
+            if (!_matchStarted)
+            {
+                Log.LogDebug($"[SF] Round advance ignored ({reason}): match not started.");
+                return;
+            }
+            _pendingRoundAdvanceAt = Time.realtimeSinceStartup + RoundEndDelaySec;
+            Log.LogInfo($"[SF] Round advance scheduled ({reason}) in {RoundEndDelaySec:0.0}s — clients={CountInitializedSfClients()} soloTest={IsSoloTestLobby()}");
+        }
+
+        /// <summary>Solo-only: death without scoring still reloads oracle map logic for QA.</summary>
+        private void TryScheduleSoloTestRoundAdvance(string reason)
+        {
+            if (!IsSoloTestLobby()) return;
+            TryScheduleRoundAdvance(reason);
+        }
         private float _pendingStartMatchAt = -1f;
         private int _roundCounter;
 
@@ -2721,7 +3010,8 @@ namespace SFHeadlessHost
             _recentMaps.Enqueue(nextScene);
             while (_recentMaps.Count > _recentMapsAvoidWindow) _recentMaps.Dequeue();
             _currentSceneIndex = nextScene;
-            Log.LogInfo($"[SF] Round advance #{_roundCounter}: MapChange → scene {nextScene}");
+            bool solo = IsSoloTestLobby();
+            Log.LogInfo($"[SF] Round advance #{_roundCounter}: MapChange → scene {nextScene} (winner=255, soloTest={solo})");
             // ChangeMap body: [byte winnerIndex=255 (no winner)][byte mapType=0 (Landfall)][int32 sceneIndex LE]
             byte[] body = new byte[1 + 1 + 4];
             body[0] = 255;
@@ -2732,9 +3022,50 @@ namespace SFHeadlessHost
             // clients re-ready up. Stock SF uses k_MAX_SECONDS_UNTIL_AUTO_START=3s
             // but the client's map-load animation eats most of that. Defaulting
             // to 2s; configurable via SF_NEXT_MATCH_DELAY env var.
-            _pendingStartMatchAt = Time.realtimeSinceStartup + NextMatchDelaySec;
+            _pendingStartMatchAt = Time.realtimeSinceStartup + Mathf.Max(NextMatchDelaySec, 4f);
+            _pendingRearmCombatAt = -1f;
+            _oracleCountDownAt = -1f;
+            _oracleCountDownFired = false;
+            ResetOracleStateForRoundAdvance();
+            ClearMapDataObjectsOnOracle();
+            _cachedGroundWeaponsBody = null;
+            _groundWeaponsEntryCount = 0;
+            _skyWeaponSpawnCount = 0;
+            ScheduleOracleReloadCurrentMap("AdvanceRound");
             // Reset Spawned flags so next ClientRequestingToSpawn is honored.
             foreach (var kv in _sfClients) kv.Value.Spawned = false;
+        }
+
+        /// <summary>Let the next round re-register map sync, NSOs, and auth rigs on the new scene.</summary>
+        private void ResetOracleStateForRoundAdvance()
+        {
+            _authSpawnDone = false;
+            _authSpawnAt = -1f;
+            _nsoInventoryDone = false;
+            _nsoInventoryAt = -1f;
+            _mapSyncObjectsRegistered = 0;
+            _nsoSpawnPos.Clear();
+            _nsoLastBroadcastPos.Clear();
+            _nsoLastMovedAt.Clear();
+            _nsoByIndexCache.Clear();
+            _nsoCacheLastRebuildAt = -1f;
+            ClearAuthoritativeRigsForRoundAdvance();
+        }
+
+        private void ClearAuthoritativeRigsForRoundAdvance()
+        {
+            if (SlotToRig.Count == 0) return;
+            int destroyed = 0;
+            foreach (var kv in SlotToRig)
+            {
+                if ((object)kv.Value != null)
+                {
+                    UnityEngine.Object.Destroy(kv.Value);
+                    destroyed++;
+                }
+            }
+            SlotToRig.Clear();
+            Log.LogInfo($"[SF] Round advance: cleared {destroyed} authoritative rig(s) for next map.");
         }
 
         // Pickup: re-broadcast incoming ClientRequestingWeaponPickUp body as
@@ -3002,6 +3333,7 @@ namespace SFHeadlessHost
                 Log.LogInfo($"[SF] step2: broadcast PktClientSpawned slot={cli.Slot} pos=({px:0.0},{py:0.0},{pz:0.0}) to all {_sfClients.Count} client(s)");
             }
             cli.Spawned = true;
+            SendCachedGroundWeaponsToClient(cli);
 
             // Match no longer auto-starts. Players spawn into the lobby and
             // wait for /start in chat. Host can type /start to begin.
@@ -3030,7 +3362,7 @@ namespace SFHeadlessHost
             // in chat. ClientReadyUp is still logged so we can see the
             // ready-button-walk-through.
             Log.LogInfo($"[SF] ClientReadyUp from {cli.Addr} bodyLen={len} — ignored; waiting for /start chat command.");
-            if (_matchStarted)
+            if (_matchStarted && _pendingClientStartMatchFired)
             {
                 Log.LogInfo($"[SF] Match already started; re-sending StartMatch to {cli.Addr} only.");
                 SendSfPacket(cli.Addr, PktStartMatch, new byte[0], 0, 0);
@@ -3047,10 +3379,12 @@ namespace SFHeadlessHost
                 Log.LogInfo($"[SF] FireMatchStart({source}) — already started, no-op.");
                 return;
             }
-            Log.LogInfo($"[SF] FireMatchStart({source}) — broadcasting MapChange + StartMatch + invoking oracle GameManager.");
+            Log.LogInfo($"[SF] FireMatchStart({source}) — MapChange now; StartMatch to clients after load window.");
             BroadcastMapChange(_currentSceneIndex);
-            BroadcastStartMatch();
+            _pendingClientStartMatchAt = Time.realtimeSinceStartup + Mathf.Max(5f, NextMatchDelaySec + 2f);
+            _pendingClientStartMatchFired = false;
             _matchStarted = true;
+            _sceneLoadRealtime = Time.realtimeSinceStartup;
             try
             {
                 var mhType = AccessTools.TypeByName("MatchmakingHandler");
@@ -3063,9 +3397,7 @@ namespace SFHeadlessHost
                         Log.LogInfo("[P6.5] MatchmakingHandler.SetNetworkMatch(true).");
                     }
                 }
-                _oracleStartMatchAt = Time.realtimeSinceStartup + 0.5f;
-                _oracleStartMatchFired = false;
-                Log.LogInfo($"[P6.5] Scheduled oracle GameManager.StartMatch in 0.5s (additive scene {_currentSceneIndex}).");
+                ScheduleOracleReloadCurrentMap("FireMatchStart");
             }
             catch (Exception e) { Log.LogError($"[P6.5] FireMatchStart scheduling failed: {e}"); }
         }
@@ -3090,6 +3422,9 @@ namespace SFHeadlessHost
             // is treated as a fresh round-start rather than a respawn.
             foreach (var kv in _sfClients) kv.Value.Spawned = false;
             Log.LogInfo("[SF] Broadcast StartMatch");
+            // Sky weapons + ground weapons re-arm after clients load the new scene.
+            _pendingRearmCombatAt = Time.realtimeSinceStartup + 0.5f;
+            _groundWeaponsRetryAt = Time.realtimeSinceStartup + 4f;
         }
 
         // Phase 6.12 — inbound v26 PktPlayerInput from SFClientRecon plugin.
@@ -3364,6 +3699,11 @@ namespace SFHeadlessHost
         // their own player + others; the ghost is a server-side physical
         // body for collision purposes only.
         private static int _ghostMoveLogCount;
+        private static int _ghostWakeLogCount;
+        private static Type _wakeDpType;
+        private static FieldInfo _wakeDpSimpleField;
+        private static FieldInfo _wakeDpEventField;
+
         private void UpdateGhostRigPosition(int slot, Vector3 target)
         {
             if (!SlotToRig.TryGetValue(slot, out var rig) || (object)rig == null) return;
@@ -3391,9 +3731,254 @@ namespace SFHeadlessHost
                 else
                     rb.position += delta;
             }
+            if (!teleport)
+                WakeNsosNearGhostSweep(rootPos, target);
             if (_ghostMoveLogCount < 5 || _ghostMoveLogCount % 600 == 0)
                 Log.LogInfo($"[P6.9 ghost] slot={slot} moved to {target} (delta={delta.magnitude:0.00} {(teleport?"TELEPORT":"sweep")})");
             _ghostMoveLogCount++;
+        }
+
+        // After ghost-rig sweep, wake pushable map NSOs so CollectActiveNsoSnapshot
+        // sees dynamic motion and v26 clients get box positions (not ghost-through).
+        private void WakeNsosNearGhostSweep(Vector3 sweepFrom, Vector3 sweepTo)
+        {
+            try
+            {
+                float dist = Vector3.Distance(sweepFrom, sweepTo);
+                if (dist < 0.05f) return;
+                Vector3 mid = (sweepFrom + sweepTo) * 0.5f;
+                float radius = dist * 0.5f + 1.25f;
+                var hits = Physics.OverlapSphere(mid, radius);
+                if (hits == null || hits.Length == 0) return;
+
+                EnsureNsoTypeCache();
+                if ((object)_nsoType == null) return;
+
+                int woken = 0;
+                var seen = new HashSet<Component>();
+                foreach (var col in hits)
+                {
+                    if ((object)col == null) continue;
+                    var nsoComp = col.GetComponentInParent(_nsoType) as Component;
+                    if ((object)nsoComp == null || !seen.Add(nsoComp)) continue;
+                    if (IsChainStyleDestructibleRoot(nsoComp.gameObject)) continue;
+
+                    ushort id = GetNsoIndex(nsoComp);
+                    var nsoRbs = nsoComp.GetComponentsInChildren<Rigidbody>();
+                    foreach (var rb in nsoRbs)
+                    {
+                        if ((object)rb == null) continue;
+                        if (rb.isKinematic)
+                        {
+                            rb.isKinematic = false;
+                            rb.WakeUp();
+                            woken++;
+                        }
+                    }
+                    var p = nsoComp.transform.position;
+                    _nsoLastBroadcastPos[id] = p;
+                    _nsoLastMovedAt[id] = Time.realtimeSinceStartup;
+                }
+                if (woken > 0 && (_ghostWakeLogCount < 8 || _ghostWakeLogCount % 120 == 0))
+                    Log.LogInfo($"[BOXES] Ghost sweep woke {woken} crate RB(s) near ({mid.x:0.0},{mid.y:0.0},{mid.z:0.0}) r={radius:0.00}");
+                if (woken > 0) _ghostWakeLogCount++;
+            }
+            catch (Exception ex) { Log.LogWarning($"[BOXES] WakeNsosNearGhostSweep: {ex.Message}"); }
+        }
+
+        private void EnsureNsoTypeCache()
+        {
+            if ((object)_nsoType != null) return;
+            _nsoType = AccessTools.TypeByName("NetworkSyncableObject");
+            if ((object)_nsoType != null)
+            {
+                _nsoIndexProp = AccessTools.Property(_nsoType, "Index");
+                _nsoIndexField = AccessTools.Field(_nsoType, "m_Index");
+            }
+        }
+
+        private ushort GetNsoIndex(Component nsoComp)
+        {
+            ushort id = 0;
+            if ((object)_nsoIndexProp != null)
+                id = (ushort)_nsoIndexProp.GetValue(nsoComp, null);
+            else if ((object)_nsoIndexField != null)
+                id = (ushort)_nsoIndexField.GetValue(nsoComp);
+            return id;
+        }
+
+        private bool IsChainStyleDestructibleRoot(GameObject root)
+        {
+            if ((object)_wakeDpType == null)
+            {
+                _wakeDpType = AccessTools.TypeByName("DestructiblePiece");
+                if ((object)_wakeDpType != null)
+                {
+                    _wakeDpSimpleField = AccessTools.Field(_wakeDpType, "simpleDestruction");
+                    _wakeDpEventField = AccessTools.Field(_wakeDpType, "eventDestruction");
+                }
+            }
+            if ((object)_wakeDpType == null) return false;
+            var dps = root.GetComponentsInChildren(_wakeDpType);
+            if (dps == null || dps.Length == 0) return false;
+            foreach (var dp in dps)
+            {
+                if ((object)dp == null) continue;
+                bool simple = (object)_wakeDpSimpleField != null && (bool)_wakeDpSimpleField.GetValue(dp);
+                bool ev = (object)_wakeDpEventField != null && (bool)_wakeDpEventField.GetValue(dp);
+                if (!simple && !ev) return true;
+            }
+            return false;
+        }
+
+        /// <summary>Simple-destruction crate (not chain/ice pillar).</summary>
+        private bool IsPushableCrateNso(GameObject root)
+        {
+            if (IsChainStyleDestructibleRoot(root) || IsWeaponNsoRoot(root)) return false;
+            if ((object)_wakeDpType == null)
+            {
+                _wakeDpType = AccessTools.TypeByName("DestructiblePiece");
+                if ((object)_wakeDpType != null)
+                {
+                    _wakeDpSimpleField = AccessTools.Field(_wakeDpType, "simpleDestruction");
+                    _wakeDpEventField = AccessTools.Field(_wakeDpType, "eventDestruction");
+                }
+            }
+            if ((object)_wakeDpType == null) return false;
+            var dps = root.GetComponentsInChildren(_wakeDpType);
+            if (dps == null || dps.Length == 0) return false;
+            foreach (var dp in dps)
+            {
+                if ((object)dp == null) continue;
+                bool simple = (object)_wakeDpSimpleField != null && (bool)_wakeDpSimpleField.GetValue(dp);
+                bool ev = (object)_wakeDpEventField != null && (bool)_wakeDpEventField.GetValue(dp);
+                if (simple && !ev) return true;
+            }
+            return false;
+        }
+
+        private static Type _weaponPickUpType;
+        private bool IsWeaponNsoRoot(GameObject root)
+        {
+            if ((object)root == null) return false;
+            if ((object)_weaponPickUpType == null)
+            {
+                try { _weaponPickUpType = AccessTools.TypeByName("WeaponPickUp"); } catch { }
+            }
+            return (object)_weaponPickUpType != null
+                && root.GetComponentInChildren(_weaponPickUpType, true) != null;
+        }
+
+        // P0-16 — spawn positions captured post-settle; used to reset fallthrough.
+        private readonly Dictionary<ushort, Vector3> _nsoSpawnPos = new Dictionary<ushort, Vector3>();
+        private float _nsoFallGuardNextAt = -1f;
+        private float _nsoPeriodicKeyframeNextAt = -1f;
+        private float _sceneLoadRealtime = -1f;
+        private int _nsoFallthroughResetCount;
+        private const float NsoFallResetY = -32f;
+        private const float NsoFallRecentPushSec = 2f;
+        private const float NsoFallMinDownwardVel = -4f;
+        private const float NsoFallMaxResetPerTick = 2;
+        private const float NsoPeriodicKeyframeSec = 2f;
+
+        private void TickNsoFallGuard()
+        {
+            if (_nsoFallGuardNextAt < 0f) _nsoFallGuardNextAt = Time.realtimeSinceStartup + 2f;
+            if (Time.realtimeSinceStartup < _nsoFallGuardNextAt) return;
+            _nsoFallGuardNextAt = Time.realtimeSinceStartup + 2.5f;
+            if (_nsoSpawnPos.Count == 0) return;
+            try
+            {
+                if ((object)_nsoType == null)
+                {
+                    _nsoType = AccessTools.TypeByName("NetworkSyncableObject");
+                    if ((object)_nsoType == null) return;
+                    _nsoIndexProp = AccessTools.Property(_nsoType, "Index");
+                    _nsoIndexField = AccessTools.Field(_nsoType, "m_Index");
+                }
+                float now = Time.realtimeSinceStartup;
+                int resetsThisTick = 0;
+                foreach (var kv in _nsoSpawnPos)
+                {
+                    ushort id = kv.Key;
+                    if (_nsoLastMovedAt.TryGetValue(id, out var lastMoved)
+                        && (now - lastMoved) < NsoFallRecentPushSec)
+                        continue;
+                    if (!_nsoByIndexCache.TryGetValue(id, out var comp) || (object)comp == null)
+                    {
+                        if (_nsoCacheLastRebuildAt < 0f || now - _nsoCacheLastRebuildAt > 2f)
+                        {
+                            RebuildNsoIndexCache();
+                            _nsoCacheLastRebuildAt = now;
+                        }
+                        if (!_nsoByIndexCache.TryGetValue(id, out comp) || (object)comp == null)
+                            continue;
+                    }
+                    if (!IsPushableCrateNso(comp.gameObject)) continue;
+                    var p = comp.transform.position;
+                    if (p.y >= NsoFallResetY) continue;
+                    var rootRb = comp.GetComponent<Rigidbody>();
+                    if ((object)rootRb != null && rootRb.velocity.y < NsoFallMinDownwardVel)
+                        continue;
+                    if (resetsThisTick >= NsoFallMaxResetPerTick) continue;
+                    Vector3 spawn = kv.Value;
+                    comp.transform.position = spawn;
+                    comp.transform.rotation = Quaternion.identity;
+                    var rbs = comp.GetComponentsInChildren<Rigidbody>();
+                    foreach (var rb in rbs)
+                    {
+                        if ((object)rb == null) continue;
+                        rb.velocity = Vector3.zero;
+                        rb.angularVelocity = Vector3.zero;
+                        rb.isKinematic = false;
+                    }
+                    _nsoLastBroadcastPos[id] = spawn;
+                    _nsoLastMovedAt[id] = now;
+                    _nsoFallthroughResetCount++;
+                    resetsThisTick++;
+                    if (_nsoFallthroughResetCount <= 5 || _nsoFallthroughResetCount % 20 == 0)
+                        Log.LogInfo($"[BOXES] Reset fallthrough idx={id} Y={p.y:0.1} -> spawn ({spawn.y:0.1}) (#{_nsoFallthroughResetCount})");
+                }
+            }
+            catch (Exception e) { Log.LogWarning($"[P0-16 fall guard] {e.Message}"); }
+        }
+
+        private bool TryGetNsoWorldPosition(ushort idx, out Vector3 pos)
+        {
+            pos = default;
+            if (_nsoByIndexCache.Count == 0 || Time.realtimeSinceStartup - _nsoCacheLastRebuildAt > 5f)
+            {
+                RebuildNsoIndexCache();
+                _nsoCacheLastRebuildAt = Time.realtimeSinceStartup;
+            }
+            if (!_nsoByIndexCache.TryGetValue(idx, out var comp) || (object)comp == null)
+                return false;
+            pos = comp.transform.position;
+            return true;
+        }
+
+        private bool ShouldSkipServerOriginatedDestruction(byte[] data, int len)
+        {
+            if (data == null || len < 2) return true;
+            ushort idx = (ushort)(data[0] | (data[1] << 8));
+            if (!TryGetNsoWorldPosition(idx, out var pos))
+                return true;
+            if (pos.y < -30f) return true;
+            if (_sceneLoadRealtime > 0f
+                && (Time.realtimeSinceStartup - _sceneLoadRealtime) < 5f
+                && TryGetNsoRoot(idx, out var root)
+                && IsChainStyleDestructibleRoot(root))
+                return true;
+            return false;
+        }
+
+        private bool TryGetNsoRoot(ushort idx, out GameObject root)
+        {
+            root = null;
+            if (!_nsoByIndexCache.TryGetValue(idx, out var comp) || (object)comp == null)
+                return false;
+            root = comp.gameObject;
+            return true;
         }
 
         // === Phase 6.10 — server-authoritative snapshots ===
@@ -3518,8 +4103,10 @@ namespace SFHeadlessHost
                 // so the existing hit emit applies.
                 Vector3 prev = p.Position;
                 p.Position += p.Velocity * dt;
-                if (ProjectileHitWall(prev, p.Position))
+                if (TryProjectileWallHit(prev, p.Position, out var wallHit))
                 {
+                    if (IsExplosiveWeaponType(p.WeaponType, p.Velocity.magnitude))
+                        ApplyExplosiveBlastAt(wallHit, 5f, 900f);
                     _projectiles.RemoveAt(i);
                     continue;
                 }
@@ -3539,19 +4126,59 @@ namespace SFHeadlessHost
         // intentionally excluded because TestProjectileHit handles them
         // (and SF's player rigs span many bones; a raycast might hit a
         // hand collider while the sphere check finds the torso).
-        private bool ProjectileHitWall(Vector3 from, Vector3 to)
+        private static bool IsExplosiveWeaponType(byte weaponType, float speed)
         {
+            return speed < 50f || weaponType == 5 || weaponType == 6 || weaponType == 7 || weaponType == 8;
+        }
+
+        private void ApplyExplosiveBlastAt(Vector3 center, float radius, float blastForce)
+        {
+            try
+            {
+                var cols = Physics.OverlapSphere(center, radius);
+                if (cols == null) return;
+                var dpType = AccessTools.TypeByName("DestructiblePiece");
+                var collideM = (object)dpType != null ? AccessTools.Method(dpType, "Collide") : null;
+                int n = 0;
+                foreach (var col in cols)
+                {
+                    if ((object)col == null) continue;
+                    var rb = col.attachedRigidbody;
+                    if ((object)rb != null && !rb.isKinematic)
+                        rb.AddExplosionForce(blastForce, center, radius, 0.5f);
+                    if ((object)collideM != null && (object)dpType != null)
+                    {
+                        var dp = col.GetComponent(dpType) ?? col.GetComponentInParent(dpType);
+                        if ((object)dp != null)
+                        {
+                            collideM.Invoke(dp, new object[] { Vector3.up * 15f, 10f, true });
+                            n++;
+                        }
+                    }
+                }
+                if (n > 0)
+                    Log.LogInfo($"[P6.17] Explosion at {center} radius={radius} affected {n} destructibles");
+            }
+            catch (Exception e) { Log.LogWarning($"[P6.17 explosion] {e.Message}"); }
+        }
+
+        private bool ProjectileHitWall(Vector3 from, Vector3 to) =>
+            TryProjectileWallHit(from, to, out _);
+
+        private bool TryProjectileWallHit(Vector3 from, Vector3 to, out Vector3 hitPoint)
+        {
+            hitPoint = to;
             Vector3 dir = to - from;
             float dist = dir.magnitude;
             if (dist < 0.001f) return false;
-            // Single Linecast — Unity returns first hit by default.
             if (Physics.Linecast(from, to, out var hit))
             {
                 if ((object)hit.collider == null) return false;
+                hitPoint = hit.point;
                 var root = hit.collider.transform.root;
                 if ((object)root == null) return false;
-                if (root.GetComponent("Controller") != null) return false;  // player hit, let sphere check handle
-                return true;  // wall / scene geometry hit
+                if (root.GetComponent("Controller") != null) return false;
+                return true;
             }
             return false;
         }
@@ -3689,17 +4316,24 @@ namespace SFHeadlessHost
                 // rigidbody is non-kinematic (i.e. currently allowed to move).
                 // Pre-placed static crates/chains stay kinematic until struck
                 // and don't need bandwidth.
-                var nsoEntries = CollectActiveNsoSnapshot();
+                bool periodicKeyframe = Time.realtimeSinceStartup >= _nsoPeriodicKeyframeNextAt;
+                if (periodicKeyframe)
+                    _nsoPeriodicKeyframeNextAt = Time.realtimeSinceStartup + NsoPeriodicKeyframeSec;
+                var nsoEntries = periodicKeyframe
+                    ? CollectAllNsoSnapshot()
+                    : CollectActiveNsoSnapshot();
 
                 // P0-14 — also pack MapInfoSyncableBase positions (moving
                 // platforms, pressure pillars, ghost platforms) so the
                 // oracle is authoritative for these too. Without this they
                 // drift independently on each client.
                 var mapSyncEntries = CollectMapSyncSnapshot();
+                var mapStateEntries = CollectMapStateSnapshot();
+                LogMapSyncDiagnostics(mapSyncEntries.Count, mapStateEntries.Count);
 
-                if (n == 0 && nsoEntries.Count == 0 && mapSyncEntries.Count == 0) return;
+                if (n == 0 && nsoEntries.Count == 0 && mapSyncEntries.Count == 0 && mapStateEntries.Count == 0) return;
 
-                // Body layout v26.5 (was v26.3):
+                // Body layout v26.6 (was v26.5):
                 //   u32 serverTick
                 //   u8  playerCount
                 //   players: [u8 slot, f32 x, f32 y, f32 z, u32 lastInputSeq] × n  (17/each)
@@ -3707,13 +4341,10 @@ namespace SFHeadlessHost
                 //   NSOs:    [u16 id, f32 x, f32 y, f32 z, f32 rotZ]         × m  (18/each)
                 //   u16 projCount                                                  (added v26.3)
                 //   projs:   [u32 id, u8 slot, u8 wType, f32 x, f32 y, f32 z] × k  (18/each)
-                //   u16 mapSyncCount                                              (NEW v26.5)
-                //   mapSync: [f32 startX, f32 startY, f32 x, f32 y, f32 z]    × j  (20/each)
-                //     startX/Y identify the object via its m_StartPos (same
-                //     key stock SF uses for MapInfoSync dispatch). Quantized
-                //     by P0-12 so server + client agree bit-exactly.
+                //   u16 mapSyncCount (v26.5 positions)
+                //   u16 mapStateCount (v26.6 GetData payloads — GhostPlatform isOn, etc.)
                 int bodyLen = 4 + 1 + n * 17 + 2 + nsoEntries.Count * 18 + 2 + _projectiles.Count * 18
-                              + 2 + mapSyncEntries.Count * 20;
+                              + 2 + mapSyncEntries.Count * 20 + MapStateSectionByteLen(mapStateEntries);
                 byte[] body = new byte[bodyLen];
                 int off = 0;
                 WriteU32LE(body, off, _serverTick); off += 4;
@@ -3765,6 +4396,7 @@ namespace SFHeadlessHost
                     WriteF32LE(body, off, m.Y); off += 4;
                     WriteF32LE(body, off, m.Z); off += 4;
                 }
+                off = WriteMapStateSection(body, off, mapStateEntries);
 
                 // Broadcast to ALL spawned clients on their v26 endpoint. Once
                 // a client has sent a PlayerInput packet we know its actual
@@ -3773,14 +4405,14 @@ namespace SFHeadlessHost
                 // on the same machine use different v26 ports without colliding.
                 foreach (var kv in _sfClients)
                 {
-                    if (!kv.Value.Spawned) continue;
+                    if (!kv.Value.Initialized) continue;
                     IPEndPoint v26Ep;
                     if (!_slotV26Endpoint.TryGetValue(kv.Value.Slot, out v26Ep))
                         v26Ep = new IPEndPoint(kv.Value.Addr.Address, V26_CLIENT_PORT);
                     SendSfPacket(v26Ep, PktWorldStateSnapshot, body, 0, 0);
                 }
                 if (_serverTick == 1 || _serverTick % 90 == 0)
-                    Log.LogInfo($"[P6.10/14] Snapshot tick={_serverTick} players={n} nsos={nsoEntries.Count} bytes={bodyLen}");
+                    Log.LogInfo($"[P6.10/14/v26.6] Snapshot tick={_serverTick} players={n} nsos={nsoEntries.Count} mapSync={mapSyncEntries.Count} mapState={mapStateEntries.Count} fallResets={_nsoFallthroughResetCount} keyframe={periodicKeyframe} bytes={bodyLen}");
             }
             catch (Exception e) { Log.LogWarning($"[P6.10/14] {e.Message}"); }
         }
@@ -3795,41 +4427,6 @@ namespace SFHeadlessHost
         // startPos to 0.01 precision so the Vector2 keys ARE stable
         // cross-process.
         private struct MapSyncSnap { public float StartX, StartY, X, Y, Z; }
-
-        // P0-14 — collect every active MapInfoSyncableBase's transform
-        // position keyed by its m_StartPos. These objects (GhostPlatform,
-        // MoveAlongPathUsingForce, PillarHandler, PlayMoveAnimations) drift
-        // across clients because each runs its own physics. v26.5 snapshot
-        // section makes the oracle authoritative.
-        private Type _mapSyncBaseType;
-        private FieldInfo _mapSyncStartPosField;
-        private List<MapSyncSnap> CollectMapSyncSnapshot()
-        {
-            var result = new List<MapSyncSnap>();
-            try
-            {
-                if ((object)_mapSyncBaseType == null)
-                {
-                    _mapSyncBaseType = AccessTools.TypeByName("MapInfoSyncableBase");
-                    if ((object)_mapSyncBaseType == null) return result;
-                    _mapSyncStartPosField = AccessTools.Field(_mapSyncBaseType, "m_StartPos");
-                }
-                if ((object)_mapSyncStartPosField == null) return result;
-                var all = UnityEngine.Object.FindObjectsOfType(_mapSyncBaseType);
-                if (all == null) return result;
-                foreach (var obj in all)
-                {
-                    var comp = obj as Component;
-                    if ((object)comp == null) continue;
-                    var p = comp.transform.position;
-                    if (p.y < -30f) continue;   // killbox-fall — skip
-                    Vector2 startPos = (Vector2)_mapSyncStartPosField.GetValue(obj);
-                    result.Add(new MapSyncSnap { StartX = startPos.x, StartY = startPos.y, X = p.x, Y = p.y, Z = p.z });
-                }
-            }
-            catch (Exception ex) { Log.LogWarning($"[P0-14 mapSync collect] {ex.Message}"); }
-            return result;
-        }
 
         // P0-13 — full-keyframe variant of CollectActiveNsoSnapshot that
         // includes every NSO regardless of position-delta / activity. Used
@@ -3854,6 +4451,7 @@ namespace SFHeadlessHost
                 {
                     var comp = nso as Component;
                     if ((object)comp == null) continue;
+                    if (IsWeaponNsoRoot(comp.gameObject)) continue;
                     ushort id = 0;
                     if ((object)_nsoIndexProp != null) id = (ushort)_nsoIndexProp.GetValue(nso, null);
                     else if ((object)_nsoIndexField != null) id = (ushort)_nsoIndexField.GetValue(nso);
@@ -3877,8 +4475,9 @@ namespace SFHeadlessHost
             foreach (var kv in SlotToRig) if ((object)kv.Value != null) n++;
             var nsoEntries = CollectAllNsoSnapshot();
             var mapSyncEntries = CollectMapSyncSnapshot();
+            var mapStateEntries = CollectMapStateSnapshot();
             int bodyLen = 4 + 1 + n * 17 + 2 + nsoEntries.Count * 18 + 2 + _projectiles.Count * 18
-                          + 2 + mapSyncEntries.Count * 20;
+                          + 2 + mapSyncEntries.Count * 20 + MapStateSectionByteLen(mapStateEntries);
             byte[] body = new byte[bodyLen];
             int off = 0;
             WriteU32LE(body, off, _serverTick); off += 4;
@@ -3926,8 +4525,9 @@ namespace SFHeadlessHost
                 WriteF32LE(body, off, m.Y); off += 4;
                 WriteF32LE(body, off, m.Z); off += 4;
             }
+            off = WriteMapStateSection(body, off, mapStateEntries);
             SendSfPacket(target, PktWorldStateSnapshot, body, 0, 0);
-            Log.LogInfo($"[P0-13] Sent keyframe snapshot to {target} — players={n} nsos={nsoEntries.Count} mapSync={mapSyncEntries.Count} bytes={bodyLen}");
+            Log.LogInfo($"[P0-13/v26.6] Sent keyframe snapshot to {target} — players={n} nsos={nsoEntries.Count} mapSync={mapSyncEntries.Count} mapState={mapStateEntries.Count} bytes={bodyLen}");
         }
 
         // Apply an incoming PktObjectUpdate (msgType 26) to the server's
@@ -3966,8 +4566,20 @@ namespace SFHeadlessHost
             }
             if (!_nsoByIndexCache.TryGetValue(idx, out var comp) || (object)comp == null)
                 return;
-            comp.transform.position = new Vector3(0f, py, pz);
-            comp.transform.rotation = Quaternion.Euler(0f, 0f, rotZ);
+            Vector3 pos = new Vector3(0f, py, pz);
+            Quaternion rot = Quaternion.Euler(0f, 0f, rotZ);
+            var rootRb = comp.GetComponent<Rigidbody>();
+            if (RefOk(rootRb) && !rootRb.isKinematic)
+            {
+                rootRb.position = pos;
+                rootRb.rotation = rot;
+                rootRb.WakeUp();
+            }
+            else
+            {
+                comp.transform.position = pos;
+                comp.transform.rotation = rot;
+            }
             // Mark as recently-moved so CollectActiveNsoSnapshot will
             // include this NSO in subsequent broadcasts even after the
             // client stops sending updates.
@@ -4020,7 +4632,8 @@ namespace SFHeadlessHost
         private readonly Dictionary<ushort, Vector3> _nsoLastBroadcastPos = new Dictionary<ushort, Vector3>();
         private readonly Dictionary<ushort, float>   _nsoLastMovedAt      = new Dictionary<ushort, float>();
         private const float NsoPosDeltaThreshold = 0.01f;   // ~1 cm
-        private const float NsoKeepaliveSec      = 1.0f;
+        private const float NsoKeepaliveSec      = 3.0f;
+        private const float NsoCrateKeepaliveSec = 25.0f;
 
         private List<NsoSnap> CollectActiveNsoSnapshot()
         {
@@ -4041,6 +4654,7 @@ namespace SFHeadlessHost
                 {
                     var comp = nso as Component;
                     if ((object)comp == null) continue;
+                    if (IsWeaponNsoRoot(comp.gameObject)) continue;
 
                     ushort id = 0;
                     if ((object)_nsoIndexProp != null)
@@ -4058,8 +4672,19 @@ namespace SFHeadlessHost
                     // makes their local copies vanish off-screen.
                     if (p.y < -30f) continue;
 
+                    bool dynamicBody = (object)rb != null && !rb.isKinematic;
+                    // Case 0: pushable crates only — every tick while dynamic (not all 90 NSOs).
+                    if (dynamicBody && IsPushableCrateNso(comp.gameObject))
+                    {
+                        _nsoLastMovedAt[id] = now;
+                        _nsoLastBroadcastPos[id] = p;
+                        var eDyn = comp.transform.eulerAngles;
+                        result.Add(new NsoSnap { Id = id, X = p.x, Y = p.y, Z = p.z, RotZ = eDyn.z });
+                        continue;
+                    }
+
                     // Case 1: non-kinematic w/ active motion.
-                    bool dynamicMoving = (object)rb != null && !rb.isKinematic
+                    bool dynamicMoving = dynamicBody
                         && (rb.velocity.sqrMagnitude > 0.0001f || rb.angularVelocity.sqrMagnitude > 0.0001f);
 
                     // Case 2: position drifted since last broadcast (covers
@@ -4069,8 +4694,9 @@ namespace SFHeadlessHost
                         || Vector3.Distance(p, lastPos) > NsoPosDeltaThreshold;
 
                     // Case 3: recently moved (keepalive).
+                    float keepAlive = IsPushableCrateNso(comp.gameObject) ? NsoCrateKeepaliveSec : NsoKeepaliveSec;
                     bool recentlyActive = _nsoLastMovedAt.TryGetValue(id, out var lastMovedAt)
-                        && (now - lastMovedAt) < NsoKeepaliveSec;
+                        && (now - lastMovedAt) < keepAlive;
 
                     if (!dynamicMoving && !positionDrifted && !recentlyActive) continue;
 

@@ -136,6 +136,55 @@ Where we are vs. that target:
 - Client-side smooth interpolation on snapshot apply (Phase 6.11.2)
 - Input prediction replay rollback (Phase 6.12.2)
 
+## v0.2.8 mega-fix (2026-05-24) — cajas, Halloween, conexión
+
+**Cliente (`SFClientRecon` 0.2.8):** `instalar-cliente-oracle.ps1`, auto-connect, relay `ObjectUpdate` cajas empujables, `OnMatchStart` log, solo `SFClientRecon` en plugins (sin `SFHeadlessHost` en PC).
+
+**Oracle (`SFHeadlessHost` 0.2.8):** guard `IsPacketAvailable` (fin ~40k NullRef), skip `ReadyUp` sin clients, `StartCountDown()` real en servidor, `StartMatch` a clientes **5s después** de `MapChange`, keepalive cajas 25s en snapshot.
+
+**Deploy:** `deploy-physics-fix.ps1 -InstallLocal -DeployVps` → `sudo systemctl restart sf-oracle.service`
+
+**Logs esperados:** `[SF] Deferred StartMatch`, `[P6.5] Invoked GameManager.StartCountDown`, `nsos>0` al empujar, `[BOXES] Applied client ObjectUpdate`, cliente `[oracle-lobby] OnMatchStart`.
+
+## v0.2.5 round-2+ fix (2026-05-24d)
+
+- **Map load stuck** — `_oracleMapLoadInProgress` never cleared when Unity did not re-fire scene load → deaths queued forever. Now: queue advance + force-complete at 8s + `FinishOracleMapLoad` always in `finally`
+- **Armas** — `RearmOracleCombatLoop` after `PostMapLoad`; periodic rearm if `inFight` drops
+- **Cajas** — NSO snapshot only **pushable crates** (not all 90 NSOs/tick); fall guard max 2 resets/tick
+- **Init order** — `InitMapDataObjects` before `EnsureMapSyncObjectsRegistered`
+
+## v0.2.4 Factory/Desert fix (2026-05-24c)
+
+- **Mono reflection** — `GetMultiplayerManagerInstance()` uses `(object)` null checks (fixes `mapSync=0` / `mapState=0` on VPS)
+- **map dict** — `ClearMapDataObjects` before re-register each round; skip stale `PostMapLoad` if `buildIndex != _currentSceneIndex`
+- **Sky weapons ronda 2+** — `RearmOracleCombatLoop` on `AdvanceRound` + delayed after `BroadcastStartMatch` (`inFight`, `randomWeaponCounter=2`)
+- **Cajas** — dynamic NSO every snapshot tick; fall guard skips chains + real falls; client NSO smooth 40Hz + snap >0.5m
+- **QA mapas** — `/map 6` … `/map 12` (Factory), Desert con cajas; log `mapSync>0 mapState>0`, `[P6.5 SRW]`, sin `op_Inequality`
+
+## v26.6 terrain + weapons pass (2026-05-24b)
+
+- **mapState** in `WorldStateSnapshot`: `GetData()`/`SetData()` for GhostPlatform on/off, pillars, move-path
+- Oracle registers `MapInfoSyncableBase` in dict + `m_NetworkControl=true`
+- `CheckForGroundWeapons` on match start, scene load, late-join resend (msg 31 cache)
+- Client: crate NSO dynamic locally, quantized map keys, 90Hz input burst on Q/fire
+- Deploy: `deploy-physics-fix.ps1 -InstallLocal -DeployVps` then `jugar-oracle.ps1`
+- Verify log: `mapSync>0 mapState>0` (was `mapSync=0` always)
+
+## Physics / sync pass (2026-05-24)
+
+Shipped in `SFHeadlessHost` + `SFClientRecon` (deploy via `deploy-physics-fix.ps1`):
+
+- **P0-16** — NSO fallthrough guard + spawn cache + 5s keyframe snapshots + client `ObjectUpdate` while pushing crates
+- **P0-11b** — Y-aware server destruction forward (not drop-all)
+- **P0-17** — explosive blast on oracle; faster local ice break; weapons skip NSO lerp
+- Client: `SFCLIENTRECON_NSO_SMOOTH` (default 22), launch via desktop `Jugar Stick Fight Oracle.bat`
+
+Verify on VPS log: `mapSync=N`, `nsos>0` after Desert3 load, `[BOXES] Reset fallthrough` rare/zero.
+
+## Client patched Assembly-CSharp (imported reference)
+
+UDP mod DLLs, hashes, decompiled networking sources, and install script from the CustomServers worktree live in [`client-mod/`](client-mod/). See [`client-mod/ASSEMBLY_VS_SF_MULTIPLAYER.md`](client-mod/ASSEMBLY_VS_SF_MULTIPLAYER.md) for what applies to the Miles oracle stack vs the old Go server.
+
 ## Where to start reading
 
 - [`sf-headless-host/SFHeadlessHost.cs`](sf-headless-host/SFHeadlessHost.cs) — the live plugin (~3300 lines). Key entry points: `Awake()` (Harmony patches), `HandleClientRequestingToSpawn`, `HandlePlayerUpdate`, `SpawnMirrorRigsForAllClients`, `TrySpawnPlayer`
