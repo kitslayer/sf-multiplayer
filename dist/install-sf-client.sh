@@ -15,7 +15,7 @@ set -eu
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BEPINEX_VERSION="5.4.23.5"
-BEPINEX_URL="https://github.com/BepInEx/BepInEx/releases/download/v${BEPINEX_VERSION}/BepInEx_x86_${BEPINEX_VERSION}.zip"
+BEPINEX_URL="https://github.com/BepInEx/BepInEx/releases/download/v${BEPINEX_VERSION}/BepInEx_win_x86_${BEPINEX_VERSION}.zip"
 
 PLUGIN1="$HERE/SFHeadlessHost.dll"
 PLUGIN2="$HERE/SFClientRecon.dll"

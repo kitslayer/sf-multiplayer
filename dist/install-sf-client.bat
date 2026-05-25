@@ -88,7 +88,7 @@ REM ---- install BepInEx if missing ----
 if not exist "%SF%\BepInEx" (
   echo [1/3] Downloading BepInEx 5.4.23.5...
   set "BEPZIP=%TEMP%\bepinex-x86.zip"
-  powershell -NoProfile -Command "Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/BepInEx/BepInEx/releases/download/v5.4.23.5/BepInEx_x86_5.4.23.5.zip' -OutFile '!BEPZIP!'"
+  powershell -NoProfile -Command "Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/BepInEx/BepInEx/releases/download/v5.4.23.5/BepInEx_win_x86_5.4.23.5.zip' -OutFile '!BEPZIP!'"
   if errorlevel 1 (
     echo [!] BepInEx download failed. Check internet connection.
     pause

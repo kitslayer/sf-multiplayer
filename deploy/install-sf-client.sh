@@ -24,7 +24,7 @@ BRANCH="main"
 # ---- Config knobs ----
 SF_PATH=""
 BEPINEX_VERSION="5.4.23.5"
-BEPINEX_URL="https://github.com/BepInEx/BepInEx/releases/download/v${BEPINEX_VERSION}/BepInEx_x86_${BEPINEX_VERSION}.zip"
+BEPINEX_URL="https://github.com/BepInEx/BepInEx/releases/download/v${BEPINEX_VERSION}/BepInEx_win_x86_${BEPINEX_VERSION}.zip"
 
 # ---- Arg parse ----
 while [ $# -gt 0 ]; do
