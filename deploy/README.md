@@ -1,6 +1,6 @@
 # `deploy/` — Windows one-click scripts
 
-**Equipo:** kitslayer + AlkaDev  
+**Team:** kitslayer + AlkaDev  
 **GitHub:** https://github.com/kitslayer/sf-multiplayer  
 **Discord:** `kitslayer` · `Tyralka0660` (AlkaDev)
 
@@ -8,12 +8,12 @@ Windows wrappers for the lobby management scripts. The Linux equivalents at the 
 
 | Script | What it does |
 |---|---|
-| `jugar-oracle.ps1` | Instala oracle + lanza Stick Fight contra el VPS (muestra banner del equipo al inicio). |
-| `instalar-oracle-desde-cero.ps1` | BepInEx + srv.v25 + SFClientRecon en instalación limpia. |
-| `instalar-cliente-oracle.ps1` | Cliente persistente sin lanzar el juego. |
-| `instalar-solo-oracle.ps1` | Oracle sin MelonLoader. |
-| `instalar-oracle-con-melon.ps1` | Oracle con MelonLoader (skins) vía BepInEx bridge. |
-| `equipo-sf-multiplayer.ps1` | Banner de contacto (dot-source desde los `.ps1` de arriba). |
+| `jugar-oracle.ps1` | Install oracle client + launch Stick Fight against the VPS (team banner on start). |
+| `instalar-oracle-desde-cero.ps1` | BepInEx + srv.v25 + SFClientRecon on a clean install. |
+| `instalar-cliente-oracle.ps1` | Persistent client install without launching the game. |
+| `instalar-solo-oracle.ps1` | Oracle client without MelonLoader. |
+| `instalar-oracle-con-melon.ps1` | Oracle + MelonLoader (skins) via BepInEx bridge. |
+| `team-sf-multiplayer.ps1` | Team contact banner (dot-sourced by the scripts above). |
 | `launch-lobby.bat [CODE] [PORT]` | Spawns one headless `StickFight.exe -batchmode -nographics` on the next free UDP port. Auto-generates a 4-char code if omitted. |
 | `stop-all-lobbies.bat` | `taskkill /F /IM StickFight.exe` + wipes the lobby registry. |
 | `list-lobbies.bat` | Lists `%TEMP%\sf-lobbies\*.conf`. |

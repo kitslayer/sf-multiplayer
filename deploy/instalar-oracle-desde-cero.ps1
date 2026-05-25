@@ -1,6 +1,6 @@
 # Instalacion completa oracle en Stick Fight LIMPIO (o reinstalado).
 # Instala BepInEx 5.4.23.5 + Assembly-CSharp.srv + SFClientRecon. Sin MelonLoader.
-# Equipo: kitslayer + AlkaDev | Discord: kitslayer, Tyralka0660
+# Team: kitslayer + AlkaDev | Discord: kitslayer, Tyralka0660
 param(
     [string]$ServerIp = '69.53.117.43',
     [string]$ServerPort = '1337',
@@ -8,7 +8,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-. (Join-Path $PSScriptRoot 'equipo-sf-multiplayer.ps1')
+. (Join-Path $PSScriptRoot 'team-sf-multiplayer.ps1')
 Show-SfMultiplayerTeamInfo
 $RepoRoot = Split-Path $PSScriptRoot -Parent
 $Sf = Join-Path ${env:ProgramFiles(x86)} 'Steam\steamapps\common\StickFightTheGame'
