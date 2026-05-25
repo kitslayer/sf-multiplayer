@@ -1,12 +1,15 @@
 # Oracle + MelonLoader (skins) en la misma sesion Steam.
 # Problema: Melon usa version.dll y BepInEx usa winhttp.dll — solo uno gana al abrir el .exe.
 # Solucion: BepInEx arranca primero + BepInEx.MelonLoader.Loader carga tus Mods de Melon.
+# Equipo: kitslayer + AlkaDev | Discord: kitslayer, Tyralka0660
 param(
     [string]$ServerIp = '69.53.117.43',
     [string]$ServerPort = '1337'
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'equipo-sf-multiplayer.ps1')
+Show-SfMultiplayerTeamInfo
 $RepoRoot = Split-Path $PSScriptRoot -Parent
 $Sf = Join-Path ${env:ProgramFiles(x86)} 'Steam\steamapps\common\StickFightTheGame'
 $MlZip = Join-Path $PSScriptRoot 'MLLoader-UnityMono-BepInEx5-v0.5.7.zip'

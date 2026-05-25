@@ -1,5 +1,6 @@
 # Instalacion completa oracle en Stick Fight LIMPIO (o reinstalado).
-# Instala BepInEx 5.4.23.5 + Assembly-CSharp.srv + SFClientRecon 0.3.4. Sin MelonLoader.
+# Instala BepInEx 5.4.23.5 + Assembly-CSharp.srv + SFClientRecon. Sin MelonLoader.
+# Equipo: kitslayer + AlkaDev | Discord: kitslayer, Tyralka0660
 param(
     [string]$ServerIp = '69.53.117.43',
     [string]$ServerPort = '1337',
@@ -7,6 +8,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'equipo-sf-multiplayer.ps1')
+Show-SfMultiplayerTeamInfo
 $RepoRoot = Split-Path $PSScriptRoot -Parent
 $Sf = Join-Path ${env:ProgramFiles(x86)} 'Steam\steamapps\common\StickFightTheGame'
 $SrvDll = Join-Path $RepoRoot 'client-mod\dll\Assembly-CSharp.srv.v25.dll'
@@ -123,6 +126,7 @@ pause
 Write-Host ''
 Write-Host '========================================' -ForegroundColor Green
 Write-Host '  LISTO — Oracle instalado' -ForegroundColor Green
+Write-Host '  kitslayer + AlkaDev | Discord: kitslayer, Tyralka0660' -ForegroundColor DarkGray
 Write-Host '========================================' -ForegroundColor Green
 Write-Host ''
 Write-Host 'Pon en Steam -> Propiedades -> Opciones de lanzamiento:' -ForegroundColor White

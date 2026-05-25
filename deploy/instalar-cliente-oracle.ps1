@@ -1,5 +1,6 @@
 # Instala el cliente para oracle de forma PERSISTENTE (Steam o .bat).
 # Requiere: Assembly-CSharp.srv.v25.dll, BepInEx, SFClientRecon (sin SFHeadlessHost en el cliente).
+# Equipo: kitslayer + AlkaDev | Discord: kitslayer, Tyralka0660
 param(
     [string]$ServerIp = '69.53.117.43',
     [string]$ServerPort = '1337',
@@ -7,6 +8,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'equipo-sf-multiplayer.ps1')
+Show-SfMultiplayerTeamInfo
 $RepoRoot = Split-Path $PSScriptRoot -Parent
 $Sf = Join-Path ${env:ProgramFiles(x86)} 'Steam\steamapps\common\StickFightTheGame'
 $SrvDll = Join-Path $RepoRoot 'client-mod\dll\Assembly-CSharp.srv.v25.dll'

@@ -1,10 +1,13 @@
 # Cliente oracle SOLO: BepInEx + srv.dll + SFClientRecon. Sin MelonLoader / MLLoader.
+# Equipo: kitslayer + AlkaDev | Discord: kitslayer, Tyralka0660
 param(
     [string]$ServerIp = '69.53.117.43',
     [string]$ServerPort = '1337'
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'equipo-sf-multiplayer.ps1')
+Show-SfMultiplayerTeamInfo
 $RepoRoot = Split-Path $PSScriptRoot -Parent
 $Sf = Join-Path ${env:ProgramFiles(x86)} 'Steam\steamapps\common\StickFightTheGame'
 

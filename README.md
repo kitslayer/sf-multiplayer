@@ -118,8 +118,18 @@ Issues and PRs welcome.
 
 ## Credits
 
+### Equipo (sf-multiplayer / oracle)
+
+| Persona | Rol | Contacto |
+|---------|-----|----------|
+| **kitslayer** | Maintainer, headless host, VPS oracle, protocolo v26 | GitHub: [@kitslayer](https://github.com/kitslayer) · Discord: `kitslayer` |
+| **AlkaDev** | Cliente, deploy Windows, pruebas en vivo, fixes cajas/lobby | GitHub: [@AlkaPrime12](https://github.com/AlkaPrime12) · Discord: `Tyralka0660` |
+
+Repo: [github.com/kitslayer/sf-multiplayer](https://github.com/kitslayer/sf-multiplayer)
+
+### Otros
+
 - **JoshuaDoes** ([@JoshuaDoes](https://github.com/JoshuaDoes)) — original [StickFightDev/StickFightDedicatedSrv](https://github.com/StickFightDev/StickFightDedicatedSrv) (dormant since July 2022). This repo started as a fork; the v25 relay + lobby + matchmaking core in [`legacy/StickFightDedicatedSrv/`](legacy/StickFightDedicatedSrv) is from that project.
-- **ALKA** ([@AlkaPrime12](https://github.com/AlkaPrime12)) — parallel work on [Stickfight-TestingMultiplayer](https://github.com/AlkaPrime12/Stickfight-TestingMultiplayer). Active collaborator on this repo since 2026-05-24; major contributor to the v0.3.x map terrain + MapInfo sync + pre-combat grace work. Independent SF dedicated-server effort with overlapping goals; we share research and bug-fix patterns in both directions.
 - **Landfall Games** — for making Stick Fight in the first place. This is an unofficial community project not affiliated with or endorsed by Landfall.
 - **The SF competitive Discord** — for the ask + the testing.
 

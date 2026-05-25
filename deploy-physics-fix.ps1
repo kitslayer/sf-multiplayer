@@ -1,4 +1,5 @@
 # Build + deploy physics-fix plugins (SFHeadlessHost + SFClientRecon)
+# Equipo: kitslayer + AlkaDev | Discord: kitslayer, Tyralka0660
 param(
     [switch]$DeployVps,
     [switch]$InstallLocal
@@ -6,6 +7,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Root = $PSScriptRoot
+. (Join-Path $Root "deploy\equipo-sf-multiplayer.ps1")
+Show-SfMultiplayerTeamInfo
 $Sf = "${env:ProgramFiles(x86)}\Steam\steamapps\common\StickFightTheGame"
 $Refs = Join-Path $Root "sf-headless-host\refs"
 

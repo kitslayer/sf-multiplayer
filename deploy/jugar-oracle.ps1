@@ -1,5 +1,8 @@
 # Sesion oracle: instala cliente persistente, MelonLoader OFF solo esta sesion, lanza el juego.
+# Equipo: kitslayer + AlkaDev | Discord: kitslayer, Tyralka0660
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'equipo-sf-multiplayer.ps1')
+Show-SfMultiplayerTeamInfo
 $RepoRoot = Split-Path $PSScriptRoot -Parent
 $Sf = Join-Path ${env:ProgramFiles(x86)} 'Steam\steamapps\common\StickFightTheGame'
 $Ip = '69.53.117.43'
