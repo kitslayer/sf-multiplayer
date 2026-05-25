@@ -62,7 +62,7 @@ namespace SFClientRecon
     {
         public const string PluginGuid = "com.stickfightdev.client-recon";
         public const string PluginName = "SFClientRecon";
-        public const string PluginVersion = "0.3.5";
+        public const string PluginVersion = "0.3.6";
 
         internal static ManualLogSource Log;
         internal static bool RefOk(object o) => !ReferenceEquals(o, null);
@@ -495,11 +495,30 @@ namespace SFClientRecon
                         if (IsIceOnlyDestructibleRoot(comp.gameObject)) continue;
                         if (IsWeaponNsoRootClient(comp.gameObject)) continue;
                         var rb = comp.GetComponent<Rigidbody>();
+
+                        // Bug F: pushable crates stay dynamic — local physics
+                        // drives push feel + SfNsoClientPush relays positions
+                        // back to server. Only hard-snap on large divergence
+                        // (>1.5u) so we don't tug-of-war with the relay.
+                        bool isPushable = IsPushableCrateNsoClient(comp.gameObject);
+
                         if ((object)rb != null)
                         {
+                            float dist = Vector3.Distance(rb.position, kv.Value.Pos);
+                            if (isPushable)
+                            {
+                                if (dist > 1.5f)
+                                {
+                                    bool wasKin = rb.isKinematic;
+                                    rb.isKinematic = true;
+                                    rb.position = kv.Value.Pos;
+                                    rb.rotation = kv.Value.Rot;
+                                    rb.isKinematic = wasKin;
+                                }
+                                continue;
+                            }
                             // Kinematic lerp only — never flip isKinematic=false (P0-5 / ice regression).
                             if (!rb.isKinematic) rb.isKinematic = true;
-                            float dist = Vector3.Distance(rb.position, kv.Value.Pos);
                             if (dist > NsoSnapDistance)
                             {
                                 rb.position = kv.Value.Pos;
@@ -688,6 +707,28 @@ namespace SFClientRecon
                 bool simple = (object)_clientDpSimpleField != null && (bool)_clientDpSimpleField.GetValue(dp);
                 bool ev = (object)_clientDpEventField != null && (bool)_clientDpEventField.GetValue(dp);
                 if (!simple && !ev) return true;
+            }
+            return false;
+        }
+
+        // Bug F fix: mirror server's IsPushableCrateNso. Pushable crates need
+        // to stay dynamic so SfNsoClientPush.RelayPushableCrateUpdates can
+        // relay local push positions back to the server. Forcing kinematic
+        // here (the old behavior) killed the relay (it skips when isKinematic)
+        // and made boxes feel laggy/ghost-through-players.
+        private static bool IsPushableCrateNsoClient(GameObject root)
+        {
+            if ((object)root == null) return false;
+            if (IsChainStyleDestructibleRoot(root) || IsWeaponNsoRootClient(root)) return false;
+            if ((object)_clientDpType == null) return false;
+            var dps = root.GetComponentsInChildren(_clientDpType);
+            if (dps == null || dps.Length == 0) return false;
+            foreach (var dp in dps)
+            {
+                if ((object)dp == null) continue;
+                bool simple = (object)_clientDpSimpleField != null && (bool)_clientDpSimpleField.GetValue(dp);
+                bool ev = (object)_clientDpEventField != null && (bool)_clientDpEventField.GetValue(dp);
+                if (simple && !ev) return true;
             }
             return false;
         }

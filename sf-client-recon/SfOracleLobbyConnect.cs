@@ -233,11 +233,18 @@ namespace SFClientRecon
         }
 
         internal static bool _countDownDeferred;
+        // Re-entry guard: when the deferred coroutine re-invokes StartCountDown,
+        // vanilla SF flips isLoading=true again while it loads pumpkin/boss
+        // assets. Without this flag the prefix re-defers → coroutine re-invokes
+        // → infinite loop (visible in client log as alternating "after map
+        // load" / "deferred — map still loading" forever).
+        internal static bool _countDownBypassPrefix;
 
         /// <summary>Halloween/boss: StartCountDown while isLoading skips pumpkin spawn — wait for load.</summary>
         internal static bool GameManager_StartCountDown_OraclePrefix(object __instance)
         {
             if (!_oracleConnectMode || !RefOk(__instance)) return true;
+            if (_countDownBypassPrefix) return true;  // re-entry from coroutine — let original run
             try
             {
                 var loadingF = AccessTools.Field(__instance.GetType(), "isLoading");
@@ -270,7 +277,9 @@ namespace SFClientRecon
                 var m = AccessTools.Method(_gmType, "StartCountDown");
                 if (RefOk(m) && RefOk(gmInst))
                 {
-                    m.Invoke(gmInst, null);
+                    _countDownBypassPrefix = true;
+                    try { m.Invoke(gmInst, null); }
+                    finally { _countDownBypassPrefix = false; }
                     Log.LogInfo("[oracle-lobby] StartCountDown after map load (pumpkin/boss hooks).");
                 }
             }

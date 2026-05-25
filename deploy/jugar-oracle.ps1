@@ -10,7 +10,13 @@ if (-not (Test-Path 'StickFight.exe')) {
     throw ('No encuentro Stick Fight en ' + $Sf)
 }
 
-& (Join-Path $PSScriptRoot 'instalar-cliente-oracle.ps1') -ServerIp $Ip -ServerPort $Port
+& (Join-Path $PSScriptRoot 'instalar-oracle-desde-cero.ps1') -ServerIp $Ip -ServerPort $Port
+$plug = Join-Path $Sf 'BepInEx\plugins'
+$pending = Join-Path $plug 'SFClientRecon.new.dll'
+if (Test-Path $pending) {
+    Copy-Item $pending (Join-Path $plug 'SFClientRecon.dll') -Force
+    Remove-Item $pending -Force
+}
 
 # --- MelonLoader off solo esta sesion ---
 $renamed = @()
@@ -23,7 +29,6 @@ foreach ($dir in @('MelonLoader', 'Mods', 'Plugins')) {
     }
 }
 
-$plug = Join-Path $Sf 'BepInEx\plugins'
 if (-not (Test-Path (Join-Path $plug 'SFClientRecon.dll'))) {
     Write-Host 'AVISO: SFClientRecon.dll no esta en BepInEx\plugins. Ejecuta deploy-physics-fix.ps1 -InstallLocal' -ForegroundColor Yellow
 }

@@ -76,7 +76,7 @@ namespace SFHeadlessHost
     {
         public const string PluginGuid = "com.stickfightdev.headless-host";
         public const string PluginName = "SFHeadlessHost";
-        public const string PluginVersion = "0.3.5";
+        public const string PluginVersion = "0.3.8";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance;
@@ -5564,7 +5564,7 @@ namespace SFHeadlessHost
         private static bool _loggedUpdateWithValue;
         private static MethodInfo GetUpdateWithValueMethod()
         {
-            if (_cachedUpdateWithValue != null) return _cachedUpdateWithValue;
+            if ((object)_cachedUpdateWithValue != null) return _cachedUpdateWithValue;
             var paType = AccessTools.TypeByName("InControl.PlayerAction");
             if ((object)paType == null)
             {
@@ -5573,11 +5573,11 @@ namespace SFHeadlessHost
             }
             _cachedUpdateWithValue = AccessTools.Method(paType, "UpdateWithValue",
                 new Type[] { typeof(float), typeof(ulong), typeof(float) });
-            if (_cachedUpdateWithValue == null && !_loggedUpdateWithValue)
+            if ((object)_cachedUpdateWithValue == null && !_loggedUpdateWithValue)
             {
                 Log.LogWarning("UpdateWithValue: method not found on PlayerAction. Trying without param-type filter…");
                 _cachedUpdateWithValue = AccessTools.Method(paType, "UpdateWithValue");
-                if (_cachedUpdateWithValue == null) Log.LogWarning("UpdateWithValue: not found even without filter");
+                if ((object)_cachedUpdateWithValue == null) Log.LogWarning("UpdateWithValue: not found even without filter");
                 else Log.LogInfo($"UpdateWithValue: found via fallback, signature: {_cachedUpdateWithValue}");
                 _loggedUpdateWithValue = true;
             }

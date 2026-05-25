@@ -27,7 +27,8 @@ output_log.txt
 *.sfreplay
 /tmp-*
 
-# ---- IDE ----
+# ---- IDE / local agent ----
+.claude/
 .vs/
 .vscode/
 .idea/

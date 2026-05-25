@@ -15,5 +15,12 @@ $ini = $ini -replace 'enabled = false', 'enabled = true'
 Set-Content 'doorstop_config.ini' $ini -NoNewline
 
 $desk = [Environment]::GetFolderPath('Desktop')
-Copy-Item (Join-Path $PSScriptRoot 'Jugar-StickFight-Oracle.bat') (Join-Path $desk 'Jugar Stick Fight Oracle.bat') -Force
+$oraclePs1 = Join-Path $PSScriptRoot 'jugar-oracle.ps1'
+$deskBat = Join-Path $desk 'Jugar Stick Fight Oracle.bat'
+@"
+@echo off
+title Stick Fight Oracle
+powershell -NoProfile -ExecutionPolicy Bypass -File "$oraclePs1"
+pause
+"@ | Set-Content -Path $deskBat -Encoding ASCII
 Write-Host "OK. Usa el acceso directo del escritorio: Jugar Stick Fight Oracle.bat"
