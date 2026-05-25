@@ -12,7 +12,12 @@ This folder is for **deep, multi-system investigations**. One file per investiga
 
 | Filename | Status | Subject |
 |---|---|---|
-| [`2026-05-24_v0.3.4-session-bugs.md`](2026-05-24_v0.3.4-session-bugs.md) | In progress | Five bugs surfaced from the first 2-player live session on v0.3.4 (Mono iterator landmine, NSO snapshot collapse, mono.dll JIT crash, Awake postfix dead, Update NRE, box physics divergence) |
+| [`2026-05-24_v0.3.4-session-bugs.md`](2026-05-24_v0.3.4-session-bugs.md) | Mostly fixed; F open | Five bugs surfaced from the first 2-player live session on v0.3.4 (Mono iterator landmine, NSO snapshot collapse, mono.dll JIT crash, Awake postfix dead, Update NRE, box physics divergence). Bug F's documented client-side fix turned out to be downstream of the OPEN-A server-floor blocker — see the session-2 followup. |
+| [`2026-05-24_session2-match-flow-and-box-blockers.md`](2026-05-24_session2-match-flow-and-box-blockers.md) | Match-flow shipped; box blockers OPEN | Evening session — Mono 2.0 `Monitor.Enter`/`Array.Empty<T>()` landmines, ALKA's silent 12s `RoundMinPlaySec` gate, missing lobby-kill auto-start. Plus two real open blockers turned up in the runtime logs: server NSOs falling into the void (P0-23) and auth rigs not re-spawned after round-advance (P0-24). |
+| [`2026-05-24_missing-vanilla-mechanisms.md`](2026-05-24_missing-vanilla-mechanisms.md) | Reference | Vanilla SF mechanisms (`RigidBodyIndexHolder + SendAddedForce`, `IgnorePlayerWhenOffScreen`, level-editor TAG) that the oracle never implements. Read this **before** trying to write client-side box-physics patches — it disambiguates which "force-sync" mechanism does what (knockback vs box-push). |
+| [`2026-05-24_vanilla-ground-truth.md`](2026-05-24_vanilla-ground-truth.md) | Reference | Unity Explorer crate component dump (Crate2(6) vs Crate(3)) from a vanilla-SF inspection session. |
+| [`2026-05-24_OPEN-3_chains_break_root_cause.md`](2026-05-24_OPEN-3_chains_break_root_cause.md) | Investigating | `ApplyExplosiveBlastAt`'s `networkForce=true` hides a desync; chain breaks via this path don't broadcast. |
+| [`2026-05-24_door-and-local-physics-sync.md`](2026-05-24_door-and-local-physics-sync.md) | Design | Door / swing-chain impulse-sync design (follow-up to the chains investigation). |
 
 ## When to add a new file here
 
