@@ -100,23 +100,16 @@ namespace SFClientRecon
         {
             yield return new WaitForSeconds(2.5f);
             if (!_oracleConnectMode) yield break;
-            try
-            {
-                var pkt = GetPktHandler();
-                if (RefOk(pkt))
-                {
-                    var t = Traverse.Create(pkt);
-                    if (t.Field<bool>("mHasSentOrReceived").Value) yield break;
-                }
-                var mm = UnityEngine.Object.FindObjectOfType(_mmType);
-                if (RefOk(mm))
-                {
-                    var inLobby = Traverse.Create(mm).Method("IsInLobby").GetValue<bool>();
-                    if (inLobby) yield break;
-                }
-            }
-            catch { }
-            Log.LogInfo("[oracle-lobby] Auto-connect → oracle (tienes -address/-port).");
+            // Previously bailed when `mHasSentOrReceived` or `IsInLobby` was
+            // already true, on the theory that stock SF had taken over and
+            // we shouldn't reinit. In practice this meant: if SF kicked off
+            // a Steam P2P attempt before the 2.5s timer fired, AutoConnect
+            // would bail forever → v25 handshake never sent → client's UDP
+            // packets reach oracle but no SfClient registration → all input
+            // dropped silently. We always re-run BeginOracleLobbyConnect
+            // when in oracle mode; the inner Init/SetNetworkMatch calls are
+            // idempotent on a connected P2PPackageHandler.
+            Log.LogInfo("[oracle-lobby] Auto-connect → oracle (forced — no bail on mHasSentOrReceived).");
             BeginOracleLobbyConnect("AutoConnect");
         }
 
@@ -190,14 +183,23 @@ namespace SFClientRecon
         internal static void P2PPackageHandler_Update_OraclePostfix(object __instance)
         {
             if (!_oracleConnectMode || !RefOk(__instance)) return;
+            // Mono 2.0: same Traverse → Array.Empty<object>() trap as above.
             try
             {
-                var t = Traverse.Create(__instance);
-                if (t.Field<bool>("mPauseTraffic").Value) return;
-                if (!t.Field<bool>("mHasHandler").Value) return;
-                t.Method("CheckForPackagesOnChannel", new object[] { 1, false }).GetValue();
-                t.Method("CheckForPackagesOnChannel", new object[] { 0, false }).GetValue();
-                t.Field("mHasSentOrReceived").SetValue(true);
+                var instType = __instance.GetType();
+                var pauseField = AccessTools.Field(instType, "mPauseTraffic");
+                var hasHandlerField = AccessTools.Field(instType, "mHasHandler");
+                var sentRecvField = AccessTools.Field(instType, "mHasSentOrReceived");
+                var checkMethod = AccessTools.Method(instType, "CheckForPackagesOnChannel",
+                    new[] { typeof(int), typeof(bool) });
+                if ((object)pauseField != null && (bool)pauseField.GetValue(__instance)) return;
+                if ((object)hasHandlerField != null && !(bool)hasHandlerField.GetValue(__instance)) return;
+                if ((object)checkMethod != null)
+                {
+                    checkMethod.Invoke(__instance, new object[] { 1, false });
+                    checkMethod.Invoke(__instance, new object[] { 0, false });
+                }
+                if ((object)sentRecvField != null) sentRecvField.SetValue(__instance, true);
             }
             catch { }
         }
@@ -286,16 +288,42 @@ namespace SFClientRecon
             catch (Exception e) { Log.LogWarning($"[oracle-lobby] deferred StartCountDown: {e.Message}"); }
         }
 
-        internal static bool GameManager_StartMatch_OraclePrefix(object __instance)
+        internal static bool GameManager_StartMatch_OraclePrefix(object __instance, object mapIndex, bool MovePlayers)
         {
             if (!_oracleConnectMode || !RefOk(__instance)) return true;
+            // Stock GameManager.StartMatch was compiled with Roslyn that
+            // emits Array.Empty<T>() — Unity 5.6.3 Mono 2.0 lacks that API
+            // so the Harmony DMD wrapper crashes at IL offset 0x15, aborting
+            // OnMapChanged → NetworkAllPlayersDiedButOne → StartMatch and
+            // leaving the client stuck in lobby. Bypass stock entirely:
+            // invoke StartMapSequence(MapWrapper, bool) directly.
             try
             {
-                var inLobby = Traverse.Create(__instance).Method("IsInLobby").GetValue<bool>();
-                if (inLobby) return false;
+                var instType = __instance.GetType();
+                var inFight = AccessTools.Field(instType, "inFight");
+                if ((object)inFight != null) inFight.SetValue(__instance, false);
+                var sds = AccessTools.Field(instType, "secondsBeforeSuddendeath");
+                if ((object)sds != null) sds.SetValue(__instance, 25f);
+
+                var mapWrapperType = (object)mapIndex != null ? mapIndex.GetType() : null;
+                System.Reflection.MethodInfo startMapSeq = null;
+                if ((object)mapWrapperType != null)
+                    startMapSeq = AccessTools.Method(instType, "StartMapSequence",
+                        new[] { mapWrapperType, typeof(bool) });
+                if ((object)startMapSeq == null)
+                    startMapSeq = AccessTools.Method(instType, "StartMapSequence");
+                if ((object)startMapSeq != null)
+                {
+                    var coro = startMapSeq.Invoke(__instance, new object[] { mapIndex, MovePlayers });
+                    if ((object)coro != null && __instance is MonoBehaviour mb)
+                    {
+                        mb.StartCoroutine((System.Collections.IEnumerator)coro);
+                        Log.LogInfo("[oracle-lobby] StartMatch bypassed → StartMapSequence kicked.");
+                    }
+                }
             }
-            catch { }
-            return true;
+            catch (Exception e) { Log.LogError($"[oracle-lobby] StartMatch bypass failed: {e.Message}"); }
+            return false; // never run stock StartMatch (Array.Empty crash)
         }
     }
 }

@@ -375,7 +375,11 @@ namespace SFClientRecon
             List<MapStateSnapEntry> mapStateList = null;
             ParseMapStateSection(pkt, ref o, bodyOff + bodyLen, out mapStateList);
 
-            lock (_snapLock)
+            // Mono 2.0 (Unity 5.6.3): Roslyn `lock(){…}` lowers to
+            // Monitor.Enter(obj, ref bool) which doesn't exist on this runtime.
+            // Use 1-arg Monitor.Enter + try/finally directly.
+            System.Threading.Monitor.Enter(_snapLock);
+            try
             {
                 _pendingSnap = list;
                 _pendingNsoSnap = nsoList;
@@ -384,6 +388,7 @@ namespace SFClientRecon
                 _pendingTick = tick;
                 _snapsReceived++;
             }
+            finally { System.Threading.Monitor.Exit(_snapLock); }
         }
 
         private void Update()
@@ -394,7 +399,8 @@ namespace SFClientRecon
             List<MapSyncSnapEntry> mapSyncSnap;
             List<MapStateSnapEntry> mapStateSnap;
             uint tick;
-            lock (_snapLock)
+            System.Threading.Monitor.Enter(_snapLock);
+            try
             {
                 snap    = _pendingSnap;
                 nsoSnap = _pendingNsoSnap;
@@ -406,6 +412,7 @@ namespace SFClientRecon
                 _pendingMapSyncSnap = null;
                 _pendingMapStateSnap = null;
             }
+            finally { System.Threading.Monitor.Exit(_snapLock); }
             if (snap != null)    ApplySnapshot(snap, tick);
             if (nsoSnap != null) ApplyNsoSnapshot(nsoSnap, tick);
             if (mapSyncSnap != null) ApplyMapSyncSnapshot(mapSyncSnap, tick);
