@@ -45,11 +45,17 @@ namespace SFClientRecon
 
         internal void TickNsoClientPushRelay()
         {
-            // OMEGA FIX: relay DISABLED. Sending locally-simulated crate positions
-            // back to the server made client and server overwrite each other every
-            // few frames (tug-of-war) → jitter / fly-away. The server is the sole
-            // authority; the client only soft-corrects toward it. No upload.
-            return;
+            // Crates are now PURE LOCAL PHYSICS and we apply NO incoming server
+            // position to them, so the old tug-of-war is gone — it is safe (and
+            // necessary for other clients) to relay our authoritative crate
+            // positions UP to the server. Only fires while a match is live and
+            // throttled to PushRelayInterval; only sends crates that actually
+            // moved (RelayPushableCrateUpdates skips at-rest crates), so a still
+            // stack costs no bandwidth and triggers no server-side motion.
+            if (!_oraclePushMode || !_running) return;
+            if (Time.realtimeSinceStartup < _nextPushRelayAt) return;
+            _nextPushRelayAt = Time.realtimeSinceStartup + PushRelayInterval;
+            try { RelayPushableCrateUpdates(); } catch { }
         }
 
         internal static bool DisableAllRigidBodies_PushPrefix(object __instance)
@@ -58,13 +64,29 @@ namespace SFClientRecon
             // (smooth, instant, collides + stacks). Server stays authoritative via
             // the gentle soft-correction in SmoothTowardTargets — NOT via the relay
             // (relay is disabled below) and NOT by forcing kinematic.
-            if (!_oraclePushMode || !IsPushableCrateRoot((__instance as Component)?.gameObject)) return true;
+            var rootGo = (__instance as Component)?.gameObject;
+            if (!_oraclePushMode || !IsPushableCrateRoot(rootGo)) return true;
+            // Floating crates (DontEnableRig) are suspended on purpose. Do NOT
+            // force them dynamic or they fall "porque sí". Let vanilla disable
+            // their rigidbody (keep kinematic); the game re-enables them only on
+            // activation. Only ground/pushable crates stay dynamic for local feel.
+            if ((object)_dontEnableRigType == null)
+                _dontEnableRigType = AccessTools.TypeByName("DontEnableRig");
+            if ((object)_dontEnableRigType != null && (object)rootGo != null
+                && (object)rootGo.GetComponentInChildren(_dontEnableRigType, true) != null)
+                return true;   // run vanilla → stays kinematic/floating
             try
             {
                 var rbs = (__instance as Component)?.GetComponentsInChildren<Rigidbody>();
                 if (rbs != null)
                     foreach (var rb in rbs)
-                        if ((object)rb != null) rb.isKinematic = false;
+                    {
+                        if ((object)rb == null) continue;
+                        // Per-rigidbody guard: a sub-piece may carry DontEnableRig.
+                        if ((object)_dontEnableRigType != null
+                            && (object)rb.GetComponent(_dontEnableRigType) != null) continue;
+                        rb.isKinematic = false;
+                    }
                 var listenF = AccessTools.Field(__instance.GetType(), "mIsListening");
                 if ((object)listenF != null) listenF.SetValue(__instance, true);
             }

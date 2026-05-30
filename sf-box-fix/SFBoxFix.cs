@@ -496,6 +496,28 @@ namespace SFBoxFix
             }
         }
 
+        // High-friction, no-bounce material so stacked crates grip instead of
+        // sliding off each other. Shared single instance (don't leak per-collider).
+        private static PhysicMaterial _gripMaterial;
+        private static PhysicMaterial GripMaterial
+        {
+            get
+            {
+                if ((object)_gripMaterial == null)
+                {
+                    _gripMaterial = new PhysicMaterial("CrateGrip")
+                    {
+                        staticFriction = 0.9f,
+                        dynamicFriction = 0.9f,
+                        bounciness = 0f,
+                        frictionCombine = PhysicMaterialCombine.Maximum,
+                        bounceCombine = PhysicMaterialCombine.Minimum
+                    };
+                }
+                return _gripMaterial;
+            }
+        }
+
         private static void UnfreezeAllPushableNsos(Scene scene)
         {
             var nsoType = AccessTools.TypeByName("NetworkSyncableObject");
@@ -559,13 +581,28 @@ namespace SFBoxFix
                         rotFrozen++;
                     }
 
-                    // CAJAS-3 unfreeze (only Xmas-style scenes).
-                    if (doUnfreeze && rb.isKinematic)
-                    {
-                        rb.isKinematic = false;
-                        rb.useGravity = true;
-                        flipped++;
-                    }
+                    // BOX-GRIP: crates ship with near-zero friction → stacked
+                    // boxes slide off each other and a tower can't hold ("se van
+                    // empujando de a poquito"). Apply a high-friction material so
+                    // they grip and stack. Also raise the rigidbody's sleep
+                    // threshold so a settled stack actually goes to sleep instead
+                    // of micro-jittering itself apart.
+                    var cols = rb.GetComponentsInChildren<Collider>();
+                    if (cols != null)
+                        foreach (var col in cols)
+                            if ((object)col != null && !col.isTrigger) col.material = GripMaterial;
+                    rb.sleepThreshold = 0.05f;
+                    rb.angularDrag = 0.9f;
+
+                    // NOTE: the old CAJAS-3 "unfreeze" (flip kinematic→dynamic on
+                    // Xmas-style maps) is REMOVED. It fired ~2s after the scene
+                    // loaded — i.e. while the player was already fighting — and
+                    // dropped crates the map intentionally left floating/kinematic
+                    // ("cajas en el aire caen porque sí" + "anda 3s y explota").
+                    // We now NEVER force a crate dynamic: a kinematic/floating
+                    // crate only starts moving when the game itself activates it
+                    // (hit / destruction event). We only add grip + freeze X/Y rot.
+                    _ = doUnfreeze;
                 }
             }
             if (flipped > 0)

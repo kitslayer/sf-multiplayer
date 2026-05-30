@@ -575,6 +575,112 @@ namespace SFClientRecon
         private static Type _clientDpType;
         private static System.Reflection.FieldInfo _clientDpSimpleField;
         private static System.Reflection.FieldInfo _clientDpEventField;
+        // ====================================================================
+        // PUSHABLE CRATE RECONCILER (v2 — force/velocity based)
+        // --------------------------------------------------------------------
+        // The previous reconciler did `rb.position = Lerp(rb.position, server)`
+        // on a DYNAMIC rigidbody every frame. Teleporting a dynamic body that is
+        // touching another collider forces interpenetration; Unity's solver then
+        // ejects both bodies at high speed on the next step → the crates
+        // "explode / salen volando" the instant they touch. It also fought the
+        // local push simulation, so behaviour differed per map.
+        //
+        // v2 keeps the nice local-physics feel (crates are dynamic, the player
+        // pushes them directly, they fall + stack under real gravity + friction)
+        // but reconciles toward the authoritative server position using ONLY
+        // collision-respecting means:
+        //   * small error  -> nothing (deadzone); local physics + grip hold it.
+        //   * medium error -> a clamped, critically-damped corrective velocity
+        //                     (the solver still resolves contacts, so a crate
+        //                     pressed against another just leans on it — never
+        //                     tunnels/explodes).
+        //   * huge error   -> a single clean hard reset (respawn / round change /
+        //                     teleport), with momentum zeroed so it can't fling.
+        // Correction strength is scaled DOWN while the crate is essentially at
+        // rest (a settled stack) so towers stay glued, and UP while it is moving
+        // fast (catch a diverging crate before it drifts far). Rotation is only
+        // gently nudged in Z (X/Y are frozen server-side via BOX-ROT).
+        // ====================================================================
+        private const float CrateDeadzone      = 0.06f;  // m: below this, leave it to local physics
+        private const float CrateHardSnapDist  = 2.5f;   // m: above this, hard reset (rare)
+        private const float CrateMaxCorrSpeed  = 6.0f;   // m/s cap on corrective velocity (anti-fling)
+        private const float CrateStiffness     = 9.0f;   // 1/s spring gain toward server pos
+        private const float CrateRestSpeed     = 0.35f;  // m/s below which a crate counts as "resting"
+        private const float CrateRestCorrScale = 0.25f;  // correction multiplier while resting (hold stacks)
+        private const float CrateRotCorrRate   = 6.0f;   // 1/s Z-rotation chase rate
+
+        private void ReconcilePushableCrate(Rigidbody rb, PoseTarget pose)
+        {
+            // Guard: should be dynamic. (Floating/DontEnableRig crates never get
+            // here — they are not flagged Pushable.)
+            if (rb.isKinematic) rb.isKinematic = false;
+
+            float dt = Time.deltaTime;
+            if (dt <= 0f) return;
+
+            Vector3 cur = rb.position;
+            Vector3 err = pose.Pos - cur;
+            float errMag = err.magnitude;
+
+            // --- Huge divergence: clean hard reset (respawn / round change) ---
+            if (errMag > CrateHardSnapDist)
+            {
+                rb.velocity = Vector3.zero;
+                rb.angularVelocity = Vector3.zero;
+                rb.position = pose.Pos;
+                rb.rotation = pose.Rot;
+                return;
+            }
+
+            // --- Inside deadzone: trust local physics + grip; do nothing. ---
+            // This is what lets a settled stack stay perfectly still instead of
+            // being nudged every frame.
+            if (errMag > CrateDeadzone)
+            {
+                // Critically-damped spring expressed as a target velocity. We
+                // push the crate's velocity toward (error * stiffness), clamped,
+                // so the physics solver still owns collision resolution.
+                Vector3 desiredVel = err * CrateStiffness;
+                float dvMag = desiredVel.magnitude;
+                if (dvMag > CrateMaxCorrSpeed)
+                    desiredVel *= CrateMaxCorrSpeed / dvMag;
+
+                // Scale correction down when the crate is basically at rest so a
+                // stack doesn't get jiggled by sub-deadzone server noise, and up
+                // (full) when it is moving / diverging.
+                float speed = rb.velocity.magnitude;
+                float scale = speed < CrateRestSpeed ? CrateRestCorrScale : 1f;
+
+                // Blend current velocity toward the corrective velocity. Using a
+                // velocity change (not a teleport) means a crate jammed against a
+                // neighbour simply presses on it — the solver prevents overlap, so
+                // there is no ejection/explosion.
+                float blend = 1f - Mathf.Exp(-CrateStiffness * scale * dt);
+                Vector3 newVel = Vector3.Lerp(rb.velocity, desiredVel, blend);
+
+                // Preserve gravity's downward pull when the crate is airborne and
+                // the server isn't asking it to go UP (prevents the correction
+                // from cancelling a legitimate fall into a floaty hover).
+                if (err.y < 0.1f && newVel.y > rb.velocity.y)
+                    newVel.y = rb.velocity.y;
+
+                rb.velocity = newVel;
+            }
+
+            // --- Rotation: gentle Z-only chase (X/Y frozen by BOX-ROT). Done via
+            // MoveRotation-equivalent slerp; rotation correction is far less
+            // explosive than positional teleport and keeps crates visually
+            // aligned with the server. Skipped while spinning fast (a real
+            // tumble in progress). ---
+            if (rb.angularVelocity.sqrMagnitude < 9f)
+            {
+                Quaternion target = pose.Rot;
+                float rotBlend = 1f - Mathf.Exp(-CrateRotCorrRate * dt);
+                Quaternion next = Quaternion.Slerp(rb.rotation, target, rotBlend);
+                rb.MoveRotation(next);
+            }
+        }
+
         private void SmoothTowardTargets()
         {
             if (_playerTargets.Count == 0 && _nsoTargets.Count == 0 && _mapSyncTargets.Count == 0) return;
@@ -635,24 +741,19 @@ namespace SFClientRecon
                         // to tug-of-war with.
                         if (entry.Pushable && (object)rb != null)
                         {
-                            if (rb.isKinematic) rb.isKinematic = false;
-                            float d = Vector3.Distance(rb.position, pose.Pos);
-                            if (d > 2.0f)
-                            {
-                                // Hard desync — clean snap, kill momentum (no fly).
-                                rb.velocity = Vector3.zero;
-                                rb.angularVelocity = Vector3.zero;
-                                rb.position = pose.Pos;
-                                rb.rotation = pose.Rot;
-                            }
-                            else if (d > 0.03f)
-                            {
-                                // Gentle pull toward server (slow rate keeps the
-                                // local physics feel; prevents reaching big desync).
-                                float corr = 1f - Mathf.Exp(-7f * Time.deltaTime);
-                                rb.position = Vector3.Lerp(rb.position, pose.Pos, corr);
-                                rb.rotation = Quaternion.Slerp(rb.rotation, pose.Rot, corr);
-                            }
+                            // PURE LOCAL PHYSICS. We deliberately apply NO server
+                            // position to pushable ground crates. Every previous
+                            // reconciliation scheme (position teleport OR corrective
+                            // velocity) injected motion the player never caused →
+                            // crates exploded on contact, slid, drifted, moved on
+                            // their own, or tunnelled. Letting the local Unity
+                            // simulation fully own them (dynamic + grip friction +
+                            // continuous collision, configured at cache build) gives
+                            // exact vanilla behaviour: they only move when the
+                            // player or another body pushes them, they stack, and
+                            // they never self-correct. The server learns their
+                            // positions from the outgoing relay (TickNsoClientPushRelay)
+                            // instead of pushing positions back at us.
                             continue;
                         }
 
@@ -727,7 +828,34 @@ namespace SFClientRecon
         // GetComponent<Rigidbody> for every box every frame — on box-heavy maps
         // that was thousands of hierarchy walks/sec → frame drops scaling with
         // crate count. Now it's a single dictionary lookup per frame.
-        private class NsoCacheEntry { public Component Comp; public Rigidbody Rb; public bool SkipSmooth; public bool Pushable; }
+        private class NsoCacheEntry { public Component Comp; public Rigidbody Rb; public bool SkipSmooth; public bool Pushable; public bool Floating; }
+        private static Type _dontEnableRigType;
+        // Rigidbody instance IDs already given the crate physics config (grip,
+        // continuous collision, constraints) — so the 2s cache rebuild doesn't
+        // re-touch / wake settled crates.
+        private readonly HashSet<int> _crateConfigured = new HashSet<int>();
+
+        // High-friction, no-bounce material so locally-simulated crates grip and
+        // stack instead of sliding off each other. Single shared instance.
+        private static PhysicMaterial _clientGripMaterial;
+        private static PhysicMaterial ClientGripMaterial
+        {
+            get
+            {
+                if ((object)_clientGripMaterial == null)
+                {
+                    _clientGripMaterial = new PhysicMaterial("CrateGripClient")
+                    {
+                        staticFriction = 0.9f,
+                        dynamicFriction = 0.9f,
+                        bounciness = 0f,
+                        frictionCombine = PhysicMaterialCombine.Maximum,
+                        bounceCombine = PhysicMaterialCombine.Minimum
+                    };
+                }
+                return _clientGripMaterial;
+            }
+        }
         private readonly Dictionary<ushort, NsoCacheEntry> _nsoCache = new Dictionary<ushort, NsoCacheEntry>();
         private int _nsoCacheRebuildAt;
         private Type _nsoType;
@@ -766,12 +894,59 @@ namespace SFClientRecon
                             bool skip = IsWeaponNsoRootClient(go)
                                      || IsIceOnlyDestructibleRoot(go)
                                      || IsChainStyleDestructibleRoot(go);
+                            bool pushable = !skip && IsPushableCrateNsoClient(go);
+                            var rbc = c.GetComponent<Rigidbody>();
+                            // Floating crates (DontEnableRig) are intentionally
+                            // suspended in the map. They must NOT run local physics
+                            // (they'd fall "porque sí"); they only move if the game
+                            // activates them, in which case the server tells us via
+                            // snapshot. Treat them as kinematic-follow.
+                            if ((object)_dontEnableRigType == null)
+                                _dontEnableRigType = AccessTools.TypeByName("DontEnableRig");
+                            bool floating = (object)_dontEnableRigType != null
+                                && (object)c.GetComponentInChildren(_dontEnableRigType, true) != null;
+                            // BOX-GRIP (client): real (non-floating) local-physics
+                            // crates need high friction or a stack slides apart.
+                            // Configure each crate's physics ONCE. The NSO cache
+                            // rebuilds every ~2s; re-applying material/constraints
+                            // (and worse, re-touching the rigidbody) on a sleeping
+                            // crate every rebuild can wake it and cause the "se
+                            // mueven solos" micro-jitter. Guard with a per-instance
+                            // configured set.
+                            if (pushable && !floating && (object)rbc != null
+                                && _crateConfigured.Add(rbc.GetInstanceID()))
+                            {
+                                var cols = c.GetComponentsInChildren<Collider>();
+                                if (cols != null)
+                                    foreach (var col in cols)
+                                        if ((object)col != null && !col.isTrigger) col.material = ClientGripMaterial;
+                                {
+                                    rbc.sleepThreshold = 0.05f;
+                                    rbc.angularDrag = 0.9f;
+                                    // Continuous collision so a fast push can't
+                                    // tunnel a crate through a neighbour or the
+                                    // floor ("se traspasan entre ellas").
+                                    rbc.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+                                    // Interpolate so local-physics crates render
+                                    // smoothly between FixedUpdate steps.
+                                    rbc.interpolation = RigidbodyInterpolation.Interpolate;
+                                    // Freeze Z position + X/Y rotation: SF is a 2.5D
+                                    // plane. Without this, contact impulses can shove
+                                    // a crate in depth (Z) so two crates end up on
+                                    // different planes → they visually overlap / pass
+                                    // through each other from the camera's view.
+                                    rbc.constraints |= RigidbodyConstraints.FreezePositionZ
+                                                     | RigidbodyConstraints.FreezeRotationX
+                                                     | RigidbodyConstraints.FreezeRotationY;
+                                }
+                            }
                             _nsoCache[id] = new NsoCacheEntry
                             {
                                 Comp = c,
-                                Rb = c.GetComponent<Rigidbody>(),
+                                Rb = rbc,
                                 SkipSmooth = skip,
-                                Pushable = !skip && IsPushableCrateNsoClient(go)
+                                Pushable = pushable && !floating,
+                                Floating = floating
                             };
                         }
                     }

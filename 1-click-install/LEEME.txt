@@ -1,0 +1,29 @@
+===================================================================
+  ALKA-KITSLAYER  -  Stick Fight Oracle  -  Instalacion 1-Click
+===================================================================
+
+COMO INSTALAR (1 clic):
+  1) Doble clic en:  INSTALAR-ALKA-KITSLAYER.bat
+  2) Acepta el permiso de administrador (necesario para escribir en Steam).
+  3) Espera a que diga "INSTALACION COMPLETA".
+
+LISTO. Para jugar:
+  - Doble clic en el escritorio: "Jugar-StickFight-ALKA.bat"
+  - O abri Stick Fight desde Steam (ya quedan las opciones de lanzamiento).
+  - En el juego: PLAY ONLINE -> QUICK MATCH. En el lobby escribi /start.
+
+QUE HACE EL INSTALADOR:
+  - Encuentra Stick Fight solo (cualquier biblioteca de Steam).
+  - Hace BACKUP de tus archivos antes de tocar nada (no rompe tu carpeta).
+  - Detecta si tenes BepInEx y/o MelonLoader y se adapta.
+  - Si te falta BepInEx, lo descarga e instala solo.
+  - Instala el cliente del oracle (SFClientRecon + browser).
+
+PARA REVERTIR TODO:
+  - Doble clic en:  DESINSTALAR-ALKA-KITSLAYER.bat
+    (restaura tu Assembly-CSharp.dll original y quita los plugins).
+
+-------------------------------------------------------------------
+  Team: kitslayer + AlkaDev
+  Discord: kitslayer  /  Tyralka0660
+-------------------------------------------------------------------
