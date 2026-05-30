@@ -68,3 +68,11 @@ deploy/SFLauncher/obj/
 # they're binaries (overrides the global *.exe / *.dll ignores above).
 !dist/*.exe
 !dist/*.dll
+
+# Third-party reference mod clones (have their own git history; reference only)
+EditorExtension/
+SFTGCNText/
+TabInfo/
+tools/external-mods/
+# Large decompiled reference source
+decompiled-working/

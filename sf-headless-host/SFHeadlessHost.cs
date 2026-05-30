@@ -76,7 +76,7 @@ namespace SFHeadlessHost
     {
         public const string PluginGuid = "com.stickfightdev.headless-host";
         public const string PluginName = "SFHeadlessHost";
-        public const string PluginVersion = "0.3.8";
+        public const string PluginVersion = "0.3.10";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance;
@@ -94,8 +94,11 @@ namespace SFHeadlessHost
         // k_MAX_SECONDS_UNTIL_AUTO_START is 3s. SF_NEXT_MATCH_DELAY env override.
         internal static float NextMatchDelaySec = 2.0f;
         // Minimum seconds on a map before another kill can advance the round (stops double MapChange / skip).
-        internal static float RoundMinPlaySec = 12f;
+        internal static float RoundMinPlaySec = 0f;
         private float _roundAdvanceBlockedUntil = -1f;
+        private bool _roundAdvanceQueuedAfterMapLoad;
+        private readonly HashSet<int> _deathSlotsHandled = new HashSet<int>();
+        private float _authDeathCheckAt = -1f;
         private float _pendingClientStartMatchAt = -1f;
         private bool _pendingClientStartMatchFired;
 
@@ -315,6 +318,9 @@ namespace SFHeadlessHost
                         TryPatch(harmony, "P2PPackageHandler.IsPacketAvailable (headless null-guard)",
                             isPkt, prefix: nameof(IsPacketAvailableHeadlessPrefix));
                 }
+
+                if (_batchModeHost)
+                    TryPatchHealthHandlerDieForRoundAdvance(harmony);
 
                 if (_p65MissingPatches.Count == 0)
                 {
@@ -1098,8 +1104,21 @@ namespace SFHeadlessHost
             if (!_batchModeHost) return;
             try
             {
-                int sceneIdx = (object)Instance != null ? Instance._currentSceneIndex : 0;
-                if (sceneIdx < 100 || sceneIdx > 109) return;
+                // Gate by LOADED SCENE NAME, not a hardcoded index range. Boss/
+                // event maps (HalloweenBoss2 = buildIndex 95, Space/Factory boss
+                // variants, Pumpkin, etc.) live outside the old 100-109 range, so
+                // that check silently skipped them → boss/event never spawned.
+                bool isEventMap = false;
+                for (int si = 0; si < SceneManager.sceneCount; si++)
+                {
+                    var sc = SceneManager.GetSceneAt(si);
+                    if (!sc.isLoaded || sc.name == "MainScene") continue;
+                    string n = sc.name.ToLowerInvariant();
+                    if (n.Contains("boss") || n.Contains("halloween") || n.Contains("pumpkin")
+                        || n.Contains("christmas") || n.Contains("xmas") || n.Contains("event"))
+                    { isEventMap = true; break; }
+                }
+                if (!isEventMap) return;
                 var behaviours = UnityEngine.Object.FindObjectsOfType<MonoBehaviour>();
                 if (behaviours == null) return;
                 int invoked = 0;
@@ -1125,7 +1144,7 @@ namespace SFHeadlessHost
                     }
                 }
                 if (invoked > 0)
-                    Log.LogInfo($"[P6.5] Boss map setup: invoked {invoked} handler(s) on scene {sceneIdx}.");
+                    Log.LogInfo($"[P6.5] Boss map setup: invoked {invoked} handler(s) on event scene.");
             }
             catch (Exception e) { Log.LogWarning($"[P6.5] InvokeOracleBossMapSetup: {e.Message}"); }
         }
@@ -2002,6 +2021,8 @@ namespace SFHeadlessHost
                         TickMapSyncRetry();
                         TickOracleMapInfoBootstrap();
                         TickOraclePreCombatGrace();
+                        TickBoxDiagnostic();
+                        TickAuthRigDeathCheck();
                     }
                     // Phase 6.17 — advance virtual projectiles each frame.
                     TickProjectiles();
@@ -2080,6 +2101,7 @@ namespace SFHeadlessHost
         private const byte PktWorldStateSnapshot            = 39;  // server → all clients, 30Hz
         private const byte PktPlayerInput                   = 40;  // client → server, 60Hz (Phase 6.12)
         private const byte PktClientFireWeapon              = 41;  // client → server, on Weapon.ActuallyShoot (Phase 6.17)
+        private const byte PktV26Announce                   = 42;  // server → all clients, UTF-8 banner text (recon plugin draws it 3s)
         // === Patched-DLL extensions (kit's patched Assembly-CSharp.dll has
         // these beyond stock SF's 0-38 range). We don't synthesize them, but
         // we relay so peer clients see each other. From ALKA's
@@ -2249,7 +2271,26 @@ namespace SFHeadlessHost
                     if (cli.Slot >= 0) _slotV26Endpoint.Remove(cli.Slot);
                     _rateGuards.Remove(k);
                 }
+                // Lobby emptied out: clear the match flag so the next player's
+                // /start fires a fresh MapChange. _matchStarted was a one-way
+                // latch — once a match started it never reset, so any later
+                // /start hit the "already in progress" no-op and the client
+                // sat in the lobby forever.
+                if (_sfClients.Count == 0 && _matchStarted)
+                {
+                    Log.LogInfo("[SF] Lobby empty — resetting match state for next /start.");
+                    ResetMatchStateForLobby();
+                }
             }
+        }
+
+        private void ResetMatchStateForLobby()
+        {
+            _matchStarted = false;
+            _autoStartAt = -1f;
+            _pendingClientStartMatchAt = -1f;
+            _pendingClientStartMatchFired = false;
+            _pendingRoundAdvanceAt = -1f;
         }
 
         // Parse the wrapper and route by msgType. Body bytes are forwarded
@@ -2382,10 +2423,9 @@ namespace SFHeadlessHost
                         TryProcessChatCommand(cli, data, bodyOffset, bodyLen);
                     }
                     RelayBodyToOthers(cli, msgType, data, bodyOffset, bodyLen, channel);
-                    // Solo QA: void/lava often sends FallOut without a reliable 666 relay
-                    // (only one client — no "others" to relay). Still advance the oracle map.
-                    if (msgType == PktPlayerFallOut)
-                        TryScheduleSoloTestRoundAdvance("solo-fallout");
+                    // Void/lava: FallOut often arrives without a 666 relay (solo or last player).
+                    if (msgType == PktPlayerFallOut && _matchStarted)
+                        ScheduleRoundAdvanceOnDeath("player-fallout");
                     break;
 
                 case PktObjectUpdate:
@@ -2481,6 +2521,135 @@ namespace SFHeadlessHost
         // anomalies so a malicious client can't one-shot people with
         // arbitrary damage values.
         private uint _damagePacketsDropped;
+
+        // === Behavioral anti-cheat — impossible-melee / instakill detection ===
+        //
+        // Goal (per design): stay PERMISSIVE. We only act on behavior that is
+        // physically impossible in legit play and only after it repeats across
+        // more than two distinct rounds — so a single fluke never kicks anyone.
+        //
+        // The signature we catch: a player dies (server sees the 666.666
+        // killing-blow marker) having received almost no real accumulated
+        // damage this round (<AcSuspectMaxAccum) from at most one hit, at melee
+        // range. Legit kills always accumulate ~full-HP worth of real damage
+        // before the killing blow, so this only trips on faked/spoofed instant
+        // kills. We require it in >2 distinct rounds before kicking.
+        private const float AcSuspectMaxAccum = 60f;   // victim HP is ~100; <60 received = couldn't legitimately die
+        private const float AcMeleeRange = 4.0f;        // melee reach is short; spoofed kills register here
+        private const int   AcFlaggedRoundsToKick = 3;  // strictly >2 distinct rounds
+        private readonly float[] _acRoundDmgToVictim = new float[4];
+        private readonly int[]   _acRoundHitsToVictim = new int[4];
+        private readonly Dictionary<int, HashSet<int>> _acFlaggedRounds = new Dictionary<int, HashSet<int>>();
+        private readonly HashSet<int> _acKicked = new HashSet<int>();
+        private int _acRoundIndex;
+        private bool AcEnabled => Environment.GetEnvironmentVariable("SF_AC_BEHAVIOR") != "0";
+
+        // Called at every round boundary to reset per-life damage accumulators.
+        private void AcResetRound()
+        {
+            for (int i = 0; i < 4; i++) { _acRoundDmgToVictim[i] = 0f; _acRoundHitsToVictim[i] = 0; }
+            _acRoundIndex++;
+        }
+
+        // Called for every accepted PlayerTookDamage. attackerIdx/dmg already
+        // parsed + validated. victimSlot is the packet sender's slot.
+        private void AcTrackDamage(int victimSlot, byte attackerIdx, float dmg, bool isKillingBlow)
+        {
+            if (!AcEnabled) return;
+            if (victimSlot < 0 || victimSlot > 3) return;
+
+            if (!isKillingBlow)
+            {
+                // Real incremental damage — accumulate for this victim's life.
+                _acRoundDmgToVictim[victimSlot] += dmg;
+                _acRoundHitsToVictim[victimSlot]++;
+                return;
+            }
+
+            // Killing blow. Environment kills (lava/void) use 255 — never a cheat.
+            if (attackerIdx > 3) return;
+            // Self-kill (suicide / fell into the void / own explosive) — the
+            // attacker and victim are the same player. Never a cheat; this is the
+            // false-positive that kicked a lone player throwing himself off the map.
+            if (attackerIdx == victimSlot) return;
+            // Anti-cheat is about player-vs-player interactions. With fewer than 2
+            // players connected there is no one to legitimately kill, so any kill
+            // here is environmental/self — never flag it.
+            if (_sfClients.Count < 2) return;
+            if (_acKicked.Contains(attackerIdx)) return;
+
+            float accum = _acRoundDmgToVictim[victimSlot];
+            int hits = _acRoundHitsToVictim[victimSlot];
+            if (accum >= AcSuspectMaxAccum || hits > 1) return;  // plenty of real damage → legit kill
+
+            // Range gate — confirm the kill happened at melee distance so we
+            // don't false-positive on a legit long-range one-shot weapon.
+            bool meleeRange = true;
+            if (SlotToRig.TryGetValue(attackerIdx, out var attRig) && (object)attRig != null
+                && SlotToRig.TryGetValue(victimSlot, out var vicRig) && (object)vicRig != null)
+            {
+                float dist = Vector3.Distance(attRig.transform.position, vicRig.transform.position);
+                meleeRange = dist <= AcMeleeRange;
+            }
+            if (!meleeRange) return;
+
+            // Flag this round for the attacker.
+            if (!_acFlaggedRounds.TryGetValue(attackerIdx, out var rounds))
+            {
+                rounds = new HashSet<int>();
+                _acFlaggedRounds[attackerIdx] = rounds;
+            }
+            rounds.Add(_acRoundIndex);
+            Log.LogWarning($"[anticheat behavior] Impossible kill by slot={attackerIdx} on slot={victimSlot} " +
+                           $"(victim took only {accum:0.#} dmg over {hits} hit(s) at melee range). " +
+                           $"Flagged rounds: {rounds.Count}/{AcFlaggedRoundsToKick}.");
+
+            if (rounds.Count >= AcFlaggedRoundsToKick)
+            {
+                _acKicked.Add(attackerIdx);
+                AcKickForCheat(attackerIdx, "instant melee kills (impossible without cheats)");
+            }
+        }
+
+        // Announce the kick to everyone, then boot the offender.
+        private void AcKickForCheat(int slot, string reason)
+        {
+            string msg = $"Player {slot + 1} kicked: {reason}";
+            BroadcastChatToAll(msg);
+            SendAnnouncementToAll(msg);   // recon plugin shows a top banner for 3s
+            Log.LogWarning($"[anticheat behavior] KICK slot={slot}: {reason}");
+            byte[] kickBody = new byte[1] { (byte)slot };
+            BroadcastSfPacket(PktKickPlayer, kickBody, 0uL, 0);
+        }
+
+        // Push a top-of-screen banner string to every recon client over the
+        // v26 channel (their :1339 endpoint). Stock clients without the recon
+        // plugin never listen here, so this is a no-op for them.
+        private void SendAnnouncementToAll(string text)
+        {
+            byte[] body = System.Text.Encoding.UTF8.GetBytes(text ?? "");
+            foreach (var kv in _sfClients)
+            {
+                if (!kv.Value.Initialized) continue;
+                IPEndPoint v26Ep;
+                if (!_slotV26Endpoint.TryGetValue(kv.Value.Slot, out v26Ep))
+                    v26Ep = new IPEndPoint(kv.Value.Addr.Address, V26_CLIENT_PORT);
+                SendSfPacket(v26Ep, PktV26Announce, body, 0, 0);
+            }
+        }
+
+        // Send a server chat line to every connected player. SF chat bubbles
+        // fade on their own after ~3s, satisfying the "auto-disappear" ask.
+        private void BroadcastChatToAll(string text)
+        {
+            foreach (var kv in _sfClients)
+            {
+                var cli = kv.Value;
+                if (cli == null || !cli.Initialized) continue;
+                SendChatToPlayer(cli, text);
+            }
+        }
+
         private bool ValidateDamagePacket(SfClient sender, byte[] data, int off, int len)
         {
             if (len < 5) return false;
@@ -2566,6 +2735,11 @@ namespace SFHeadlessHost
             // Future (Phase 6.16+): weapon-specific max-reach (sword=3.5u,
             // pistol=18u, RPG=22u). Requires per-slot weapon tracking which
             // we don't have yet on the oracle side.
+
+            // Behavioral tracking — accumulate real damage / detect spoofed
+            // instant kills. Does not reject here (handled via kick).
+            bool isKillingBlow = System.Math.Abs(dmg - 666.666f) < 0.01f;
+            AcTrackDamage(sender.Slot, attackerIdx, dmg, isKillingBlow);
             return true;
         }
 
@@ -2977,7 +3151,12 @@ namespace SFHeadlessHost
             {
                 float dmg = BitConverter.ToSingle(body, 1);
                 if (System.Math.Abs(dmg - 666.666f) < 0.01f)
-                    TryScheduleRoundAdvance($"killing-blow dmg={dmg:0.###}");
+                {
+                    if (!_matchStarted)
+                        FireMatchStart($"lobby-kill dmg={dmg:0.###}");
+                    else
+                        ScheduleRoundAdvanceOnDeath($"killing-blow dmg={dmg:0.###}");
+                }
             }
         }
         private int _relayAllCount;
@@ -3021,6 +3200,68 @@ namespace SFHeadlessHost
             catch { }
         }
 
+        /// <summary>Clears post-map gate so death can schedule round advance immediately.</summary>
+        internal void ClearRoundAdvanceBlockedGate(string reason)
+        {
+            _roundAdvanceBlockedUntil = Time.realtimeSinceStartup;
+            Log.LogInfo($"[DEATH] Round advance gate cleared ({reason}).");
+        }
+
+        private static bool TryReadHealthHandlerIsDead(object healthHandler)
+        {
+            if ((object)healthHandler == null) return false;
+            try
+            {
+                var ciF = AccessTools.Field(healthHandler.GetType(), "characterInformation");
+                if ((object)ciF == null)
+                    ciF = AccessTools.Field(healthHandler.GetType(), "mCharacterInformation");
+                if ((object)ciF == null) return true;
+                var ci = ciF.GetValue(healthHandler);
+                if ((object)ci == null) return true;
+                var deadField = AccessTools.Field(ci.GetType(), "isDead");
+                if ((object)deadField != null) return (bool)deadField.GetValue(ci);
+                var deadProp = AccessTools.Property(ci.GetType(), "isDead");
+                if ((object)deadProp != null) return (bool)deadProp.GetValue(ci, null);
+                return true;
+            }
+            catch { return true; }
+        }
+
+        /// <summary>Death signal — clears gate and schedules next map (queues during map load).</summary>
+        internal void ScheduleRoundAdvanceOnDeath(string reason)
+        {
+            AcResetRound();
+            ClearRoundAdvanceBlockedGate(reason);
+            TryScheduleRoundAdvance(reason);
+        }
+
+        internal void OnOraclePlayerDied(object healthHandler, string reason)
+        {
+            ScheduleRoundAdvanceOnDeath(reason);
+        }
+
+        private void TryPatchHealthHandlerDieForRoundAdvance(Harmony harmony)
+        {
+            try
+            {
+                var hhType = AccessTools.TypeByName("HealthHandler");
+                if ((object)hhType == null) { Log.LogWarning("[DEATH] HealthHandler type not found."); return; }
+                var dieMethod = AccessTools.Method(hhType, "Die");
+                if ((object)dieMethod == null) dieMethod = AccessTools.Method(hhType, "OnDeath");
+                if ((object)dieMethod == null) { Log.LogWarning("[DEATH] HealthHandler.Die not found."); return; }
+                var postfix = AccessTools.Method(typeof(Plugin), nameof(HealthHandlerDiePostfix));
+                harmony.Patch(dieMethod, postfix: new HarmonyMethod(postfix));
+                Log.LogInfo("[DEATH] Patched HealthHandler.Die — schedules round advance when isDead.");
+            }
+            catch (Exception e) { Log.LogWarning($"[DEATH] HealthHandler patch failed: {e.Message}"); }
+        }
+
+        private static void HealthHandlerDiePostfix(object __instance)
+        {
+            if ((object)Instance == null) return;
+            Instance.OnOraclePlayerDied(__instance, "HealthHandler.Die");
+        }
+
         private void TryScheduleRoundAdvance(string reason)
         {
             if (_pendingRoundAdvanceAt >= 0f) return;
@@ -3032,7 +3273,8 @@ namespace SFHeadlessHost
             }
             if (IsOracleMapLoadInProgress())
             {
-                Log.LogInfo($"[SF] Round advance ignored ({reason}): oracle map load in progress.");
+                _roundAdvanceQueuedAfterMapLoad = true;
+                Log.LogInfo($"[SF] Round advance queued ({reason}): map load in progress.");
                 return;
             }
             if (!_matchStarted)
@@ -3042,6 +3284,60 @@ namespace SFHeadlessHost
             }
             _pendingRoundAdvanceAt = now + RoundEndDelaySec;
             Log.LogInfo($"[SF] Round advance scheduled ({reason}) in {RoundEndDelaySec:0.0}s — clients={CountInitializedSfClients()} soloTest={IsSoloTestLobby()}");
+        }
+
+        internal void FlushQueuedRoundAdvanceAfterMapLoad(string reason)
+        {
+            if (!_roundAdvanceQueuedAfterMapLoad || _pendingRoundAdvanceAt >= 0f) return;
+            _roundAdvanceQueuedAfterMapLoad = false;
+            if (!_matchStarted) return;
+            _pendingRoundAdvanceAt = Time.realtimeSinceStartup + RoundEndDelaySec;
+            Log.LogInfo($"[SF] Round advance scheduled ({reason}) after map load in {RoundEndDelaySec:0.0}s.");
+        }
+
+        private static bool TryGetRigIsDead(GameObject rig)
+        {
+            if ((object)rig == null) return false;
+            try
+            {
+                var ctrlType = AccessTools.TypeByName("Controller");
+                if ((object)ctrlType == null) return false;
+                var ctrl = rig.GetComponent(ctrlType);
+                if ((object)ctrl == null) return false;
+                var infoF = AccessTools.Field(ctrlType, "info");
+                if ((object)infoF == null) return false;
+                var infoVal = infoF.GetValue(ctrl);
+                if ((object)infoVal == null) return false;
+                var deadF = AccessTools.Field(infoVal.GetType(), "isDead");
+                if ((object)deadF != null) return (bool)deadF.GetValue(infoVal);
+                var deadP = AccessTools.Property(infoVal.GetType(), "isDead");
+                if ((object)deadP != null) return (bool)deadP.GetValue(infoVal, null);
+            }
+            catch { }
+            return false;
+        }
+
+        private void TickAuthRigDeathCheck()
+        {
+            if (SlotToRig.Count == 0) return;
+            float now = Time.realtimeSinceStartup;
+            if (now - _authDeathCheckAt < 0.25f) return;
+            _authDeathCheckAt = now;
+            foreach (var kv in SlotToRig)
+            {
+                if (_deathSlotsHandled.Contains(kv.Key)) continue;
+                if ((object)kv.Value == null) continue;
+                if (!TryGetRigIsDead(kv.Value)) continue;
+                _deathSlotsHandled.Add(kv.Key);
+                Log.LogInfo($"[DEATH] Auth rig slot {kv.Key} isDead — scheduling round advance.");
+                ScheduleRoundAdvanceOnDeath($"auth-rig-dead slot={kv.Key}");
+            }
+        }
+
+        private void ResetDeathTrackingForNewRound()
+        {
+            _deathSlotsHandled.Clear();
+            _roundAdvanceQueuedAfterMapLoad = false;
         }
 
         /// <summary>Solo-only: death without scoring still reloads oracle map logic for QA.</summary>
@@ -3074,6 +3370,7 @@ namespace SFHeadlessHost
 
         private void AdvanceRound()
         {
+            ResetDeathTrackingForNewRound();
             _roundCounter++;
             // Pick a random scene we haven't visited in the last few rounds.
             int nextScene = _allLandfallMaps[_mapRng.Next(_allLandfallMaps.Length)];
@@ -3095,7 +3392,7 @@ namespace SFHeadlessHost
             // clients re-ready up. Stock SF uses k_MAX_SECONDS_UNTIL_AUTO_START=3s
             // but the client's map-load animation eats most of that. Defaulting
             // to 2s; configurable via SF_NEXT_MATCH_DELAY env var.
-            _pendingStartMatchAt = Time.realtimeSinceStartup + Mathf.Max(NextMatchDelaySec, 4f);
+            _pendingStartMatchAt = Time.realtimeSinceStartup + NextMatchDelaySec;
             _pendingRearmCombatAt = -1f;
             _oracleCountDownAt = -1f;
             _oracleCountDownFired = false;
@@ -3462,6 +3759,7 @@ namespace SFHeadlessHost
                 Log.LogInfo($"[SF] FireMatchStart({source}) — already started, no-op.");
                 return;
             }
+            ResetDeathTrackingForNewRound();
             Log.LogInfo($"[SF] FireMatchStart({source}) — MapChange now; StartMatch to clients after load window.");
             BroadcastMapChange(_currentSceneIndex);
             _pendingClientStartMatchAt = Time.realtimeSinceStartup + Mathf.Max(5f, NextMatchDelaySec + 2f);
@@ -3575,10 +3873,20 @@ namespace SFHeadlessHost
                 AimY    = ay,
                 Buttons = (int)btns,
             };
-            // Find the SfClient owning this slot to stamp LastInputSeq.
+            // Find the SfClient owning this slot to stamp LastInputSeq AND refresh
+            // LastSeen. Without the LastSeen update, a client that finished the
+            // lobby handshake and is streaming v26 PlayerInput at 60Hz still got
+            // swept as "stale" (the game-socket LastSeen went cold) → the player
+            // dropped from the server seconds after connecting. v26 input IS proof
+            // of life.
             foreach (var kv in _sfClients)
             {
-                if (kv.Value.Slot == slot) { kv.Value.LastInputSeq = seq; break; }
+                if (kv.Value.Slot == slot)
+                {
+                    kv.Value.LastInputSeq = seq;
+                    kv.Value.LastSeen = Time.realtimeSinceStartup;
+                    break;
+                }
             }
             // Record this client's v26 source addr — server snapshots get sent
             // back to this same IP:port (client uses single bidirectional socket).
@@ -3958,17 +4266,20 @@ namespace SFHeadlessHost
         private float _nsoPeriodicKeyframeNextAt = -1f;
         private float _sceneLoadRealtime = -1f;
         private int _nsoFallthroughResetCount;
+        private readonly Dictionary<ushort, int> _nsoVoidResetCount = new Dictionary<ushort, int>();
         private const float NsoFallResetY = -32f;
-        private const float NsoFallRecentPushSec = 2f;
-        private const float NsoFallMinDownwardVel = -4f;
-        private const float NsoFallMaxResetPerTick = 2;
+        private const int NsoFallMaxResetPerTick = 16;
+        // After this many void rescues, the crate clearly has no floor under
+        // its spawn (e.g. lobby storage objects high above the map). Freeze it
+        // kinematic at spawn so it stops churning the snapshot every tick.
+        private const int NsoVoidFreezeAfter = 3;
         private const float NsoPeriodicKeyframeSec = 2f;
 
         private void TickNsoFallGuard()
         {
             if (_nsoFallGuardNextAt < 0f) _nsoFallGuardNextAt = Time.realtimeSinceStartup + 2f;
             if (Time.realtimeSinceStartup < _nsoFallGuardNextAt) return;
-            _nsoFallGuardNextAt = Time.realtimeSinceStartup + 2.5f;
+            _nsoFallGuardNextAt = Time.realtimeSinceStartup + 1.0f;
             if (_nsoSpawnPos.Count == 0) return;
             try
             {
@@ -3984,9 +4295,6 @@ namespace SFHeadlessHost
                 foreach (var kv in _nsoSpawnPos)
                 {
                     ushort id = kv.Key;
-                    if (_nsoLastMovedAt.TryGetValue(id, out var lastMoved)
-                        && (now - lastMoved) < NsoFallRecentPushSec)
-                        continue;
                     if (!_nsoByIndexCache.TryGetValue(id, out var comp) || (object)comp == null)
                     {
                         if (_nsoCacheLastRebuildAt < 0f || now - _nsoCacheLastRebuildAt > 2f)
@@ -3999,28 +4307,47 @@ namespace SFHeadlessHost
                     }
                     if (!IsPushableCrateNso(comp.gameObject)) continue;
                     var p = comp.transform.position;
+                    // Only act on crates that have left the playable area. A crate
+                    // below the void threshold is never in legitimate play (no
+                    // player push or throw arc lives down there) — it tunneled the
+                    // floor due to server physics. The previous version SKIPPED
+                    // these: a falling crate is "recently moved" every frame and
+                    // has fast downward velocity, so the old recent-push +
+                    // downward-velocity guards fired on exactly the crates we
+                    // needed to rescue, and the guard never did anything.
                     if (p.y >= NsoFallResetY) continue;
-                    var rootRb = comp.GetComponent<Rigidbody>();
-                    if ((object)rootRb != null && rootRb.velocity.y < NsoFallMinDownwardVel)
-                        continue;
-                    if (resetsThisTick >= NsoFallMaxResetPerTick) continue;
+                    if (resetsThisTick >= NsoFallMaxResetPerTick) break;
+
                     Vector3 spawn = kv.Value;
+                    int voidCount = _nsoVoidResetCount.TryGetValue(id, out var vc) ? vc + 1 : 1;
+                    _nsoVoidResetCount[id] = voidCount;
+
+                    // Restore to the on-map spawn the crate had after settle and
+                    // keep it DYNAMIC so it behaves like vanilla (pushable, stacks,
+                    // can be knocked around). A real map crate has a floor under
+                    // its spawn, so it lands and stays — no churn.
                     comp.transform.position = spawn;
                     comp.transform.rotation = Quaternion.identity;
+                    bool freeze = voidCount > NsoVoidFreezeAfter;
                     var rbs = comp.GetComponentsInChildren<Rigidbody>();
                     foreach (var rb in rbs)
                     {
                         if ((object)rb == null) continue;
                         rb.velocity = Vector3.zero;
                         rb.angularVelocity = Vector3.zero;
-                        rb.isKinematic = false;
+                        // Only objects with NO floor under their spawn keep
+                        // re-falling. After several rescues, stop the per-second
+                        // teleport churn by parking them kinematic — these are
+                        // never gameplay crates (e.g. lobby storage at y~70), so
+                        // this never freezes a real map box.
+                        rb.isKinematic = freeze;
                     }
                     _nsoLastBroadcastPos[id] = spawn;
                     _nsoLastMovedAt[id] = now;
                     _nsoFallthroughResetCount++;
                     resetsThisTick++;
                     if (_nsoFallthroughResetCount <= 5 || _nsoFallthroughResetCount % 20 == 0)
-                        Log.LogInfo($"[BOXES] Reset fallthrough idx={id} Y={p.y:0.1} -> spawn ({spawn.y:0.1}) (#{_nsoFallthroughResetCount})");
+                        Log.LogInfo($"[BOXES] Reset fallthrough idx={id} Y={p.y:0.1} -> spawn ({spawn.y:0.1}) freeze={freeze} (#{_nsoFallthroughResetCount})");
                 }
             }
             catch (Exception e) { Log.LogWarning($"[P0-16 fall guard] {e.Message}"); }
@@ -4088,6 +4415,10 @@ namespace SFHeadlessHost
         // testing (e.g. two SF instances on the dev machine).
         private const int V26_CLIENT_PORT = 1339;
         private float _lastSnapshotAt = -1f;
+        // Authoritative-state broadcast rate. Bumped 30→60Hz so server-driven
+        // NSOs (boxes) update twice as often → far smoother on clients (combined
+        // with client-side velocity extrapolation). Physics already runs 60Hz.
+        private const float SnapshotHz = 30f;
         private uint  _serverTick;
 
         // === Phase 6.17 v0.1 — server-side projectile registry ===
@@ -4424,7 +4755,7 @@ namespace SFHeadlessHost
         {
             if (!_matchStarted) return;
             if (_sfClients.Count == 0) return;
-            if (Time.realtimeSinceStartup - _lastSnapshotAt < (1.0f / 30.0f)) return;
+            if (Time.realtimeSinceStartup - _lastSnapshotAt < (1.0f / SnapshotHz)) return;
             _lastSnapshotAt = Time.realtimeSinceStartup;
             _serverTick++;
             RecordTickSample();        // Phase 6.14.5 — history before broadcast
@@ -4722,9 +5053,19 @@ namespace SFHeadlessHost
                 Log.LogInfo($"[BOXES] Applied client ObjectUpdate #{_objectUpdateAppliedCount} idx={idx} → ({py:0.0},{pz:0.0})");
         }
 
+        // Server-side per-NSO cache entry. Classification (pushable/weapon) and
+        // the Rigidbody ref are computed ONCE here instead of per-tick in
+        // CollectActiveNsoSnapshot — which previously did FindObjectsOfType +
+        // 2× GetComponentsInChildren per NSO every snapshot. On box-heavy maps
+        // (~90 crates) that tanked server FPS → snapshots slowed → boxes lagged
+        // on clients, worse the more crates a map had.
+        private class NsoSrvEntry { public ushort Id; public Component Comp; public Rigidbody Rb; public bool Pushable; public bool Weapon; }
+        private readonly List<NsoSrvEntry> _nsoSrvEntries = new List<NsoSrvEntry>();
+
         private void RebuildNsoIndexCache()
         {
             _nsoByIndexCache.Clear();
+            _nsoSrvEntries.Clear();
             try
             {
                 if ((object)_nsoType == null)
@@ -4743,10 +5084,32 @@ namespace SFHeadlessHost
                         id = (ushort)_nsoIndexProp.GetValue(nso, null);
                     else if ((object)_nsoIndexField != null)
                         id = (ushort)_nsoIndexField.GetValue(nso);
-                    _nsoByIndexCache[id] = nso as Component;
+                    var c = nso as Component;
+                    _nsoByIndexCache[id] = c;
+                    if ((object)c == null) continue;
+                    var go = c.gameObject;
+                    _nsoSrvEntries.Add(new NsoSrvEntry
+                    {
+                        Id = id,
+                        Comp = c,
+                        Rb = c.GetComponent<Rigidbody>(),
+                        Weapon = IsWeaponNsoRoot(go),
+                        Pushable = IsPushableCrateNso(go)
+                    });
                 }
             }
             catch (Exception ex) { Log.LogWarning($"[BOXES NSO cache] {ex.Message}"); }
+        }
+
+        // Ensure the NSO cache is fresh enough for per-tick iteration.
+        private void EnsureNsoSrvCache()
+        {
+            if (_nsoSrvEntries.Count == 0 || _nsoCacheLastRebuildAt < 0f
+                || Time.realtimeSinceStartup - _nsoCacheLastRebuildAt > 2f)
+            {
+                RebuildNsoIndexCache();
+                _nsoCacheLastRebuildAt = Time.realtimeSinceStartup;
+            }
         }
 
         // Gather NSOs that need broadcasting this tick. Three include cases:
@@ -4772,30 +5135,17 @@ namespace SFHeadlessHost
             var result = new List<NsoSnap>();
             try
             {
-                if ((object)_nsoType == null)
-                {
-                    _nsoType = AccessTools.TypeByName("NetworkSyncableObject");
-                    if ((object)_nsoType == null) return result;
-                    _nsoIndexProp = AccessTools.Property(_nsoType, "Index");
-                    _nsoIndexField = AccessTools.Field(_nsoType, "m_Index");
-                }
-                var all = UnityEngine.Object.FindObjectsOfType(_nsoType);
-                if (all == null) return result;
+                EnsureNsoSrvCache();
                 float now = Time.realtimeSinceStartup;
-                foreach (var nso in all)
+                foreach (var ent in _nsoSrvEntries)
                 {
-                    var comp = nso as Component;
+                    var comp = ent.Comp;
                     if ((object)comp == null) continue;
-                    if (IsWeaponNsoRoot(comp.gameObject)) continue;
+                    if (ent.Weapon) continue;
 
-                    ushort id = 0;
-                    if ((object)_nsoIndexProp != null)
-                        id = (ushort)_nsoIndexProp.GetValue(nso, null);
-                    else if ((object)_nsoIndexField != null)
-                        id = (ushort)_nsoIndexField.GetValue(nso);
-
+                    ushort id = ent.Id;
                     var p = comp.transform.position;
-                    var rb = comp.GetComponent<Rigidbody>();
+                    var rb = ent.Rb;
 
                     // BOXES FIX (2nd pass): mirror the v25 forward-skip filter.
                     // The server's own NSOs can fall through the floor on map
@@ -4806,7 +5156,7 @@ namespace SFHeadlessHost
 
                     bool dynamicBody = (object)rb != null && !rb.isKinematic;
                     // Case 0: pushable crates only — every tick while dynamic (not all 90 NSOs).
-                    if (dynamicBody && IsPushableCrateNso(comp.gameObject))
+                    if (dynamicBody && ent.Pushable)
                     {
                         _nsoLastMovedAt[id] = now;
                         _nsoLastBroadcastPos[id] = p;
@@ -4826,7 +5176,7 @@ namespace SFHeadlessHost
                         || Vector3.Distance(p, lastPos) > NsoPosDeltaThreshold;
 
                     // Case 3: recently moved (keepalive).
-                    float keepAlive = IsPushableCrateNso(comp.gameObject) ? NsoCrateKeepaliveSec : NsoKeepaliveSec;
+                    float keepAlive = ent.Pushable ? NsoCrateKeepaliveSec : NsoKeepaliveSec;
                     bool recentlyActive = _nsoLastMovedAt.TryGetValue(id, out var lastMovedAt)
                         && (now - lastMovedAt) < keepAlive;
 
@@ -4869,6 +5219,16 @@ namespace SFHeadlessHost
                     if ((object)comp == null) continue;
                     Vector3 pos = comp.transform.position;
                     if (pos.y > -25f) continue;
+                    // Crates the fall-guard tracks (real map boxes with a known
+                    // spawn) are rescued back to spawn and kept dynamic — the
+                    // freezer must not steal them and park them kinematic in the
+                    // void, or they'd never come back. Only freeze NSOs the
+                    // fall-guard doesn't own (untracked runaway/non-gameplay).
+                    if (_nsoSpawnPos.Count > 0)
+                    {
+                        ushort fid = GetNsoIndex(comp);
+                        if (_nsoSpawnPos.ContainsKey(fid)) continue;
+                    }
                     // Below playable area — freeze all its rigidbodies.
                     var rbs = comp.GetComponentsInChildren<Rigidbody>();
                     foreach (var rb in rbs)
@@ -5590,14 +5950,25 @@ namespace SFHeadlessHost
         }
 
         private static bool _loggedPushPath;
+        private static readonly Dictionary<string, FieldInfo> _pushFieldCache = new Dictionary<string, FieldInfo>(64);
+        private static readonly object[] _pushArgsBuffer = new object[3];
         // PushPlayerAction calls PlayerAction.UpdateWithValue(value, tick, dt)
         // on the named PlayerAction field of the given CharacterActions.
+        // Mono 2.x: never compare MethodInfo/FieldInfo with != — use (object)x == null.
         private static void PushPlayerAction(object actions, string fieldName, float value)
         {
-            var f = AccessTools.Field(actions.GetType(), fieldName);
+            if ((object)actions == null) return;
+            var actionsType = actions.GetType();
+            string cacheKey = actionsType.FullName + "|" + fieldName;
+            FieldInfo f;
+            if (!_pushFieldCache.TryGetValue(cacheKey, out f))
+            {
+                f = AccessTools.Field(actionsType, fieldName);
+                _pushFieldCache[cacheKey] = f;
+            }
             if ((object)f == null)
             {
-                if (!_loggedPushPath) { Log.LogWarning($"PushPlayerAction[{fieldName}]: field not found on type {actions.GetType()}"); _loggedPushPath = true; }
+                if (!_loggedPushPath) { Log.LogWarning($"PushPlayerAction[{fieldName}]: field not found on type {actionsType}"); _loggedPushPath = true; }
                 return;
             }
             var action = f.GetValue(actions);
@@ -5614,7 +5985,10 @@ namespace SFHeadlessHost
             }
             try
             {
-                m.Invoke(action, new object[] { value, (ulong)0, Time.deltaTime });
+                _pushArgsBuffer[0] = value;
+                _pushArgsBuffer[1] = (ulong)0;
+                _pushArgsBuffer[2] = Time.deltaTime;
+                m.Invoke(action, _pushArgsBuffer);
                 if (!_loggedPushPath) { Log.LogInfo($"PushPlayerAction[{fieldName}]: invoke ok, value={value}"); _loggedPushPath = true; }
             }
             catch (Exception e)
@@ -5635,6 +6009,41 @@ namespace SFHeadlessHost
         // Buttons are PlayerAction with a settable RawValue / IsPressed.
         private static bool _loggedFirstWrite;
         private static bool _loggedFirstWriteIter;
+        private static float _writeInputsErrLogAt = -1f;
+        private float _boxDiagLastAt = -1f;
+        private void TickBoxDiagnostic()
+        {
+            if (Time.realtimeSinceStartup - _boxDiagLastAt < 5f) return;
+            _boxDiagLastAt = Time.realtimeSinceStartup;
+            try
+            {
+                if ((object)_nsoType == null)
+                {
+                    _nsoType = AccessTools.TypeByName("NetworkSyncableObject");
+                    if ((object)_nsoType == null) return;
+                }
+                var all = UnityEngine.Object.FindObjectsOfType(_nsoType);
+                int total = all != null ? all.Length : 0;
+                int voided = 0;
+                float yMin = float.MaxValue, yMax = float.MinValue;
+                if (all != null)
+                {
+                    foreach (var nso in all)
+                    {
+                        var comp = nso as Component;
+                        if ((object)comp == null) continue;
+                        float y = comp.transform.position.y;
+                        if (y < yMin) yMin = y;
+                        if (y > yMax) yMax = y;
+                        if (y < -30f) voided++;
+                    }
+                }
+                if (total == 0) yMin = yMax = 0f;
+                Log.LogInfo($"[BOX-DIAG] nsos={total} void(y<-30)={voided} y=[{yMin:0.0},{yMax:0.0}] rigs={SlotToRig.Count} scene={SceneManager.GetActiveScene().name}");
+            }
+            catch (Exception e) { Log.LogWarning($"[BOX-DIAG] {e.Message}"); }
+        }
+
         private void WriteInputsToRigs()
         {
             if (SlotToRig.Count == 0) return;
@@ -5683,7 +6092,12 @@ namespace SFHeadlessHost
             }
             catch (Exception e)
             {
-                if (Verbose) Log.LogDebug($"WriteInputsToRigs: {e.Message}");
+                float now = Time.realtimeSinceStartup;
+                if (now - _writeInputsErrLogAt >= 5f)
+                {
+                    _writeInputsErrLogAt = now;
+                    Log.LogWarning($"WriteInputsToRigs: {e.Message}");
+                }
             }
         }
 
@@ -5824,7 +6238,7 @@ namespace SFHeadlessHost
             {
                 float fd = Time.fixedDeltaTime;
                 int hz = (fd > 0f) ? (int)System.Math.Round(1.0 / fd) : 0;
-                Log.LogInfo($"Server physics: {hz}Hz (Time.fixedDeltaTime={fd:0.0000}s). Snapshot broadcast: 30Hz. Client FPS is independent.");
+                Log.LogInfo($"Server physics: {hz}Hz (Time.fixedDeltaTime={fd:0.0000}s). Snapshot broadcast: {SnapshotHz}Hz. Client FPS is independent.");
             }
             Log.LogInfo($"=== HEADLESS HOST READY on port {BindPort} ===");
         }

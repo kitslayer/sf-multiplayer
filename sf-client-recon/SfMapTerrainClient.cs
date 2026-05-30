@@ -70,9 +70,17 @@ namespace SFClientRecon
                     var onGw = AccessTools.Method(mmType, "OnGroundWeaponsInit");
                     if ((object)onGw != null)
                     {
-                        harmony.Patch(onGw, postfix: new HarmonyMethod(
-                            AccessTools.Method(typeof(Plugin), nameof(OnGroundWeaponsInit_FuzzyPostfix))));
-                        Log.LogInfo("[v26.6] Patched OnGroundWeaponsInit (fuzzy map weapons).");
+                        // PREFIX (replace), not postfix. Vanilla OnGroundWeaponsInit
+                        // throws NullReferenceException when a weapon position in the
+                        // server's list doesn't match a pre-placed GroundWeapon in
+                        // the client scene (stale/accumulated/off-map entries). That
+                        // NRE aborts the method AND prevents any postfix from running
+                        // → zero map weapons appeared. Running our own fuzzy matcher
+                        // as a skip-original prefix avoids the crash and spawns every
+                        // weapon we CAN match by position.
+                        harmony.Patch(onGw, prefix: new HarmonyMethod(
+                            AccessTools.Method(typeof(Plugin), nameof(OnGroundWeaponsInit_FuzzyPrefix))));
+                        Log.LogInfo("[v26.6] Patched OnGroundWeaponsInit (fuzzy map weapons, replace vanilla).");
                     }
                     var onMapInfo = AccessTools.Method(mmType, "OnMapInfoRecieved");
                     if ((object)onMapInfo != null)
@@ -154,7 +162,7 @@ namespace SFClientRecon
             catch { }
         }
 
-        internal static void OnMapChangedInvalidateCachePostfix()
+        internal static void OnMapChangedInvalidateCachePostfix(byte[] data)
         {
             if (Instance == null) return;
             Instance._mapSyncCache.Clear();
@@ -163,6 +171,55 @@ namespace SFClientRecon
             Instance._mapStateApplied = 0;
             _countDownDeferred = false;
             Instance.StartCoroutine(Instance.RebuildMapCachesAfterLoadCoroutine());
+            try { Instance.StartCoroutine(Instance.ForceMapLoadWatchdog(data)); }
+            catch (Exception e) { Log.LogWarning($"[map-watchdog] start: {e.Message}"); }
+        }
+
+        // If the vanilla StartMapSequence gate skips LoadMapCourotine (download flags),
+        // isLoading stays true forever and the view never switches. Force the load.
+        private IEnumerator ForceMapLoadWatchdog(byte[] data)
+        {
+            var gmType = AccessTools.TypeByName("GameManager");
+            if ((object)gmType == null) yield break;
+            var instProp = AccessTools.Property(gmType, "Instance");
+            var loadingF = AccessTools.Field(gmType, "isLoading");
+            if ((object)instProp == null || (object)loadingF == null) yield break;
+
+            // give the vanilla path a chance first
+            float waited = 0f;
+            while (waited < 6f)
+            {
+                yield return new WaitForSeconds(0.5f);
+                waited += 0.5f;
+                object gm0 = instProp.GetValue(null, null);
+                if ((object)gm0 != null && !(bool)loadingF.GetValue(gm0)) yield break; // loaded fine
+            }
+
+            object gm = instProp.GetValue(null, null);
+            if ((object)gm == null || !(bool)loadingF.GetValue(gm)) yield break;
+
+            // Still stuck: force the load ourselves.
+            Log.LogWarning("[map-watchdog] isLoading stuck >6s — forcing LoadMapCourotine.");
+            try
+            {
+                byte mapType = data != null && data.Length >= 2 ? data[1] : (byte)0;
+                byte[] mapData = new byte[(data != null ? data.Length : 0) - 2 < 0 ? 0 : (data.Length - 2)];
+                if (data != null && data.Length > 2) Array.Copy(data, 2, mapData, 0, data.Length - 2);
+
+                var mwType = AccessTools.TypeByName("MapWrapper");
+                object mw = Activator.CreateInstance(mwType);
+                AccessTools.Field(mwType, "MapType").SetValue(mw, mapType);
+                AccessTools.Field(mwType, "MapData").SetValue(mw, mapData);
+
+                var loadCo = AccessTools.Method(gmType, "LoadMapCourotine");
+                loadCo.Invoke(gm, new object[] { mw });
+                Log.LogInfo($"[map-watchdog] Forced LoadMapCourotine (mapType={mapType}, dataLen={mapData.Length}).");
+            }
+            catch (Exception e)
+            {
+                var real = e.InnerException ?? e;
+                Log.LogWarning($"[map-watchdog] force load threw: {real.GetType().Name}: {real.Message}");
+            }
         }
 
         private IEnumerator RebuildMapCachesAfterLoadCoroutine()
@@ -253,11 +310,15 @@ namespace SFClientRecon
         private int _groundWeaponRegisterLog;
 
         /// <summary>Server keys often miss by ULP — match nearest WeaponPickUp in YZ plane.</summary>
-        internal static void OnGroundWeaponsInit_FuzzyPostfix(byte[] data)
+        // Returns false → skip vanilla OnGroundWeaponsInit (which NREs on
+        // unmatched positions). We do the position matching ourselves, tolerant
+        // of stale/off-map entries.
+        internal static bool OnGroundWeaponsInit_FuzzyPrefix(byte[] data)
         {
-            if (Instance == null || data == null || data.Length < 2) return;
+            if (Instance == null || data == null || data.Length < 2) return false;
             try { Instance.ApplyGroundWeaponsFuzzy(data); }
             catch (Exception ex) { Log.LogWarning($"[v26.6] GroundWeapons fuzzy: {ex.Message}"); }
+            return false;
         }
 
         private void ApplyGroundWeaponsFuzzy(byte[] data)

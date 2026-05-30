@@ -14,6 +14,7 @@ namespace SFClientRecon
         private static bool _oracleConnectMode;
         private static bool _oracleLobbyPatchesInstalled;
         private static bool _oracleAutoConnectStarted;
+        private static bool _oracleConnectStarted;
         private static Type _pktType;
         private static Type _mmType;
         private static Type _mhType;
@@ -64,6 +65,16 @@ namespace SFClientRecon
                 var checkMsg = AccessTools.Method(_pktType, "CheckMessageType");
                 if (RefOk(checkMsg))
                     harmony.Patch(checkMsg, prefix: new HarmonyMethod(typeof(Plugin), nameof(P2PPackageHandler_CheckMessageType_OraclePrefix)));
+                Log.LogInfo($"[oracle-diag] patch attach: Update={RefOk(pktUpdate)} CheckMessageType={RefOk(checkMsg)}");
+
+                // ReadMessageBuffer runs BEFORE the init-flag guard that can drop
+                // MapChange. Prefix it to (a) log every inbound msgType so we can
+                // see exactly what the game socket receives, and (b) force the
+                // init flag true so the guard never drops a server packet.
+                var readBuf = AccessTools.Method(_pktType, "ReadMessageBuffer");
+                if (RefOk(readBuf))
+                    harmony.Patch(readBuf, prefix: new HarmonyMethod(typeof(Plugin), nameof(P2PPackageHandler_ReadMessageBuffer_OraclePrefix)));
+                Log.LogInfo($"[oracle-diag] patch attach: ReadMessageBuffer={RefOk(readBuf)}");
 
                 var checkReady = AccessTools.Method(_mmType, "CheckReadyPlayers");
                 if (RefOk(checkReady))
@@ -73,15 +84,13 @@ namespace SFClientRecon
                 if (RefOk(onMatchStart))
                     harmony.Patch(onMatchStart, postfix: new HarmonyMethod(typeof(Plugin), nameof(OnMatchStart_OraclePostfix)));
 
-                if (RefOk(_gmType))
-                {
-                    var startMatch = AccessTools.Method(_gmType, "StartMatch");
-                    if (RefOk(startMatch))
-                        harmony.Patch(startMatch, prefix: new HarmonyMethod(typeof(Plugin), nameof(GameManager_StartMatch_OraclePrefix)));
-                    var startCountDown = AccessTools.Method(_gmType, "StartCountDown");
-                    if (RefOk(startCountDown))
-                        harmony.Patch(startCountDown, prefix: new HarmonyMethod(typeof(Plugin), nameof(GameManager_StartCountDown_OraclePrefix)));
-                }
+                // NOTE: Do NOT patch GameManager.StartMatch / StartCountDown.
+                // On this Mono 2.0 runtime the HarmonyX-generated DMD wrapper for
+                // StartMatch references System.Array.Empty (missing in Mono 2.0),
+                // throwing MissingMethodException inside StartMatch → the map-load
+                // coroutine (StartMapSequence) never runs → isLoading stays true
+                // → the client never switches from lobby to the map. Leaving these
+                // methods unpatched lets the vanilla map-load run natively.
 
                 Log.LogInfo("[oracle-lobby] Patched Quick/Host Match → UDP oracle (no Steam lobby).");
                 ScheduleOracleAutoConnect();
@@ -91,25 +100,38 @@ namespace SFClientRecon
 
         private void ScheduleOracleAutoConnect()
         {
-            if (_oracleAutoConnectStarted) return;
+            // DISABLED. Auto-connecting at boot (while still on the main menu)
+            // pre-joins the oracle and poisons SF's network state, so the user's
+            // real QUICK MATCH / HOST click can no longer send a clean lobby
+            // handshake → the game socket never re-handshakes and the player
+            // can't enter the server. Connect ONLY via the QuickMatch/HostMatch
+            // button prefixes (the path that always worked). No timer scheduled.
             _oracleAutoConnectStarted = true;
-            StartCoroutine(OracleAutoConnectRoutine());
+            _autoConnectAt = -1f;
         }
 
-        private static IEnumerator OracleAutoConnectRoutine()
+        private static float _autoConnectAt = -1f;
+
+        // Ticked every frame from Update(). Fires the oracle lobby connect once,
+        // 2.5s after Awake, if we haven't already started connecting. Uses only
+        // reflection that takes explicit args (no zero-arg params → no Array.Empty).
+        internal void TickOracleAutoConnect()
         {
-            yield return new WaitForSeconds(2.5f);
-            if (!_oracleConnectMode) yield break;
-            // Previously bailed when `mHasSentOrReceived` or `IsInLobby` was
-            // already true, on the theory that stock SF had taken over and
-            // we shouldn't reinit. In practice this meant: if SF kicked off
-            // a Steam P2P attempt before the 2.5s timer fired, AutoConnect
-            // would bail forever → v25 handshake never sent → client's UDP
-            // packets reach oracle but no SfClient registration → all input
-            // dropped silently. We always re-run BeginOracleLobbyConnect
-            // when in oracle mode; the inner Init/SetNetworkMatch calls are
-            // idempotent on a connected P2PPackageHandler.
-            Log.LogInfo("[oracle-lobby] Auto-connect → oracle (forced — no bail on mHasSentOrReceived).");
+            if (!_oracleConnectMode || _autoConnectAt < 0f) return;
+            if (Time.realtimeSinceStartup < _autoConnectAt) return;
+            _autoConnectAt = -1f;
+            if (_oracleConnectStarted) return;   // already connecting/connected
+            try
+            {
+                var pkt = GetPktHandler();
+                if (RefOk(pkt) && RefOk(_pktType))
+                {
+                    var f = AccessTools.Field(_pktType, "mHasSentOrReceived");
+                    if (RefOk(f) && (bool)f.GetValue(pkt)) return;   // already in a game
+                }
+            }
+            catch { }
+            Log.LogInfo("[oracle-lobby] Auto-connect → oracle (tienes -address/-port).");
             BeginOracleLobbyConnect("AutoConnect");
         }
 
@@ -131,6 +153,7 @@ namespace SFClientRecon
         {
             try
             {
+                _oracleConnectStarted = true;
                 Log.LogInfo($"[oracle-lobby] {source} → connecting to dedicated server (no Steam).");
                 var pkt = GetPktHandler();
                 if (!RefOk(pkt))
@@ -169,6 +192,13 @@ namespace SFClientRecon
                     var onScene = AccessTools.Method(_mmType, "OnSceneStarted");
                     if (RefOk(onScene)) onScene.Invoke(mm, null);
                 }
+                // OnSocketServerJoined (the joiner path) never sets
+                // mHasBeenInitializedFromServer; only the host path and the very
+                // end of OnClientInit do. ReadMessageBuffer drops EVERY gameplay
+                // packet (MapChange, MapInfo, ObjectUpdate...) — only ClientInit/
+                // ClientAccepted are exempt — until that flag is true. So the
+                // client spawns but never changes map. Force it true here.
+                ForceInitializedFromServer(mm);
             }
             catch (Exception e) { Log.LogError($"[oracle-lobby] BeginOracleLobbyConnect: {e.Message}"); }
         }
@@ -180,26 +210,65 @@ namespace SFClientRecon
             return UnityEngine.Object.FindObjectOfType(_pktType);
         }
 
+        // Set MultiplayerManager.mHasBeenInitializedFromServer = true. The packet
+        // dispatcher (ReadMessageBuffer) gates every non-init packet on this flag
+        // via mNetworkHandler.HasBeenInitializedFromServer, and the joiner path
+        // (OnSocketServerJoined) never sets it. Without this, MapChange is dropped.
+        private static float _lastForceDiagAt = -1f;
+        internal static void ForceInitializedFromServer(object mm)
+        {
+            try
+            {
+                // _mmType is normally set by the connect-mode install, but that
+                // only runs when launched with -address. Server-browser joins
+                // skip it, so resolve the type here too.
+                if (!RefOk(_mmType)) _mmType = AccessTools.TypeByName("MultiplayerManager");
+                if (!RefOk(_mmType)) return;
+                if (!RefOk(mm)) mm = UnityEngine.Object.FindObjectOfType(_mmType);
+                if (!RefOk(mm))
+                {
+                    if (Time.realtimeSinceStartup - _lastForceDiagAt > 3f)
+                    {
+                        _lastForceDiagAt = Time.realtimeSinceStartup;
+                        Log.LogWarning("[oracle-diag] ForceInitializedFromServer: MultiplayerManager instance NOT found.");
+                    }
+                    return;
+                }
+                var f = AccessTools.Field(_mmType, "mHasBeenInitializedFromServer");
+                if (!RefOk(f))
+                {
+                    if (Time.realtimeSinceStartup - _lastForceDiagAt > 3f)
+                    {
+                        _lastForceDiagAt = Time.realtimeSinceStartup;
+                        Log.LogWarning("[oracle-diag] ForceInitializedFromServer: field mHasBeenInitializedFromServer NOT found.");
+                    }
+                    return;
+                }
+                if (!(bool)f.GetValue(mm))
+                {
+                    f.SetValue(mm, true);
+                    Log.LogInfo("[oracle-lobby] Forced mHasBeenInitializedFromServer=true (unblocks MapChange/MapInfo).");
+                }
+            }
+            catch (Exception e) { Log.LogWarning($"[oracle-lobby] ForceInitializedFromServer: {e.Message}"); }
+        }
+
         internal static void P2PPackageHandler_Update_OraclePostfix(object __instance)
         {
             if (!_oracleConnectMode || !RefOk(__instance)) return;
-            // Mono 2.0: same Traverse → Array.Empty<object>() trap as above.
             try
             {
-                var instType = __instance.GetType();
-                var pauseField = AccessTools.Field(instType, "mPauseTraffic");
-                var hasHandlerField = AccessTools.Field(instType, "mHasHandler");
-                var sentRecvField = AccessTools.Field(instType, "mHasSentOrReceived");
-                var checkMethod = AccessTools.Method(instType, "CheckForPackagesOnChannel",
-                    new[] { typeof(int), typeof(bool) });
-                if ((object)pauseField != null && (bool)pauseField.GetValue(__instance)) return;
-                if ((object)hasHandlerField != null && !(bool)hasHandlerField.GetValue(__instance)) return;
-                if ((object)checkMethod != null)
-                {
-                    checkMethod.Invoke(__instance, new object[] { 1, false });
-                    checkMethod.Invoke(__instance, new object[] { 0, false });
-                }
-                if ((object)sentRecvField != null) sentRecvField.SetValue(__instance, true);
+                var t = Traverse.Create(__instance);
+                if (t.Field<bool>("mPauseTraffic").Value) return;
+                if (!t.Field<bool>("mHasHandler").Value) return;
+                // Only re-assert the init flag once we've actually begun an
+                // oracle connection. Setting it in the main menu (before join)
+                // breaks the handshake — the client skips ClientRequesting* and
+                // goes silent. Gate on _oracleConnectStarted.
+                if (_oracleConnectStarted) ForceInitializedFromServer(null);
+                t.Method("CheckForPackagesOnChannel", new object[] { 1, false }).GetValue();
+                t.Method("CheckForPackagesOnChannel", new object[] { 0, false }).GetValue();
+                t.Field("mHasSentOrReceived").SetValue(true);
             }
             catch { }
         }
@@ -210,8 +279,42 @@ namespace SFClientRecon
             byte t = 255;
             if (type is byte b) t = b;
             else if (type != null && byte.TryParse(type.ToString(), out var parsed)) t = parsed;
+            // DIAG: surface map/start traffic + the init-flag state at receive time
+            // so we can tell whether MapChange(18)/StartMatch(35) actually reach
+            // the game socket and whether the guard would drop them.
+            if (t == 18 || t == 35 || t == 4 || t == 5)
+            {
+                bool initFlag = false;
+                try
+                {
+                    if (!RefOk(_mmType)) _mmType = AccessTools.TypeByName("MultiplayerManager");
+                    var mm = UnityEngine.Object.FindObjectOfType(_mmType);
+                    var f = AccessTools.Field(_mmType, "mHasBeenInitializedFromServer");
+                    if (RefOk(mm) && RefOk(f)) initFlag = (bool)f.GetValue(mm);
+                }
+                catch { }
+                Log.LogInfo($"[oracle-diag] CheckMessageType got t={t} initFromServer={initFlag}");
+            }
             if (t == 3) return false;
             return true;
+        }
+
+        // Runs before the HasBeenInitializedFromServer guard. Logs every inbound
+        // msgType (so we can see whether MapChange(18) actually reaches the game
+        // socket) and force-clears the guard so no server packet is dropped.
+        internal static void P2PPackageHandler_ReadMessageBuffer_OraclePrefix(byte[] rawData)
+        {
+            if (!_oracleConnectMode) return;
+            try
+            {
+                ForceInitializedFromServer(null);
+                if (rawData != null && rawData.Length >= 5)
+                {
+                    byte mt = rawData[4];
+                    Log.LogInfo($"[oracle-diag] ReadMessageBuffer inbound msgType={mt} len={rawData.Length}");
+                }
+            }
+            catch { }
         }
 
         internal static bool CheckReadyPlayers_OraclePrefix() => !_oracleConnectMode;
@@ -285,45 +388,23 @@ namespace SFClientRecon
                     Log.LogInfo("[oracle-lobby] StartCountDown after map load (pumpkin/boss hooks).");
                 }
             }
-            catch (Exception e) { Log.LogWarning($"[oracle-lobby] deferred StartCountDown: {e.Message}"); }
+            catch (Exception e)
+            {
+                var real = e.InnerException ?? e;
+                Log.LogWarning($"[oracle-diag] deferred StartCountDown threw: {real.GetType().Name}: {real.Message}\n{real.StackTrace}");
+            }
         }
 
-        internal static bool GameManager_StartMatch_OraclePrefix(object __instance, object mapIndex, bool MovePlayers)
+        internal static bool GameManager_StartMatch_OraclePrefix(object __instance)
         {
             if (!_oracleConnectMode || !RefOk(__instance)) return true;
-            // Stock GameManager.StartMatch was compiled with Roslyn that
-            // emits Array.Empty<T>() — Unity 5.6.3 Mono 2.0 lacks that API
-            // so the Harmony DMD wrapper crashes at IL offset 0x15, aborting
-            // OnMapChanged → NetworkAllPlayersDiedButOne → StartMatch and
-            // leaving the client stuck in lobby. Bypass stock entirely:
-            // invoke StartMapSequence(MapWrapper, bool) directly.
             try
             {
-                var instType = __instance.GetType();
-                var inFight = AccessTools.Field(instType, "inFight");
-                if ((object)inFight != null) inFight.SetValue(__instance, false);
-                var sds = AccessTools.Field(instType, "secondsBeforeSuddendeath");
-                if ((object)sds != null) sds.SetValue(__instance, 25f);
-
-                var mapWrapperType = (object)mapIndex != null ? mapIndex.GetType() : null;
-                System.Reflection.MethodInfo startMapSeq = null;
-                if ((object)mapWrapperType != null)
-                    startMapSeq = AccessTools.Method(instType, "StartMapSequence",
-                        new[] { mapWrapperType, typeof(bool) });
-                if ((object)startMapSeq == null)
-                    startMapSeq = AccessTools.Method(instType, "StartMapSequence");
-                if ((object)startMapSeq != null)
-                {
-                    var coro = startMapSeq.Invoke(__instance, new object[] { mapIndex, MovePlayers });
-                    if ((object)coro != null && __instance is MonoBehaviour mb)
-                    {
-                        mb.StartCoroutine((System.Collections.IEnumerator)coro);
-                        Log.LogInfo("[oracle-lobby] StartMatch bypassed → StartMapSequence kicked.");
-                    }
-                }
+                var inLobby = Traverse.Create(__instance).Method("IsInLobby").GetValue<bool>();
+                if (inLobby) return false;
             }
-            catch (Exception e) { Log.LogError($"[oracle-lobby] StartMatch bypass failed: {e.Message}"); }
-            return false; // never run stock StartMatch (Array.Empty crash)
+            catch { }
+            return true;
         }
     }
 }

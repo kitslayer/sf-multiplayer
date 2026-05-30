@@ -28,7 +28,7 @@ namespace SFHeadlessHost
         private const float MapInfoBootstrapRetryIntervalSec = 4f;
         private const int MapInfoBootstrapMaxPasses = 3;
         /// <summary>Seconds after map load before weapons, countdown, MapInfo sync, sky spawns.</summary>
-        internal static float OraclePreCombatGraceSec = 3f;
+        internal static float OraclePreCombatGraceSec = 2f;
         private float _oraclePreCombatReadyAt = -1f;
         private int _oraclePreCombatSceneIndex = -1;
         private float _mapInfoBootstrapAt = -1f;
@@ -663,11 +663,32 @@ namespace SFHeadlessHost
                 // Companion to commit a70c5b3 (keepalive dict preservation).
                 try { MarkSceneNsosMovedAfterSettle(); }
                 catch (Exception e) { Log.LogWarning($"[v26.6] PostMapLoad MarkSceneNsos: {e.Message}"); }
+                try
+                {
+                    // Unity 5.6 has no Physics.SyncTransforms — wake rigidbodies so colliders refresh.
+                    var rbs = UnityEngine.Object.FindObjectsOfType<Rigidbody>();
+                    int woken = 0;
+                    if (rbs != null)
+                        foreach (var rb in rbs)
+                            if ((object)rb != null && !rb.isKinematic) { rb.WakeUp(); woken++; }
+                    Log.LogInfo($"[v26.6] PostMapLoad collider refresh: woke {woken} dynamic rigidbody(s).");
+                }
+                catch (Exception e) { Log.LogWarning($"[v26.6] PostMapLoad collider refresh: {e.Message}"); }
+                ScheduleAuthRigRespawnAfterMapLoad("PostMapLoad");
             }
             finally
             {
                 FinishOracleMapLoad("PostMapLoad");
             }
+        }
+
+        /// <summary>Open-B: re-chain NSO inventory → auth rig spawn after every map load / round advance.</summary>
+        internal void ScheduleAuthRigRespawnAfterMapLoad(string reason)
+        {
+            if (_authSpawnDone) return;
+            _nsoInventoryDone = false;
+            _nsoInventoryAt = Time.realtimeSinceStartup + 0.25f;
+            Log.LogInfo($"[Open-B] Scheduled NSO inventory + auth rig respawn ({reason}).");
         }
 
         internal void ScheduleMapInfoBootstrapRetries()
@@ -983,6 +1004,7 @@ namespace SFHeadlessHost
             _oracleMapLoadForceCompleteAt = -1f;
             _oracleMapLoadStartedAt = -1f;
             Log.LogInfo($"[v26.6] Oracle map load finished ({reason}) scene={_currentSceneIndex}");
+            FlushQueuedRoundAdvanceAfterMapLoad("map-load-finished");
         }
 
         /// <summary>When SceneManager does not re-fire loaded (same map reload), still complete init.</summary>

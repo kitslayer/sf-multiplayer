@@ -31,14 +31,19 @@ Pop-Location
 Push-Location (Join-Path $Root "sf-client-recon")
 dotnet build -c Release
 Pop-Location
+Push-Location (Join-Path $Root "sf-box-fix")
+dotnet build -c Release
+Pop-Location
 
 # Use ${HostDll}: bare $HostDll is parsed as $Host + "Dll" in PowerShell.
 $HostDll = Join-Path $Root "sf-headless-host\bin\Release\SFHeadlessHost.dll"
 $ClientDll = Join-Path $Root "sf-client-recon\bin\Release\SFClientRecon.dll"
+$BoxFixDll = Join-Path $Root "sf-box-fix\bin\Release\SFBoxFix.dll"
 $Dist = Join-Path $Root "dist"
 if (Test-Path $Dist) {
     Copy-Item ${HostDll} $Dist -Force
     Copy-Item $ClientDll $Dist -Force
+    Copy-Item $BoxFixDll $Dist -Force
 }
 
 if ($InstallLocal) {
@@ -55,9 +60,13 @@ if ($InstallLocal) {
 
 if ($DeployVps) {
     $Key = Join-Path $env:USERPROFILE '.ssh\sf_oracle_alka'
-    scp -i $Key -P 2222 ${HostDll} sfdev@69.53.117.43:/home/miles/sf-oracle/install/BepInEx/plugins/SFHeadlessHost.dll
-    Write-Host 'Uploaded SFHeadlessHost.dll - restart: sudo systemctl restart sf-oracle.service'
+    $Remote = 'sfdev@69.53.117.43:/home/miles/sf-oracle/install/BepInEx/plugins'
+    scp -i $Key -P 2222 ${HostDll} "${Remote}/SFHeadlessHost.dll"
+    scp -i $Key -P 2222 $BoxFixDll "${Remote}/SFBoxFix.dll"
+    Write-Host 'Uploaded SFHeadlessHost.dll + SFBoxFix.dll — restart: sudo systemctl restart sf-oracle.service'
+    Write-Host 'Verify log: grep -E "SFBoxFix v0.2.4|SFHeadlessHost" /tmp/sf-oracle-plugin-11337.log | tail -20'
 }
 
-Write-Host ('OK Host DLL:  ' + ${HostDll})
-Write-Host ('OK Client DLL: ' + $ClientDll)
+Write-Host ('OK Host DLL:    ' + ${HostDll})
+Write-Host ('OK BoxFix DLL:  ' + $BoxFixDll)
+Write-Host ('OK Client DLL:  ' + $ClientDll)

@@ -212,9 +212,35 @@ namespace SFClientRecon
             }
             catch (Exception e) { Log.LogWarning($"[P0-15] DestructiblePiece patch failed: {e.Message}"); }
 
+            // Crate-cull fix — stock IgnorePlayerWhenOffScreen.Update sets the
+            // object's layer to 24 (no-collision) whenever y < -11f. That -11f
+            // is hardcoded for the default 10-unit map; on larger maps a crate
+            // that is still in-bounds sits below -11 and loses collision, so it
+            // "ghosts"/vanishes client-side independent of the server killbox.
+            // Transpile the constant to scale with MapSizeHandler.mapSize.
+            try
+            {
+                var ipType = AccessTools.TypeByName("IgnorePlayerWhenOffScreen");
+                if ((object)ipType != null)
+                {
+                    var upd = AccessTools.Method(ipType, "Update");
+                    if ((object)upd != null)
+                    {
+                        var harmony = new Harmony(PluginGuid + ".crate-cull-fix");
+                        var transpiler = AccessTools.Method(typeof(Plugin), nameof(IgnoreOffScreenCullTranspiler));
+                        harmony.Patch(upd, transpiler: new HarmonyMethod(transpiler));
+                        Log.LogInfo("Patched IgnorePlayerWhenOffScreen.Update → cull threshold scales with map size.");
+                    }
+                    else Log.LogWarning("[crate-cull] IgnorePlayerWhenOffScreen.Update not found.");
+                }
+                else Log.LogWarning("[crate-cull] IgnorePlayerWhenOffScreen type not found.");
+            }
+            catch (Exception e) { Log.LogWarning($"[crate-cull] patch failed: {e.Message}"); }
+
             InstallClientTerrainPatches();
             InstallOracleLobbyConnectPatches();
             InstallNsoClientPushPatches();
+            InstallMusicCrashGuard();
 
             Log.LogInfo($"{PluginName} {PluginVersion}: starting v26 snapshot listener on UDP :{_listenPort}. vSync off, FPS uncapped.");
             try
@@ -260,6 +286,41 @@ namespace SFClientRecon
             try { _socket?.Close(); } catch { }
         }
 
+        // Top-of-screen announcement banner (driven by msgType 42).
+        private volatile string _bannerText;
+        private DateTime _bannerUntilUtc = DateTime.MinValue;
+        private GUIStyle _bannerStyle;
+
+        private void OnGUI()
+        {
+            var text = _bannerText;
+            if (string.IsNullOrEmpty(text) || DateTime.UtcNow >= _bannerUntilUtc) return;
+
+            if (_bannerStyle == null)
+            {
+                _bannerStyle = new GUIStyle(GUI.skin.label)
+                {
+                    alignment = TextAnchor.MiddleCenter,
+                    fontSize = 26,
+                    fontStyle = FontStyle.Bold,
+                    wordWrap = true,
+                };
+            }
+
+            float w = Mathf.Min(900f, Screen.width * 0.9f);
+            float h = 56f;
+            var rect = new Rect((Screen.width - w) / 2f, 24f, w, h);
+
+            // Drop shadow for legibility over any map background.
+            var shadow = new Rect(rect.x + 2f, rect.y + 2f, rect.width, rect.height);
+            var prev = GUI.color;
+            GUI.color = new Color(0f, 0f, 0f, 0.85f);
+            GUI.Label(shadow, text, _bannerStyle);
+            GUI.color = new Color(1f, 0.85f, 0.2f, 1f);
+            GUI.Label(rect, text, _bannerStyle);
+            GUI.color = prev;
+        }
+
         private void RxLoop()
         {
             var ep = new IPEndPoint(IPAddress.Any, 0);
@@ -281,6 +342,24 @@ namespace SFClientRecon
             // v25 wrapper: 5 bytes prefix + body + 9 bytes suffix
             if (pkt.Length < 14) return;
             byte msgType = pkt[4];
+
+            // msgType 42 — server announcement banner (anti-cheat kicks etc.).
+            // Body is raw UTF-8 text. Show it centered at the top for 3s.
+            if (msgType == 42)
+            {
+                int annOff = 5;
+                int annLen = pkt.Length - 14;
+                if (annLen <= 0 || annLen > 512) return;
+                try
+                {
+                    string text = System.Text.Encoding.UTF8.GetString(pkt, annOff, annLen);
+                    _bannerText = text;
+                    _bannerUntilUtc = DateTime.UtcNow.AddSeconds(3);
+                }
+                catch { }
+                return;
+            }
+
             if (msgType != 39) return;
 
             int bodyOff = 5;
@@ -375,9 +454,11 @@ namespace SFClientRecon
             List<MapStateSnapEntry> mapStateList = null;
             ParseMapStateSection(pkt, ref o, bodyOff + bodyLen, out mapStateList);
 
-            // Mono 2.0 (Unity 5.6.3): Roslyn `lock(){…}` lowers to
-            // Monitor.Enter(obj, ref bool) which doesn't exist on this runtime.
-            // Use 1-arg Monitor.Enter + try/finally directly.
+            // NB: explicit Monitor.Enter(obj)/Exit, NOT lock(){}. The C# `lock`
+            // keyword compiles to Monitor.Enter(obj, ref bool), an overload that
+            // does NOT exist in this game's Mono 2.0 runtime — it throws
+            // MissingMethodException on every snapshot, killing position sync and
+            // leaving the player frozen.
             System.Threading.Monitor.Enter(_snapLock);
             try
             {
@@ -389,11 +470,17 @@ namespace SFClientRecon
                 _snapsReceived++;
             }
             finally { System.Threading.Monitor.Exit(_snapLock); }
+            // Snapshots only ever flow once we're truly connected to the oracle.
+            // The lobby-connect path (BeginOracleLobbyConnect) isn't the only way
+            // in (server browser / autoconnect bypass it), so use snapshot flow as
+            // the universal "connected" signal that unblocks the init flag.
+            _oracleConnectStarted = true;
         }
 
         private void Update()
         {
             if (!_running) return;
+            try { TickOracleAutoConnect(); } catch { }
             List<SnapshotEntry> snap;
             List<NsoSnapEntry>  nsoSnap;
             List<MapSyncSnapEntry> mapSyncSnap;
@@ -417,6 +504,18 @@ namespace SFClientRecon
             if (nsoSnap != null) ApplyNsoSnapshot(nsoSnap, tick);
             if (mapSyncSnap != null) ApplyMapSyncSnapshot(mapSyncSnap, tick);
             if (mapStateSnap != null) ApplyMapStateSnapshot(mapStateSnap);
+
+            // Joiner path (OnSocketServerJoined) never sets
+            // mHasBeenInitializedFromServer, so MapChange(18) is dropped and the
+            // client stays stuck in the lobby on /start. Snapshots flowing proves
+            // we're connected; re-assert the flag here on the main thread
+            // (FindObjectOfType is main-thread only). The connect-mode postfix
+            // that normally does this doesn't install on server-browser joins.
+            if (_oracleConnectStarted && Time.realtimeSinceStartup - _lastInitForceAt > 1f)
+            {
+                _lastInitForceAt = Time.realtimeSinceStartup;
+                ForceInitializedFromServer(null);
+            }
 
             // Phase 6.11.2 — between snapshots, exponentially lerp current
             // positions toward latest targets so the visual feel is smooth
@@ -444,12 +543,31 @@ namespace SFClientRecon
         // Lower = smoother (more lag, less jitter). 15/s is a reasonable middle
         // ground at 30Hz snapshot rate (settles ~95% of error in 200ms).
         private const float SmoothRate = 15f;
-        private float _nsoSmoothRate = 100f;
+        // With velocity extrapolation the render target already moves smoothly
+        // frame-to-frame, so a moderate chase rate keeps boxes tight AND smooth.
+        // (Was 100 = teleport-to-target each frame → looked like the snapshot
+        // rate, i.e. "5fps" boxes.)
+        private float _nsoSmoothRate = 35f;
         private const float NsoSnapDistance = 0.5f;
+        // Cap how far we extrapolate past the last snapshot. If updates stop
+        // (box landed / server hiccup) we stop drifting after this window.
+        private const float NsoMaxExtrapSec = 0.18f;
         private float _lastInputWarnAt = -1f;
+        private float _lastInitForceAt = -1f;
         private static Type _weaponPickUpTypeClient;
         private readonly Dictionary<int, Vector3> _playerTargets = new Dictionary<int, Vector3>();
-        private struct PoseTarget { public Vector3 Pos; public Quaternion Rot; }
+        // Reference type so SmoothTowardTargets can mutate RenderPos/Rot in place
+        // while iterating the dictionary (no struct copy-back needed).
+        private class PoseTarget
+        {
+            public Vector3 Pos;          // latest server position
+            public Quaternion Rot;       // latest server rotation
+            public Vector3 Vel;          // estimated velocity (u/s) from last two snapshots
+            public Vector3 RenderPos;    // dead-reckoned position actually shown
+            public Quaternion RenderRot;
+            public float LastRecvAt;     // realtime the latest snapshot was applied
+            public bool HasRender;
+        }
         private readonly Dictionary<ushort, PoseTarget> _nsoTargets = new Dictionary<ushort, PoseTarget>();
         // Briefly make pushed crates non-kinematic for local collision feedback
         // (no mHasControl — server remains authoritative via v26 snapshots).
@@ -497,59 +615,78 @@ namespace SFClientRecon
                 {
                     foreach (var kv in _nsoTargets)
                     {
-                        if (!_nsoCache.TryGetValue(kv.Key, out var comp) || (object)comp == null) continue;
-                        if (IsChainStyleDestructibleRoot(comp.gameObject)) continue;
-                        if (IsIceOnlyDestructibleRoot(comp.gameObject)) continue;
-                        if (IsWeaponNsoRootClient(comp.gameObject)) continue;
-                        var rb = comp.GetComponent<Rigidbody>();
+                        if (!_nsoCache.TryGetValue(kv.Key, out var entry) || entry == null || (object)entry.Comp == null) continue;
+                        if (entry.SkipSmooth) continue;   // weapon / ice / chain
+                        var comp = entry.Comp;
+                        var rb = entry.Rb;
+                        var pose = kv.Value;
+                        if (pose == null || !pose.HasRender) continue;
 
-                        // Bug F: pushable crates stay dynamic — local physics
-                        // drives push feel + SfNsoClientPush relays positions
-                        // back to server. Only hard-snap on large divergence
-                        // (>1.5u) so we don't tug-of-war with the relay.
-                        bool isPushable = IsPushableCrateNsoClient(comp.gameObject);
-
-                        if ((object)rb != null)
+                        // ===== OMEGA FIX — pushable crates: LOCAL PHYSICS + soft sync =====
+                        // Keep crates DYNAMIC so local Unity physics drives them at
+                        // full render framerate: instant, smooth, collides with the
+                        // player + other crates, stacks/balances naturally (this is
+                        // the "no lag" feel). The server stays authoritative via a
+                        // GENTLE continuous correction toward its position — small
+                        // enough not to fight the local sim, strong enough that the
+                        // box can never drift far. Only a LARGE desync triggers a
+                        // clean hard-snap, and we zero velocity on snap so the body
+                        // can't explode/fly. No kinematic flips, no relay → nothing
+                        // to tug-of-war with.
+                        if (entry.Pushable && (object)rb != null)
                         {
-                            float dist = Vector3.Distance(rb.position, kv.Value.Pos);
-                            if (isPushable)
+                            if (rb.isKinematic) rb.isKinematic = false;
+                            float d = Vector3.Distance(rb.position, pose.Pos);
+                            if (d > 2.0f)
                             {
-                                if (dist > 1.5f)
-                                {
-                                    bool wasKin = rb.isKinematic;
-                                    rb.isKinematic = true;
-                                    rb.position = kv.Value.Pos;
-                                    rb.rotation = kv.Value.Rot;
-                                    rb.isKinematic = wasKin;
-                                }
-                                continue;
+                                // Hard desync — clean snap, kill momentum (no fly).
+                                rb.velocity = Vector3.zero;
+                                rb.angularVelocity = Vector3.zero;
+                                rb.position = pose.Pos;
+                                rb.rotation = pose.Rot;
                             }
-                            // Kinematic lerp only — never flip isKinematic=false (P0-5 / ice regression).
-                            if (!rb.isKinematic) rb.isKinematic = true;
-                            if (dist > NsoSnapDistance)
+                            else if (d > 0.03f)
                             {
-                                rb.position = kv.Value.Pos;
-                                rb.rotation = kv.Value.Rot;
+                                // Gentle pull toward server (slow rate keeps the
+                                // local physics feel; prevents reaching big desync).
+                                float corr = 1f - Mathf.Exp(-7f * Time.deltaTime);
+                                rb.position = Vector3.Lerp(rb.position, pose.Pos, corr);
+                                rb.rotation = Quaternion.Slerp(rb.rotation, pose.Rot, corr);
                             }
-                            else
-                            {
-                                rb.position = Vector3.Lerp(rb.position, kv.Value.Pos, nsoT);
-                                rb.rotation = Quaternion.Slerp(rb.rotation, kv.Value.Rot, nsoT);
-                            }
+                            continue;
+                        }
+
+                        // ===== Non-pushable NSOs: kinematic + velocity extrapolation =====
+                        // (ice debris, moving platforms, etc.) Driven purely by
+                        // server snapshots; extrapolate between sparse updates and
+                        // chase with an exponential render-lerp.
+                        float age = Time.realtimeSinceStartup - pose.LastRecvAt;
+                        if (age < 0f) age = 0f;
+                        if (age > NsoMaxExtrapSec) age = NsoMaxExtrapSec;
+                        Vector3 extrap = pose.Pos + pose.Vel * age;
+
+                        float dist = Vector3.Distance(pose.RenderPos, extrap);
+                        if (dist > NsoSnapDistance * 6f)
+                        {
+                            pose.RenderPos = extrap;
+                            pose.RenderRot = pose.Rot;
                         }
                         else
                         {
-                            float dist = Vector3.Distance(comp.transform.position, kv.Value.Pos);
-                            if (dist > NsoSnapDistance)
-                            {
-                                comp.transform.position = kv.Value.Pos;
-                                comp.transform.rotation = kv.Value.Rot;
-                            }
-                            else
-                            {
-                                comp.transform.position = Vector3.Lerp(comp.transform.position, kv.Value.Pos, nsoT);
-                                comp.transform.rotation = Quaternion.Slerp(comp.transform.rotation, kv.Value.Rot, nsoT);
-                            }
+                            pose.RenderPos = Vector3.Lerp(pose.RenderPos, extrap, nsoT);
+                            pose.RenderRot = Quaternion.Slerp(pose.RenderRot, pose.Rot, nsoT);
+                        }
+
+                        if ((object)rb != null)
+                        {
+                            if (!rb.isKinematic) rb.isKinematic = true;   // P0-5 / ice regression guard
+                            rb.position = pose.RenderPos;
+                            rb.rotation = pose.RenderRot;
+                        }
+                        else
+                        {
+                            comp.transform.position = pose.RenderPos;
+                            comp.transform.rotation = pose.RenderRot;
                         }
                         // P0-15 — moved to ApplyNsoSnapshot below; only mark
                         // recentLerpAt when a snapshot delivers a LARGE
@@ -584,7 +721,14 @@ namespace SFClientRecon
         //
         // Maintain a cached id → NetworkSyncableObject map. Rebuild on miss
         // since scene changes invalidate entries.
-        private readonly Dictionary<ushort, Component> _nsoCache = new Dictionary<ushort, Component>();
+        // Cache entry precomputes the per-NSO classification + rigidbody ONCE at
+        // rebuild time. Previously SmoothTowardTargets/ApplyNsoSnapshot called
+        // IsChainStyle/IsIceOnly/IsWeapon (each a GetComponentsInChildren) plus
+        // GetComponent<Rigidbody> for every box every frame — on box-heavy maps
+        // that was thousands of hierarchy walks/sec → frame drops scaling with
+        // crate count. Now it's a single dictionary lookup per frame.
+        private class NsoCacheEntry { public Component Comp; public Rigidbody Rb; public bool SkipSmooth; public bool Pushable; }
+        private readonly Dictionary<ushort, NsoCacheEntry> _nsoCache = new Dictionary<ushort, NsoCacheEntry>();
         private int _nsoCacheRebuildAt;
         private Type _nsoType;
         private System.Reflection.PropertyInfo _nsoIndexProp;
@@ -616,7 +760,19 @@ namespace SFClientRecon
                                 id = (ushort)_nsoIndexProp.GetValue(nso, null);
                             else if ((object)_nsoIndexField != null)
                                 id = (ushort)_nsoIndexField.GetValue(nso);
-                            _nsoCache[id] = nso as Component;
+                            var c = nso as Component;
+                            if ((object)c == null) continue;
+                            var go = c.gameObject;
+                            bool skip = IsWeaponNsoRootClient(go)
+                                     || IsIceOnlyDestructibleRoot(go)
+                                     || IsChainStyleDestructibleRoot(go);
+                            _nsoCache[id] = new NsoCacheEntry
+                            {
+                                Comp = c,
+                                Rb = c.GetComponent<Rigidbody>(),
+                                SkipSmooth = skip,
+                                Pushable = !skip && IsPushableCrateNsoClient(go)
+                            };
                         }
                     }
                     _nsoCacheRebuildAt = 60;
@@ -627,9 +783,9 @@ namespace SFClientRecon
                 float nowTs = Time.realtimeSinceStartup;
                 foreach (var e in snap)
                 {
-                    if (!_nsoCache.TryGetValue(e.Id, out var nsoComp) || (object)nsoComp == null) continue;
-                    if (IsWeaponNsoRootClient(nsoComp.gameObject)) continue;
-                    if (IsIceOnlyDestructibleRoot(nsoComp.gameObject)) continue;
+                    if (!_nsoCache.TryGetValue(e.Id, out var nsoEntry) || nsoEntry == null || (object)nsoEntry.Comp == null) continue;
+                    var nsoComp = nsoEntry.Comp;
+                    if (nsoEntry.SkipSmooth) continue;   // weapon / ice / chain — handled elsewhere
                     Vector3 newTarget = new Vector3(e.X, e.Y, e.Z);
                     // P0-15 — only flag for destruction-suppression when the
                     // snapshot delivered a LARGE position jump. The
@@ -641,14 +797,47 @@ namespace SFClientRecon
                     // enough to catch the "teleport across map after a
                     // missed snapshot or scene reload" case that produces
                     // spurious destructions.
-                    Vector3 currentPos = (nsoComp.GetComponent<Rigidbody>() is Rigidbody nsoRb && (object)nsoRb != null)
-                        ? nsoRb.position : nsoComp.transform.position;
+                    Vector3 currentPos = ((object)nsoEntry.Rb != null)
+                        ? nsoEntry.Rb.position : nsoComp.transform.position;
                     if (Vector3.Distance(currentPos, newTarget) > NsoLargeLerpThreshold)
                     {
                         var rootT = nsoComp.transform.root;
                         if ((object)rootT != null) _recentLerpAt[rootT.GetInstanceID()] = nowTs;
                     }
-                    _nsoTargets[e.Id] = new PoseTarget { Pos = newTarget, Rot = Quaternion.Euler(0f, 0f, e.RotZ) };
+                    Quaternion newRot = Quaternion.Euler(0f, 0f, e.RotZ);
+                    float nowRt = Time.realtimeSinceStartup;
+                    PoseTarget pt;
+                    if (_nsoTargets.TryGetValue(e.Id, out pt) && pt != null && pt.HasRender)
+                    {
+                        float dtv = nowRt - pt.LastRecvAt;
+                        // Estimate velocity from consecutive snapshots so we can
+                        // extrapolate between them (server delivers ~30Hz or less;
+                        // this keeps boxes moving smoothly at render framerate).
+                        if (dtv > 0.0001f && dtv < 0.5f)
+                            pt.Vel = (newTarget - pt.Pos) / dtv;
+                        else
+                            pt.Vel = Vector3.zero;
+                        // Big jump = teleport / respawn: drop extrapolation history.
+                        if (Vector3.Distance(pt.RenderPos, newTarget) > 3f)
+                        {
+                            pt.RenderPos = newTarget;
+                            pt.RenderRot = newRot;
+                            pt.Vel = Vector3.zero;
+                        }
+                        pt.Pos = newTarget;
+                        pt.Rot = newRot;
+                        pt.LastRecvAt = nowRt;
+                    }
+                    else
+                    {
+                        pt = new PoseTarget
+                        {
+                            Pos = newTarget, Rot = newRot, Vel = Vector3.zero,
+                            RenderPos = newTarget, RenderRot = newRot,
+                            LastRecvAt = nowRt, HasRender = true
+                        };
+                        _nsoTargets[e.Id] = pt;
+                    }
                     applied++;
                 }
                 if (_snapsApplied == 1 || _snapsApplied % 90 == 0)
@@ -993,6 +1182,95 @@ namespace SFClientRecon
             return true;
         }
         private static int _destructibleGuardCallCount;
+
+        // Crate-cull fix — cached MapSizeHandler reflection.
+        private static System.Type _mapSizeHandlerType;
+        private static FieldInfo _mapSizeInstanceField;
+        private static FieldInfo _mapSizeField;
+
+        // ===== Music crash guard =====
+        // SF's MusicHandler.PlayNext() calls AudioSource.Play(), which crashes
+        // natively in this Unity 5.6 build when it streams the next track
+        // (observed: hard crash, stack MusicHandler.Update→PlayNext→AudioSource.Play).
+        // We neutralize the music system so the game can't crash there. Music is
+        // cosmetic; stability wins.
+        private void InstallMusicCrashGuard()
+        {
+            try
+            {
+                var mhType = AccessTools.TypeByName("MusicHandler");
+                if ((object)mhType == null) { Log.LogInfo("[music-guard] MusicHandler not found — skip."); return; }
+                var harmony = new Harmony(PluginGuid + ".music-guard");
+                int n = 0;
+                var playNext = AccessTools.Method(mhType, "PlayNext");
+                if ((object)playNext != null)
+                {
+                    harmony.Patch(playNext, prefix: new HarmonyMethod(typeof(Plugin), nameof(MusicHandler_Skip_Prefix)));
+                    n++;
+                }
+                var tryStart = AccessTools.Method(mhType, "TryStartMusic");
+                if ((object)tryStart != null)
+                {
+                    harmony.Patch(tryStart, prefix: new HarmonyMethod(typeof(Plugin), nameof(MusicHandler_Skip_Prefix)));
+                    n++;
+                }
+                Log.LogInfo($"[music-guard] Disabled MusicHandler audio ({n} method(s)) to prevent native AudioSource.Play crash.");
+            }
+            catch (Exception e) { Log.LogWarning($"[music-guard] install failed: {e.Message}"); }
+        }
+
+        // Returns false → original method body is skipped entirely.
+        internal static bool MusicHandler_Skip_Prefix() { return false; }
+
+        // Returns the y-threshold below which IgnorePlayerWhenOffScreen flips a
+        // crate to the no-collision layer. Stock value is -11f for a 10-unit
+        // map; scale it so larger maps don't cull in-bounds crates.
+        public static float GetCrateCullThreshold()
+        {
+            try
+            {
+                if ((object)_mapSizeHandlerType == null)
+                {
+                    _mapSizeHandlerType = AccessTools.TypeByName("MapSizeHandler");
+                    if ((object)_mapSizeHandlerType != null)
+                    {
+                        _mapSizeInstanceField = AccessTools.Field(_mapSizeHandlerType, "Instance");
+                        _mapSizeField = AccessTools.Field(_mapSizeHandlerType, "mapSize");
+                    }
+                }
+                if ((object)_mapSizeInstanceField != null && (object)_mapSizeField != null)
+                {
+                    var inst = _mapSizeInstanceField.GetValue(null);
+                    if (inst != null)
+                    {
+                        float size = (float)_mapSizeField.GetValue(inst);
+                        if (size > 0.01f) return -11f * (size / 10f);
+                    }
+                }
+            }
+            catch { /* fall through to stock value */ }
+            return -11f;
+        }
+
+        private static IEnumerable<CodeInstruction> IgnoreOffScreenCullTranspiler(
+            IEnumerable<CodeInstruction> instructions)
+        {
+            // NOTE: do NOT use `yield return` here. The C# compiler turns iterator
+            // methods into a state machine decorated with IteratorStateMachineAttribute,
+            // which Mono 2.0 (this SF build) cannot load → TypeLoadException at plugin
+            // load. Build a concrete List and return it instead.
+            var call = AccessTools.Method(typeof(Plugin), nameof(GetCrateCullThreshold));
+            var codes = new List<CodeInstruction>(instructions);
+            for (int i = 0; i < codes.Count; i++)
+            {
+                if (codes[i].opcode == System.Reflection.Emit.OpCodes.Ldc_R4 && (float)codes[i].operand == -11f)
+                {
+                    codes[i].opcode = System.Reflection.Emit.OpCodes.Call;
+                    codes[i].operand = call;
+                }
+            }
+            return codes;
+        }
 
         // Phase 6.17 v0.1 — Harmony postfix on Weapon.ActuallyShoot.
         // Fires after the local Shoot ran. We capture the muzzle position +

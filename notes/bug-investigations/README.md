@@ -1,4 +1,4 @@
-# Bug investigations
+A# Bug investigations
 
 Permanent home for **investigative theories** about bugs we're tracking down — root-cause analyses, evidence, and proposed fixes. Distinct from:
 

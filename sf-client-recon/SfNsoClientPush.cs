@@ -45,25 +45,26 @@ namespace SFClientRecon
 
         internal void TickNsoClientPushRelay()
         {
-            if (!_oraclePushMode || !_running) return;
-            if (Time.realtimeSinceStartup < _nextPushRelayAt) return;
-            _nextPushRelayAt = Time.realtimeSinceStartup + PushRelayInterval;
-            try { RelayPushableCrateUpdates(); } catch { }
+            // OMEGA FIX: relay DISABLED. Sending locally-simulated crate positions
+            // back to the server made client and server overwrite each other every
+            // few frames (tug-of-war) → jitter / fly-away. The server is the sole
+            // authority; the client only soft-corrects toward it. No upload.
+            return;
         }
 
         internal static bool DisableAllRigidBodies_PushPrefix(object __instance)
         {
+            // OMEGA FIX: keep pushable crates DYNAMIC so local Unity physics runs
+            // (smooth, instant, collides + stacks). Server stays authoritative via
+            // the gentle soft-correction in SmoothTowardTargets — NOT via the relay
+            // (relay is disabled below) and NOT by forcing kinematic.
             if (!_oraclePushMode || !IsPushableCrateRoot((__instance as Component)?.gameObject)) return true;
             try
             {
                 var rbs = (__instance as Component)?.GetComponentsInChildren<Rigidbody>();
                 if (rbs != null)
-                {
                     foreach (var rb in rbs)
-                    {
                         if ((object)rb != null) rb.isKinematic = false;
-                    }
-                }
                 var listenF = AccessTools.Field(__instance.GetType(), "mIsListening");
                 if ((object)listenF != null) listenF.SetValue(__instance, true);
             }
