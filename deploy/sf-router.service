@@ -1,0 +1,24 @@
+[Unit]
+Description=Stick Fight single-port UDP router (multi-lobby front door)
+Documentation=https://github.com/kitslayer/sf-multiplayer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=miles
+Group=miles
+# Public UDP front door on :1338 (firewall-open). Routes each client to the
+# backend SF.exe for the lobby code it SELECTed, per the /tmp/sf-lobbies
+# registry. Backends stay on loopback; only this port is exposed.
+ExecStart=/home/miles/sf-router -listen 0.0.0.0:1338 -registry /tmp/sf-lobbies -stats 127.0.0.1:8081
+Restart=on-failure
+RestartSec=3
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
