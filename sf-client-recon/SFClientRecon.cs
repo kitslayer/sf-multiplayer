@@ -361,6 +361,25 @@ namespace SFClientRecon
         {
             // v25 wrapper: 5 bytes prefix + body + 9 bytes suffix
             if (pkt.Length < 14) return;
+
+            // sf-router SELECT-ACK (router-only framing, NOT a game msgType):
+            // magic "SFRTR\0\0\x01" + op 0x81 + status + nonce. Log it so a bad
+            // lobby code (status=1) is visible instead of silently resending.
+            if (pkt[0] == 0x53 && pkt[1] == 0x46 && pkt[2] == 0x52 && pkt[3] == 0x54
+                && pkt[4] == 0x52 && pkt[5] == 0x00 && pkt[6] == 0x00 && pkt[7] == 0x01
+                && pkt[8] == 0x81)
+            {
+                byte ackStatus = pkt[9];
+                if (ackStatus != 0)
+                {
+                    _bannerText = "Lobby '" + (SelectedLobbyCode ?? "?") + "' not found on server.";
+                    _bannerUntilUtc = DateTime.UtcNow.AddSeconds(3);
+                    if (_selectLogs < 8) { _selectLogs++; Log.LogWarning($"[SELECT-ACK] lobby={SelectedLobbyCode} not found (status={ackStatus})"); }
+                }
+                else if (_selectLogs < 8) { _selectLogs++; Log.LogInfo($"[SELECT-ACK] lobby={SelectedLobbyCode} accepted"); }
+                return;
+            }
+
             byte msgType = pkt[4];
 
             // msgType 42 — server announcement banner (anti-cheat kicks etc.).
@@ -1302,8 +1321,9 @@ namespace SFClientRecon
             if (codeBytes.Length > 16) return;  // router maxCodeLen
             // [8 magic][1 op=SELECT][1 codeLen][code][4 nonce LE]
             byte[] pkt = new byte[8 + 1 + 1 + codeBytes.Length + 4];
-            pkt[0] = 0x53; pkt[1] = 0x46; pkt[2] = 0x52; pkt[3] = 0x54;  // "SFRT"
-            pkt[4] = 0x52; pkt[5] = 0x00; pkt[6] = 0x00; pkt[7] = 0x01;  // "R\0\0\1"
+            // magic "SFRTR\0\0\x01" — matches sf-router/select.go selectMagic.
+            pkt[0] = 0x53; pkt[1] = 0x46; pkt[2] = 0x52; pkt[3] = 0x54; pkt[4] = 0x52;  // S F R T R
+            pkt[5] = 0x00; pkt[6] = 0x00; pkt[7] = 0x01;
             pkt[8] = 0x01;                          // op = SELECT
             pkt[9] = (byte)codeBytes.Length;
             Buffer.BlockCopy(codeBytes, 0, pkt, 10, codeBytes.Length);
