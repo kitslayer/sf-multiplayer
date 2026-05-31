@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net46</TargetFramework>
+    <TargetFramework>net35</TargetFramework>
     <AssemblyName>SFClientRecon</AssemblyName>
     <RootNamespace>SFClientRecon</RootNamespace>
     <LangVersion>9.0</LangVersion>
