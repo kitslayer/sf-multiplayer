@@ -72,10 +72,27 @@ sf-router -listen 0.0.0.0:1337 -backend 127.0.0.1:1338
 Open only **UDP/1337** (router) + **TCP/8080** (serve-lobbies HTTP). All backend
 SF.exe ports stay loopback — hidden from scanners.
 
+## Robustness (hardened after code review)
+
+- **Re-resolve, never cache addresses.** Bindings store the lobby *code*; the
+  backend is re-resolved through the registry on every flow creation and the
+  reaper tears down any flow whose backend moved/disappeared (lobby restart or
+  port reuse). A client never stays pinned to a stale backend.
+- **Teardown-stale, not teardown-by-IP.** A SELECT only tears down flows whose
+  effective backend actually changed, so a co-located player who is correctly
+  bound per-endpoint is never disturbed.
+- **Bounded memory.** SELECT bindings carry a `lastSeen`; the reaper drops them
+  after `BindIdleTimeout` (5m). Hard caps: `maxFlows` 4096, `maxBindings` 8192,
+  to blunt spoofed-source-address sprays (binding creation is already gated on a
+  valid lobby code).
+
 ## Known limitation (documented risk)
 
-Backend selection falls back to per-IP for the game socket, so **two players
-behind one public IP/NAT** could mis-bind if they pick different lobbies. Fine
-for the comp scene (distinct IPs); the robust fix (make the game socket SELECT
-too, via a patched-DLL change) is deferred. Per-endpoint SELECT bindings take
-priority over the IP fallback, so each recon socket is always correctly bound.
+Backend selection falls back to per-IP for the **game socket** (the patched DLL
+never SELECTs). So **two players behind one public IP/NAT who join _different_
+lobbies**: each player's recon socket is correct (its own per-endpoint binding),
+but the second player's *game* socket rides the shared IP fallback and can route
+to the first player's lobby. Fine for the comp scene (distinct IPs); two
+same-IP players in the *same* lobby also work. The robust fix — make the game
+socket SELECT too — needs a patched-`Assembly-CSharp` change and is deferred
+(TODO). Per-endpoint bindings always win over the IP fallback.

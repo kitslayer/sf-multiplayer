@@ -35,6 +35,18 @@ import (
 // still considers live.
 const FlowIdleTimeout = 45 * time.Second
 
+// BindIdleTimeout is how long a SELECT binding survives with no traffic before
+// the reaper drops it. Longer than FlowIdleTimeout so a brief lull (between a
+// flow being reaped and the client's next SELECT) doesn't lose the binding.
+const BindIdleTimeout = 5 * time.Minute
+
+// maxFlows / maxBindings bound memory against spoofed-source-address sprays.
+// A handful of real clients use a few of each; these are generous ceilings.
+const (
+	maxFlows    = 4096
+	maxBindings = 8192
+)
+
 // reapInterval is how often the janitor scans for idle flows.
 const reapInterval = 5 * time.Second
 
@@ -55,11 +67,13 @@ type flow struct {
 	rxFromSrv  uint64       // datagrams backend→client
 }
 
-// bound records which lobby (and resolved backend) a client endpoint/IP is
-// pinned to via SELECT.
+// bound records which lobby a client endpoint/IP is pinned to via SELECT. We
+// store the CODE (not a resolved address) and re-resolve through the registry
+// on use, so a lobby that restarts on a different port — or a port reused by a
+// different code — never leaves a client pinned to a stale backend.
 type bound struct {
-	code    string
-	backend *net.UDPAddr
+	code     string
+	lastSeen time.Time
 }
 
 // Router relays UDP between clients on a single public port and per-lobby
@@ -173,10 +187,16 @@ func (r *Router) handleClientDatagram(cliAddr *net.UDPAddr, data []byte) {
 	r.mu.Lock()
 	fl := r.flows[key]
 	if fl == nil {
-		backend, code, ok := r.backendFor(cliAddr)
+		backend, code, ok := r.effectiveBackend(cliAddr)
 		if !ok {
 			r.mu.Unlock()
-			// Routing mode + no SELECT yet → drop (client resends after SELECT).
+			// Routing mode + no SELECT (or its lobby is gone) → drop; the
+			// client resends after SELECT.
+			return
+		}
+		if len(r.flows) >= maxFlows {
+			r.mu.Unlock()
+			log.Printf("[router] flow cap %d reached; dropping new flow from %s", maxFlows, key)
 			return
 		}
 		nf, err := r.newFlow(cliAddr, backend, code)
@@ -198,21 +218,30 @@ func (r *Router) handleClientDatagram(cliAddr *net.UDPAddr, data []byte) {
 	}
 }
 
-// backendFor selects the backend (and lobby code) for a client endpoint. Caller
-// holds r.mu. Stage 0: the single fixed backend (no code). Routing mode: the
-// endpoint's own SELECT binding first, then its IP-level fallback (covers the
-// patched-DLL game socket that shares the client's IP but never SELECTs).
-func (r *Router) backendFor(cliAddr *net.UDPAddr) (*net.UDPAddr, string, bool) {
+// effectiveBackend resolves the current backend (and lobby code) for a client
+// endpoint. Caller holds r.mu. Stage 0: the single fixed backend (no code).
+// Routing mode: find the binding (the endpoint's own SELECT first, then its
+// IP-level fallback for the patched-DLL game socket that shares the IP but
+// never SELECTs), then RE-RESOLVE the code through the registry every time so a
+// restarted/moved lobby is never served from a stale cached address. Refreshes
+// the binding's lastSeen so the reaper keeps live bindings.
+func (r *Router) effectiveBackend(cliAddr *net.UDPAddr) (*net.UDPAddr, string, bool) {
 	if !r.requireSelect {
 		return r.backend, "", true
 	}
-	if b := r.epBind[cliAddr.String()]; b != nil {
-		return b.backend, b.code, true
+	b := r.epBind[cliAddr.String()]
+	if b == nil {
+		b = r.ipBind[cliAddr.IP.String()]
 	}
-	if b := r.ipBind[cliAddr.IP.String()]; b != nil {
-		return b.backend, b.code, true
+	if b == nil {
+		return nil, "", false
 	}
-	return nil, "", false
+	backend, ok := r.resolve(b.code)
+	if !ok {
+		return nil, "", false // lobby gone — drop until the client re-SELECTs a live one
+	}
+	b.lastSeen = time.Now()
+	return backend, b.code, true
 }
 
 // handleControl processes a SELECT/LEAVE datagram and replies with an ACK.
@@ -237,20 +266,24 @@ func (r *Router) handleControl(cliAddr *net.UDPAddr, data []byte) {
 			return
 		}
 		r.mu.Lock()
-		ip := cliAddr.IP.String()
-		prev := r.ipBind[ip]
-		changed := prev == nil || prev.code != code
-		r.epBind[cliAddr.String()] = &bound{code: code, backend: backend}
-		r.ipBind[ip] = &bound{code: code, backend: backend}
-		if changed {
-			// A switch (or first select): tear down this IP's existing flows so
-			// they rebuild to the new backend on the next datagram. (Same-IP
-			// two-player NAT is the documented edge case in the plan.)
-			r.teardownByIPLocked(cliAddr.IP)
+		now := time.Now()
+		// Cap bindings against spoofed-source sprays. Refresh-in-place of an
+		// existing endpoint is always allowed; only brand-new endpoints are
+		// capped.
+		if _, exists := r.epBind[cliAddr.String()]; !exists && len(r.epBind) >= maxBindings {
+			r.mu.Unlock()
+			log.Printf("[router] binding cap %d reached; ignoring SELECT from %s", maxBindings, cliAddr)
+			return
 		}
+		r.epBind[cliAddr.String()] = &bound{code: code, lastSeen: now}
+		r.ipBind[cliAddr.IP.String()] = &bound{code: code, lastSeen: now}
+		// Tear down only flows that are now STALE (their effective backend
+		// changed) — covers a single client switching lobbies, while leaving a
+		// co-located different-lobby player's per-endpoint-bound flows intact.
+		r.teardownStaleLocked(cliAddr.IP)
 		r.mu.Unlock()
 		r.sendAck(cliAddr, nonce, ackOK)
-		log.Printf("[router] SELECT %q from %s → %s (changed=%v)", code, cliAddr, backend, changed)
+		log.Printf("[router] SELECT %q from %s → %s", code, cliAddr, backend)
 		return
 	default:
 		// Unknown op — ignore.
@@ -259,19 +292,28 @@ func (r *Router) handleControl(cliAddr *net.UDPAddr, data []byte) {
 }
 
 // unbindLocked removes an endpoint's bindings (and its IP fallback) and tears
-// down its flows. Caller holds r.mu.
+// down stale flows for its IP. Caller holds r.mu.
 func (r *Router) unbindLocked(cliAddr *net.UDPAddr) {
 	delete(r.epBind, cliAddr.String())
 	delete(r.ipBind, cliAddr.IP.String())
-	r.teardownByIPLocked(cliAddr.IP)
+	// The endpoint's own flow no longer has a binding → effectiveBackend fails
+	// → teardownStaleLocked closes it. A co-located player's epBind'd flows
+	// still resolve and are kept.
+	r.teardownStaleLocked(cliAddr.IP)
 }
 
-// teardownByIPLocked closes + removes all flows whose client shares the given
-// IP, so subsequent datagrams rebuild against the current binding. Caller holds
-// r.mu.
-func (r *Router) teardownByIPLocked(ip net.IP) {
+// teardownStaleLocked closes + removes flows on the given IP whose effective
+// backend no longer matches (binding changed, or its lobby is gone), so they
+// rebuild against the current binding. Flows still resolving to their current
+// backend are kept — so a SELECT by one player doesn't disturb a co-located
+// player whose endpoint is correctly bound. Caller holds r.mu.
+func (r *Router) teardownStaleLocked(ip net.IP) {
 	for key, fl := range r.flows {
-		if fl.clientAddr.IP.Equal(ip) {
+		if !fl.clientAddr.IP.Equal(ip) {
+			continue
+		}
+		backend, _, ok := r.effectiveBackend(fl.clientAddr)
+		if !ok || backend.String() != fl.backend.String() {
 			_ = fl.upSock.Close()
 			delete(r.flows, key)
 		}
@@ -324,7 +366,9 @@ func (r *Router) pumpUpstream(fl *flow) {
 	}
 }
 
-// reaper periodically closes flows idle beyond FlowIdleTimeout.
+// reaper periodically (1) closes idle flows, (2) tears down flows whose backend
+// has moved/disappeared (lobby restart/port-reuse) so they re-resolve, and (3)
+// drops idle SELECT bindings so they don't accumulate.
 func (r *Router) reaper() {
 	defer r.wg.Done()
 	t := time.NewTicker(reapInterval)
@@ -336,11 +380,32 @@ func (r *Router) reaper() {
 		case <-t.C:
 			now := time.Now()
 			r.mu.Lock()
+			// (1) + (2): idle and stale flows.
 			for key, fl := range r.flows {
 				if now.Sub(fl.lastSeen) > FlowIdleTimeout {
 					_ = fl.upSock.Close()
 					delete(r.flows, key)
 					log.Printf("[router] reaped idle flow %s (cli=%d srv=%d)", key, fl.rxFromCli, fl.rxFromSrv)
+					continue
+				}
+				if r.requireSelect {
+					backend, _, ok := r.effectiveBackend(fl.clientAddr)
+					if !ok || backend.String() != fl.backend.String() {
+						_ = fl.upSock.Close()
+						delete(r.flows, key)
+						log.Printf("[router] reaped stale flow %s (backend moved/gone)", key)
+					}
+				}
+			}
+			// (3): idle bindings.
+			for key, b := range r.epBind {
+				if now.Sub(b.lastSeen) > BindIdleTimeout {
+					delete(r.epBind, key)
+				}
+			}
+			for key, b := range r.ipBind {
+				if now.Sub(b.lastSeen) > BindIdleTimeout {
+					delete(r.ipBind, key)
 				}
 			}
 			r.mu.Unlock()
