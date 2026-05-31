@@ -187,6 +187,29 @@ So any of the channel-0 or channel-1 msgTypes will be dispatched regardless of w
 | 43 | ClientHello (with v26 capabilities) | Reserved — pre-handshake to advertise plugin version |
 | 44 | ServerStatus (heartbeat + lobby info) | Reserved — for in-band lobby browser without HTTP |
 
+## Router control framing (SELECT) — NOT a msgType
+
+The `sf-router` single-port front-door (see [`ROUTER.md`](ROUTER.md)) introduces
+a **router-only** control datagram that is deliberately *outside* the game
+envelope so the router can tell it apart from forwardable game traffic. It is
+**not** a v26 msgType and never reaches a backend.
+
+Framing (little-endian), distinct from `[u32 ts][u8 msgType][...]`:
+
+```
+[8] magic   = 53 46 52 54 52 00 00 01   ("SFRTR\0\0\1")
+[1] op      = 0x01 SELECT | 0x02 LEAVE   (client→router)
+              0x81 ACK                    (router→client)
+SELECT/LEAVE: [1] codeLen, [codeLen] code (ASCII A-Z0-9), [4] nonce LE
+ACK:          [1] status (0 ok / 1 no-such-lobby), [4] nonce LE
+```
+
+Disambiguation is total: a real SF datagram's byte[4] is a msgType ≤ ~46, but
+`magic[4]='R'` (0x52 = 82), and the router additionally compares the full
+8-byte magic. A SELECT that ever reached a backend by mistake would parse as
+msgType 82 (out of range) and be ignored. The client resends SELECT at ~5 Hz
+until snapshots flow, so loss of the unreliable control datagram self-heals.
+
 ## Compatibility
 
 - v25 stock clients: handle 0..38. Receive but ignore 39/40/56/57.

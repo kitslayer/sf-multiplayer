@@ -1,3 +1,33 @@
+# What's new — `sharding` branch (in progress)
+
+Single-port multi-lobby front-door so one server hosts many lobbies and players
+pick/create them **in-game**, while each lobby stays an isolated `SF.exe` (no
+fragile in-process "true sharding"). Server side is unit-tested; client side
+compiles and awaits a live 2-player test. Plan: `~/.claude/plans/iterative-sparking-pascal.md`.
+Docs: [`notes/ROUTER.md`](notes/ROUTER.md), [`notes/ROUTER_LIVE_TEST.md`](notes/ROUTER_LIVE_TEST.md), [`notes/PROTOCOL.md`](notes/PROTOCOL.md) (router control framing).
+
+- **`sf-router/`** (new Go module) — stateless per-client UDP relay on one public
+  port (1337). Clients send a magic-framed SELECT naming their lobby code; the
+  router resolves it via the launch-lobby.sh registry and forwards both the v25
+  game socket and the v26 recon socket to that lobby's backend, relaying replies
+  back from the public port. Re-resolves on use (survives lobby restart/port
+  reuse), teardown-stale on switch, bounded bindings, `/router/stats` for the
+  reaper. `go test ./... -race` green (16 tests); reviewed + hardened.
+- **`serve-lobbies.py`** — control plane: `POST /lobbies` create (token + per-IP
+  rate-limit + `SF_MAX_LOBBIES` cap, spawns via launch-lobby.sh), `POST
+  /lobbies/stop`, and a reaper that stops dead-pid + long-empty lobbies.
+- **Client** (`SFClientRecon` + `SfOracleLobbyConnect`) — emits SELECT on the
+  v26 socket (resend until snapshots flow; self-heals on switch);
+  `RequestJoinLobby(code)` is the in-game join entry. Default lobby `MAIN` (env
+  `SF_LOBBY`) keeps a no-browser Quick Match working.
+- **`SFServerBrowser`** — real in-game JOIN, a join-by-code text field, and a
+  CREATE LOBBY button (POST → auto-join). Replaces the old copy-to-clipboard.
+- **Known limit (documented):** two players behind one public IP in *different*
+  lobbies — the second's game socket may mis-route (the game socket can't SELECT
+  without a patched-DLL change; deferred). Distinct IPs / same-lobby are fine.
+
+---
+
 # What's new — 2026-05-23 session
 
 **60+ commits** landed in one day. Running tally so visitors can scan the deltas without scrolling git log.

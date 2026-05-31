@@ -103,6 +103,22 @@ namespace SFClientRecon
         private uint _snapsReceived;
         private uint _snapsApplied;
 
+        // --- Lobby SELECT (sf-router single-port front-door) --------------------
+        // The lobby this client wants. Set from the in-game browser via
+        // RequestJoinLobby (SfOracleLobbyConnect.cs); defaults to SF_LOBBY env or
+        // "MAIN" so a no-browser Quick Match still routes somewhere. We emit a
+        // SELECT control datagram (router-only framing, see notes/PROTOCOL.md) on
+        // the v26 socket so the router pins this client to the lobby's backend.
+        // A SELECT is harmless to a direct (no-router) backend — it parses as an
+        // out-of-range msgType and is ignored — so we can always send it.
+        internal static string SelectedLobbyCode = "";
+        private const float SelectResendInterval = 0.2f;   // 5Hz while not connected
+        private uint  _selectNonce;
+        private float _lastSelectAt = -1f;
+        private uint  _lastSeenSnapCount;
+        private float _lastSnapGrowAt = -1f;
+        private int   _selectLogs;
+
         // Cached local-player slot — discovered lazily once a Controller with
         // mHasControl=true appears in the scene.
         private int _localSlot = -1;
@@ -164,6 +180,10 @@ namespace SFClientRecon
             _listenPort = V26_DEFAULT_PORT;
             var envPort = Environment.GetEnvironmentVariable("SFCLIENTRECON_PORT");
             if (!string.IsNullOrEmpty(envPort) && int.TryParse(envPort, out var pp)) _listenPort = pp;
+
+            // Default lobby for a no-browser Quick Match (router routes by code).
+            var envLobby = Environment.GetEnvironmentVariable("SF_LOBBY");
+            SelectedLobbyCode = string.IsNullOrEmpty(envLobby) ? "MAIN" : envLobby.Trim().ToUpper();
 
             // Phase 6.17 v0.1 — hook Weapon.ActuallyShoot so we know when the
             // local player fires. Send PktClientFireWeapon to the oracle so it
@@ -343,6 +363,25 @@ namespace SFClientRecon
         {
             // v25 wrapper: 5 bytes prefix + body + 9 bytes suffix
             if (pkt.Length < 14) return;
+
+            // sf-router SELECT-ACK (router-only framing, NOT a game msgType):
+            // magic "SFRTR\0\0\x01" + op 0x81 + status + nonce. Log it so a bad
+            // lobby code (status=1) is visible instead of silently resending.
+            if (pkt[0] == 0x53 && pkt[1] == 0x46 && pkt[2] == 0x52 && pkt[3] == 0x54
+                && pkt[4] == 0x52 && pkt[5] == 0x00 && pkt[6] == 0x00 && pkt[7] == 0x01
+                && pkt[8] == 0x81)
+            {
+                byte ackStatus = pkt[9];
+                if (ackStatus != 0)
+                {
+                    _bannerText = "Lobby '" + (SelectedLobbyCode ?? "?") + "' not found on server.";
+                    _bannerUntilUtc = DateTime.UtcNow.AddSeconds(3);
+                    if (_selectLogs < 8) { _selectLogs++; Log.LogWarning($"[SELECT-ACK] lobby={SelectedLobbyCode} not found (status={ackStatus})"); }
+                }
+                else if (_selectLogs < 8) { _selectLogs++; Log.LogInfo($"[SELECT-ACK] lobby={SelectedLobbyCode} accepted"); }
+                return;
+            }
+
             byte msgType = pkt[4];
 
             // msgType 42 — server announcement banner (anti-cheat kicks etc.).
@@ -525,6 +564,22 @@ namespace SFClientRecon
             SmoothTowardTargets();
             TickNsoClientPushRelay();
             TickFastCombatInput();
+
+            // Lobby SELECT: keep the router pinned to our chosen lobby until
+            // snapshots are flowing. Snapshot-flow is the "connected" signal;
+            // tracked on the main thread (the RX thread can't read Unity time).
+            // Self-heals on a lobby switch (snapshots stop → SELECT resumes).
+            if (!string.IsNullOrEmpty(SelectedLobbyCode) && _socket != null && _serverEp != null)
+            {
+                float nowSel = Time.realtimeSinceStartup;
+                if (_snapsReceived != _lastSeenSnapCount) { _lastSeenSnapCount = _snapsReceived; _lastSnapGrowAt = nowSel; }
+                bool snapsFlowing = _lastSnapGrowAt > 0f && (nowSel - _lastSnapGrowAt) < 1f;
+                if (!snapsFlowing && nowSel - _lastSelectAt >= SelectResendInterval)
+                {
+                    _lastSelectAt = nowSel;
+                    SendSelectLobbyPacket();
+                }
+            }
 
             // Phase 6.12 — send input packets at 60Hz once local slot is known.
             if (_socket != null && _serverEp != null && Time.realtimeSinceStartup - _lastInputSendAt >= InputSendInterval)
@@ -1211,6 +1266,33 @@ namespace SFClientRecon
 
             if (_inputSeq == 1 || _inputSeq % 300 == 0)
                 Log.LogInfo($"[P6.12] Sent PlayerInput #{_inputSeq} slot={localSlot} stick=({sx:0.00},{sy:0.00}) btns=0x{btns:X} hist={_historySeq.Count}");
+        }
+
+        // Emit a SELECT control datagram to the sf-router so it pins this client
+        // (by source endpoint, with a per-IP fallback the game socket rides) to
+        // SelectedLobbyCode's backend. Router-only framing — NOT a game msgType —
+        // see notes/PROTOCOL.md. Sent on the v26 socket; the router learns our IP
+        // here BEFORE the game socket connects in BeginOracleLobbyConnect.
+        // Built with explicit byte writes (Mono 2.0: no LINQ, no Array.Empty).
+        internal void SendSelectLobbyPacket()
+        {
+            if (_socket == null || _serverEp == null) return;
+            string code = SelectedLobbyCode ?? "";
+            byte[] codeBytes = System.Text.Encoding.ASCII.GetBytes(code);
+            if (codeBytes.Length > 16) return;  // router maxCodeLen
+            // [8 magic][1 op=SELECT][1 codeLen][code][4 nonce LE]
+            byte[] pkt = new byte[8 + 1 + 1 + codeBytes.Length + 4];
+            // magic "SFRTR\0\0\x01" — matches sf-router/select.go selectMagic.
+            pkt[0] = 0x53; pkt[1] = 0x46; pkt[2] = 0x52; pkt[3] = 0x54; pkt[4] = 0x52;  // S F R T R
+            pkt[5] = 0x00; pkt[6] = 0x00; pkt[7] = 0x01;
+            pkt[8] = 0x01;                          // op = SELECT
+            pkt[9] = (byte)codeBytes.Length;
+            Buffer.BlockCopy(codeBytes, 0, pkt, 10, codeBytes.Length);
+            _selectNonce++;
+            WriteU32LE(pkt, 10 + codeBytes.Length, _selectNonce);
+            try { _socket.Send(pkt, pkt.Length, _serverEp); }
+            catch (Exception e) { Log.LogWarning($"[SELECT] send: {e.Message}"); }
+            if (_selectLogs < 6) { _selectLogs++; Log.LogInfo($"[SELECT] lobby={code} nonce={_selectNonce} → {_serverEp}"); }
         }
 
         // P0-15 — recently snapshot-lerped root transforms.

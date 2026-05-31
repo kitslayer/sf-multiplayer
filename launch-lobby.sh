@@ -80,13 +80,26 @@ BEPLOG="$HOME/sf-mirror-local/BepInEx/LogOutput.log"
 PLUGINLOG="/tmp/sf-oracle-plugin-${BRIDGEPORT}.log"
 rm -f "$PLUGINLOG"
 
-echo "Starting lobby '$CODE' on UDP $PORT (bridge $BRIDGEPORT)..."
+# Which headless launcher to use. On a SERVER (bundled Proton under
+# ~/sf-oracle) use deploy/start-oracle-server.sh — it wraps Proton in xvfb-run
+# and gives each bridge its own prefix (the recipe the live oracle uses). On a
+# dev laptop (Steam Proton + sf-mirror-local) use launch-sf-headless.sh.
+# Override explicitly with SFHEADLESS_LAUNCHER.
+if [ -n "${SFHEADLESS_LAUNCHER:-}" ]; then
+  LAUNCHER="$SFHEADLESS_LAUNCHER"
+elif [ -x "${SF_ORACLE_ROOT:-$HOME/sf-oracle}/proton/proton" ]; then
+  LAUNCHER="$REPO_DIR/deploy/start-oracle-server.sh"
+else
+  LAUNCHER="$REPO_DIR/launch-sf-headless.sh"
+fi
+
+echo "Starting lobby '$CODE' on UDP $PORT (bridge $BRIDGEPORT) via $(basename "$LAUNCHER")..."
 SFHEADLESS_PORT="$PORT" \
 SFHEADLESS_BRIDGEPORT="$BRIDGEPORT" \
 SFHEADLESS_DEBUG=1 \
 SF_LOBBY_CODE="$CODE" \
 SFHEADLESS_LOGFILE="$PLUGINLOG" \
-  nohup bash "$REPO_DIR/launch-sf-headless.sh" >/dev/null 2>&1 &
+  nohup bash "$LAUNCHER" >/dev/null 2>&1 &
 PID=$!
 disown
 
