@@ -12,7 +12,7 @@
 //
 // Two modes:
 //   - Stage 0 (New): transparent relay to one fixed backend — proves the relay
-//     + return-path addressing with a trivial UDP echo, no client changes.
+//   - return-path addressing with a trivial UDP echo, no client changes.
 //   - Stage 1 (NewRouting): SELECT-gated per-lobby routing. A client sends a
 //     SELECT control datagram naming its lobby code; the router resolves it to
 //     a backend (via the lobby registry) and pins the client. Game traffic
