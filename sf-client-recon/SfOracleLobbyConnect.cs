@@ -203,6 +203,36 @@ namespace SFClientRecon
             catch (Exception e) { Log.LogError($"[oracle-lobby] BeginOracleLobbyConnect: {e.Message}"); }
         }
 
+        // Entry point for the in-game server browser (called cross-assembly by
+        // reflection from SFServerBrowser): join a specific lobby by code over
+        // the sf-router single port — no game restart. Sets the SELECT code,
+        // emits a SELECT immediately so the router pins our IP→backend before
+        // the game socket connects, then runs the normal oracle-connect path.
+        // Works from the main menu; to switch lobbies, leave to menu and call
+        // again (a fresh SELECT + connect; no live-connection rebind needed).
+        internal static void RequestJoinLobby(string code)
+        {
+            code = (code ?? "").Trim().ToUpper();
+            if (code.Length == 0) { Log.LogWarning("[oracle-lobby] RequestJoinLobby: empty code ignored."); return; }
+            SelectedLobbyCode = code;
+            Log.LogInfo($"[oracle-lobby] RequestJoinLobby({code}) — SELECT + connect via router.");
+            var inst = Instance;
+            if (RefOk(inst))
+            {
+                // Re-arm the SELECT resend loop for the NEW lobby: capture the
+                // current (monotonic) snapshot count so "snapshots flowing" only
+                // becomes true once the NEW lobby's snapshots actually arrive.
+                inst._lastSeenSnapCount = inst._snapsReceived;
+                inst._lastSnapGrowAt = -1f;
+                inst._lastSelectAt = -1f;
+                try { inst.SendSelectLobbyPacket(); }
+                catch (Exception e) { Log.LogWarning($"[oracle-lobby] SELECT send: {e.Message}"); }
+            }
+            // Allow a re-connect from the menu (the autoconnect guard latches this).
+            _oracleConnectStarted = false;
+            BeginOracleLobbyConnect("ServerBrowser:" + code);
+        }
+
         private static object GetPktHandler()
         {
             var prop = AccessTools.Property(_pktType, "Instance");

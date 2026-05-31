@@ -53,7 +53,16 @@ namespace SFServerBrowser
         private Vector2 _serversScroll;
         private Vector2 _inGameScroll;
         private bool _stylesInited;
-        private GUIStyle _btnStyle, _btnAccent, _titleStyle, _rowStyle, _statusStyle;
+        private GUIStyle _btnStyle, _btnAccent, _titleStyle, _rowStyle, _statusStyle, _textFieldStyle;
+
+        // Stage 2: in-game join/create
+        private string _joinCodeInput = "";
+        private float _createCooldownAt = -999f;
+        private bool _focusJoinField;
+        // Cross-assembly bridge to SFClientRecon.Plugin.RequestJoinLobby(string)
+        // — resolved once by reflection (no hard assembly reference).
+        private static System.Reflection.MethodInfo _joinMethod;
+        private static bool _joinResolved;
 
         // For detecting if we're in a match (vs lobby/main menu) for Esc menu
         private string _currentSceneName = "";
@@ -145,6 +154,15 @@ namespace SFServerBrowser
             _statusStyle = new GUIStyle(GUI.skin.label);
             _statusStyle.fontSize = 13;
             _statusStyle.normal.textColor = new Color(0.7f, 0.8f, 0.9f);
+
+            _textFieldStyle = new GUIStyle(GUI.skin.textField);
+            _textFieldStyle.fontSize = 22;
+            _textFieldStyle.fontStyle = FontStyle.Bold;
+            _textFieldStyle.alignment = TextAnchor.MiddleCenter;
+            _textFieldStyle.normal.textColor = Color.white;
+            _textFieldStyle.normal.background = MakeTex(2, 2, new Color(0.05f, 0.06f, 0.09f));
+            _textFieldStyle.focused.textColor = new Color(1f, 0.95f, 0.4f);
+            _textFieldStyle.focused.background = MakeTex(2, 2, new Color(0.08f, 0.1f, 0.16f));
         }
 
         private Texture2D MakeTex(int w, int h, Color c)
@@ -168,6 +186,7 @@ namespace SFServerBrowser
             if (GUI.Button(r, "SERVERS", _btnAccent))
             {
                 _showServersPanel = true;
+                _focusJoinField = true;   // focus the join-code field on open
                 RefreshServers();
             }
         }
@@ -194,6 +213,18 @@ namespace SFServerBrowser
                 _showServersPanel = false;
             GUILayout.EndHorizontal();
 
+            // Join-by-code + create row
+            GUILayout.BeginHorizontal();
+            GUI.SetNextControlName("joinCode");
+            _joinCodeInput = SanitizeCode(GUILayout.TextField(_joinCodeInput ?? "", 8, _textFieldStyle, GUILayout.Width(160), GUILayout.Height(44)));
+            if (_focusJoinField) { GUI.FocusControl("joinCode"); _focusJoinField = false; }
+            if (GUILayout.Button("JOIN CODE", _btnStyle, GUILayout.Width(160), GUILayout.Height(44)))
+                JoinLobby(_joinCodeInput);
+            GUILayout.FlexibleSpace();
+            if (GUILayout.Button("CREATE LOBBY", _btnAccent, GUILayout.Width(200), GUILayout.Height(44)))
+                CreateLobby();
+            GUILayout.EndHorizontal();
+
             GUILayout.Space(10);
 
             // Server list
@@ -212,9 +243,9 @@ namespace SFServerBrowser
                     GUILayout.Label($"Players: {s.Players}/{s.Capacity}   Status: {s.Status}", _statusStyle);
                     GUILayout.EndVertical();
                     GUILayout.FlexibleSpace();
-                    if (GUILayout.Button("CONNECT", _btnStyle, GUILayout.Width(140), GUILayout.Height(44)))
+                    if (GUILayout.Button("JOIN", _btnStyle, GUILayout.Width(140), GUILayout.Height(44)))
                     {
-                        ConnectToServer(s);
+                        JoinLobby(s.Code);
                     }
                     GUILayout.EndHorizontal();
                     GUILayout.Space(4);
@@ -451,17 +482,113 @@ namespace SFServerBrowser
             return def;
         }
 
-        // ========== Connect to selected server ==========
-        // Don't reinvent the wheel — copy the launch options to clipboard
-        // so user can paste into Steam launch options or just restart SF
-        // with new args. This also doesn't break the Quick/Host Match
-        // existing flow (which is constraint #18).
-        private void ConnectToServer(ServerEntry s)
+        // ========== Join a lobby in-game (no restart) ==========
+        // Calls SFClientRecon.Plugin.RequestJoinLobby(code) by reflection (no
+        // hard assembly reference). That sets the SELECT lobby code, emits a
+        // SELECT to the sf-router, and runs the oracle-connect path — the client
+        // connects to the router's single port and is routed by code. Falls back
+        // to the old clipboard behavior if SFClientRecon isn't installed.
+        private void JoinLobby(string code)
         {
-            string launchArgs = $"-address {s.Host} -port {s.Port}";
-            try { GUIUtility.systemCopyBuffer = launchArgs; } catch { }
-            _statusText = $"Copied launch args to clipboard: {launchArgs}\nRestart SF with these args to connect.";
-            Log.LogInfo($"[connect] Copied: {launchArgs}");
+            code = SanitizeCode(code);
+            if (code.Length == 0) { _statusText = "Enter a lobby code first."; return; }
+            if (TryInvokeJoin(code))
+            {
+                _statusText = "Joining " + code + "...";
+                _showServersPanel = false;
+                Log.LogInfo("[browser] JOIN " + code + " via SFClientRecon.");
+                return;
+            }
+            // Fallback: SFClientRecon absent — copy launch args for a manual restart.
+            string host = "69.53.117.43"; int port = 1337;
+            for (int i = 0; i < _servers.Count; i++)
+            {
+                if (_servers[i].Code == code)
+                {
+                    if (!string.IsNullOrEmpty(_servers[i].Host)) host = _servers[i].Host;
+                    if (_servers[i].Port > 0) port = _servers[i].Port;
+                    break;
+                }
+            }
+            string args = "-address " + host + " -port " + port;
+            try { GUIUtility.systemCopyBuffer = args; } catch { }
+            _statusText = "client-recon not installed. Copied: " + args + " (restart SF).";
+            Log.LogInfo("[browser] fallback clipboard: " + args);
+        }
+
+        // ConnectToServer kept as a thin alias (older call sites / clarity).
+        private void ConnectToServer(ServerEntry s) { JoinLobby(s.Code); }
+
+        private static bool TryInvokeJoin(string code)
+        {
+            if (!_joinResolved)
+            {
+                _joinResolved = true;
+                var t = AccessTools.TypeByName("SFClientRecon.Plugin");
+                if (t != null)
+                    _joinMethod = AccessTools.Method(t, "RequestJoinLobby", new[] { typeof(string) });
+            }
+            if (_joinMethod == null) return false;
+            try { _joinMethod.Invoke(null, new object[] { code }); return true; }
+            catch (Exception e) { Log.LogWarning("[browser] RequestJoinLobby invoke failed: " + e.Message); return false; }
+        }
+
+        // ========== Create a lobby on demand (POST to serve-lobbies) ==========
+        private void CreateLobby()
+        {
+            if (Time.realtimeSinceStartup < _createCooldownAt)
+            {
+                _statusText = "Wait a moment before creating another lobby.";
+                return;
+            }
+            _createCooldownAt = Time.realtimeSinceStartup + 5f;
+            _statusText = "Creating lobby...";
+            StartCoroutine(CreateLobbyCoroutine());
+        }
+
+        private IEnumerator CreateLobbyCoroutine()
+        {
+            string body = null, err = null;
+            // The create endpoint is POST to the SAME URL as the lobby list
+            // (serve-lobbies.py: GET /lobbies lists, POST /lobbies creates).
+            string url = _lobbyEndpoint;
+            string token = Environment.GetEnvironmentVariable("SF_CONTROL_TOKEN") ?? "";
+            var t = new System.Threading.Thread(() =>
+            {
+                try
+                {
+                    System.Net.ServicePointManager.ServerCertificateValidationCallback = (a, b, c, d) => true;
+                    using (var wc = new WebClient())
+                    {
+                        wc.Headers.Add("User-Agent", "SFServerBrowser/" + PluginVersion);
+                        if (token.Length > 0) wc.Headers.Add("X-SF-Token", token);
+                        body = wc.UploadString(url, "POST", "");
+                    }
+                }
+                catch (Exception e) { err = e.Message; }
+            });
+            t.IsBackground = true;
+            t.Start();
+            while (t.IsAlive) yield return null;
+
+            if (err != null) { _statusText = "Create failed: " + err; yield break; }
+            string code = ExtractString(body, "code");
+            if (string.IsNullOrEmpty(code)) { _statusText = "Create: no code in response."; yield break; }
+            Log.LogInfo("[browser] created lobby " + code + " — joining.");
+            JoinLobby(code);
+        }
+
+        // Uppercase A-Z0-9 only, max 8 (explicit loop — no LINQ, Mono 2.0 safe).
+        private static string SanitizeCode(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            var sb = new StringBuilder(8);
+            for (int i = 0; i < s.Length && sb.Length < 8; i++)
+            {
+                char u = char.ToUpper(s[i]);
+                if ((u >= 'A' && u <= 'Z') || (u >= '0' && u <= '9')) sb.Append(u);
+            }
+            return sb.ToString();
         }
     }
 }
