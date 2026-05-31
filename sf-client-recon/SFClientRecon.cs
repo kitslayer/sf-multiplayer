@@ -738,6 +738,64 @@ namespace SFClientRecon
             }
         }
 
+        // Cap how fast a pushable crate can move. SF bullets impart velocity in a
+        // mass-INDEPENDENT way (direct velocity change), so a heavy crate still got
+        // launched "disparada muy rápido" by gunfire while explosions (mass-scaled
+        // AddExplosionForce) behaved fine. Clamping linear velocity per frame stops
+        // the fling without touching the player push (which never reaches the cap)
+        // or explosions (good distances stay under it).
+        private const float CrateMaxSpeed = 4.0f;   // m/s
+        private float _crateDiagAt = -1f;
+        private void ClampCrateVelocities()
+        {
+            if (_nsoCache.Count == 0) return;
+            float maxSqr = CrateMaxSpeed * CrateMaxSpeed;
+            int crates = 0, dyn = 0, clamped = 0; float maxSeen = 0f;
+            foreach (var kv in _nsoCache)
+            {
+                var entry = kv.Value;
+                // Clamp EVERY crate (not just pushable-classified) — a bullet
+                // flings whichever crate it hits. Skip weapons/ice/chains.
+                if (entry == null || entry.SkipSmooth) continue;
+                crates++;
+                var rbs = entry.Rbs;
+                if (rbs == null) continue;
+                for (int i = 0; i < rbs.Length; i++)
+                {
+                    var rb = rbs[i];
+                    if (rb == null) continue;
+                    if (!rb.isKinematic) dyn++;
+                    if (rb.isKinematic) continue;
+                    var v = rb.velocity;
+                    float m = v.magnitude;
+                    if (m > maxSeen) maxSeen = m;
+                    if (v.sqrMagnitude > maxSqr) { rb.velocity = v * (CrateMaxSpeed / m); clamped++; }
+                }
+            }
+            int pushable = crates;
+            // DIAG: confirms whether crates are local-physics (dynamic) and being
+            // clamped, or server-driven (kinematic → physics changes do nothing).
+            bool fling = maxSeen > 6.5f;
+            if ((fling || Time.realtimeSinceStartup - _crateDiagAt > 3f)
+                && Time.realtimeSinceStartup - _crateDiagAt > 0.5f)
+            {
+                _crateDiagAt = Time.realtimeSinceStartup;
+                int total = _nsoCache.Count, skip = 0, floating = 0, hasRb = 0;
+                foreach (var kv2 in _nsoCache) { var e2 = kv2.Value; if (e2 == null) continue; if (e2.SkipSmooth) skip++; if (e2.Floating) floating++; if ((object)e2.Rb != null) hasRb++; }
+                bool dpType = (object)_clientDpType != null, dpSimple = (object)_clientDpSimpleField != null, dpEvent = (object)_clientDpEventField != null;
+                Log.LogInfo($"[crate-diag] cacheTotal={total} pushable={pushable} skip={skip} floating={floating} hasRb={hasRb} | dpType={dpType} dpSimpleF={dpSimple} dpEventF={dpEvent} | dynRBs={dyn} clamped={clamped} maxVel={maxSeen:0.0} fling={fling}");
+            }
+        }
+
+        // Clamp in FixedUpdate (the physics step) — a bullet imparts velocity in
+        // FixedUpdate, so clamping in Update let the crate fly a full render frame
+        // first. FixedUpdate catches it the same physics step.
+        private void FixedUpdate()
+        {
+            if (!_running) return;
+            try { ClampCrateVelocities(); } catch { }
+        }
+
         private void SmoothTowardTargets()
         {
             if (_playerTargets.Count == 0 && _nsoTargets.Count == 0 && _mapSyncTargets.Count == 0) return;
@@ -904,7 +962,7 @@ namespace SFClientRecon
         // GetComponent<Rigidbody> for every box every frame — on box-heavy maps
         // that was thousands of hierarchy walks/sec → frame drops scaling with
         // crate count. Now it's a single dictionary lookup per frame.
-        private class NsoCacheEntry { public Component Comp; public Rigidbody Rb; public bool SkipSmooth; public bool Pushable; public bool Floating; }
+        private class NsoCacheEntry { public Component Comp; public Rigidbody Rb; public Rigidbody[] Rbs; public bool SkipSmooth; public bool Pushable; public bool Floating; }
         private static Type _dontEnableRigType;
         // Rigidbody instance IDs already given the crate physics config (grip,
         // continuous collision, constraints) — so the 2s cache rebuild doesn't
@@ -998,6 +1056,11 @@ namespace SFClientRecon
                             {
                                 Comp = c,
                                 Rb = rbc,
+                                // All rigidbodies for the velocity clamp — for EVERY
+                                // crate (not just pushable-classified), since a
+                                // bullet flings whichever crate it hits regardless
+                                // of classification. Skip weapons/ice/chains.
+                                Rbs = !skip ? c.GetComponentsInChildren<Rigidbody>() : null,
                                 SkipSmooth = skip,
                                 Pushable = pushable && !floating,
                                 Floating = floating

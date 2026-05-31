@@ -496,6 +496,28 @@ namespace SFBoxFix
             }
         }
 
+        // Server-authoritative crate velocity cap. SF bullets impart a big
+        // (mass-independent) impulse on hit → the server crate launches and every
+        // client (which just follows the server) sees it "salir volando". Capping
+        // the crate's velocity each physics step on the SERVER stops the launch at
+        // the source. A deliberate push stays under the cap; explosions stay near
+        // it. Runs in FixedUpdate so it catches the impulse the same step.
+        private const float CrateMaxSpeedSrv = 3.5f;
+        private static readonly List<Rigidbody> _crateRbs = new List<Rigidbody>();
+        private void FixedUpdate()
+        {
+            if (_crateRbs.Count == 0) return;
+            float maxSqr = CrateMaxSpeedSrv * CrateMaxSpeedSrv;
+            for (int i = _crateRbs.Count - 1; i >= 0; i--)
+            {
+                var rb = _crateRbs[i];
+                if ((object)rb == null) { _crateRbs.RemoveAt(i); continue; }
+                if (rb.isKinematic) continue;
+                var v = rb.velocity;
+                if (v.sqrMagnitude > maxSqr) rb.velocity = v * (CrateMaxSpeedSrv / v.magnitude);
+            }
+        }
+
         // High-friction, no-bounce material so stacked crates grip instead of
         // sliding off each other. Shared single instance (don't leak per-collider).
         private static PhysicMaterial _gripMaterial;
@@ -524,6 +546,7 @@ namespace SFBoxFix
             if ((object)nsoType == null) return;
             var all = UnityEngine.Object.FindObjectsOfType(nsoType);
             if (all == null) return;
+            _crateRbs.Clear();   // rebuild the velocity-clamp set for this scene
 
             // BOX-ROT applies to ALL maps. Unfreeze (CAJAS-3) only to Xmas-style.
             string lower = scene.name.ToLowerInvariant();
@@ -555,12 +578,20 @@ namespace SFBoxFix
                 foreach (var rb in rbs)
                 {
                     if ((object)rb == null) continue;
-                    if (rb.mass < 50f) continue;
 
                     // Skip jointed (preserves barrels on chains etc).
                     if ((object)rb.GetComponent<Joint>() != null) continue;
                     if ((object)rb.GetComponent<ConfigurableJoint>() != null) continue;
                     if ((object)rb.GetComponent<HingeJoint>() != null) continue;
+
+                    // Register EVERY crate rigidbody (incl. light sub-pieces) for
+                    // the velocity clamp — a bullet's force lands on whichever piece
+                    // it hits, and the light ones were the ones still flying.
+                    if (!_crateRbs.Contains(rb)) _crateRbs.Add(rb);
+
+                    // Weight/grip only for the main heavy bodies (mass>=50). Light
+                    // sub-pieces keep their mass but are still velocity-capped above.
+                    if (rb.mass < 50f) continue;
 
                     // BOX-ROT: freeze X+Y rotation. Server NSO snapshot only
                     // sends rotZ; without this freeze, server physics tumbles
@@ -594,11 +625,13 @@ namespace SFBoxFix
                             // PhysicMaterial per collider per round (memory leak).
                             if ((object)col != null && !col.isTrigger) col.sharedMaterial = GripMaterial;
                     rb.sleepThreshold = 0.05f;
-                    // Match client: near-vanilla so crates react to hits; light
-                    // angular drag so spin decays without feeling dead.
-                    rb.drag = 0.05f;
-                    rb.angularDrag = 0.6f;
-                    rb.maxAngularVelocity = 7f;
+                    // Heavier + more drag so a bullet impulse barely moves a crate
+                    // (the server is authoritative; clients just follow, so this is
+                    // where "al dispararles salen volando" must be fixed).
+                    rb.mass = 110f;
+                    rb.drag = 0.45f;
+                    rb.angularDrag = 1.0f;
+                    rb.maxAngularVelocity = 5f;
 
                     // NOTE: the old CAJAS-3 "unfreeze" (flip kinematic→dynamic on
                     // Xmas-style maps) is REMOVED. It fired ~2s after the scene

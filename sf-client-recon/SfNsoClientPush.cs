@@ -179,10 +179,19 @@ namespace SFClientRecon
                 // walk barely nudges them, bullets push a little) but a deliberate
                 // push or an explosion still moves a whole row, because friction is
                 // kept low (0.3 / Minimum) so a cluster doesn't fight the floor.
-                // Same logic as the responsive build, just a bit heavier.
-                rb.mass                = 35f;
+                // Player push is velocity-driven, so friction only changed how
+                // crates behave with EACH OTHER (and high friction made stacks
+                // weird). To resist the PLAYER you need real INERTIA: a high mass
+                // means the player's collision impulse moves the crate much less,
+                // so it feels heavy to shove. Friction stays low (set on the
+                // material) so crate-vs-crate stays normal and clusters still slide.
+                rb.mass                = 110f;
                 rb.sleepThreshold      = 0.05f;
-                rb.drag                = 0.25f;
+                // Drag halves the BULLET knockback (an instantaneous impulse decays
+                // fast under drag → the crate travels ~half) while leaving the
+                // PLAYER push intact (a sustained contact force keeps overcoming
+                // drag, so walking-push feels the same).
+                rb.drag                = 0.45f;
                 // Low angular drag so a crate balanced on the EDGE of another
                 // actually tips over and falls (it was "costando girar y caer" =
                 // too much angular damping kept it perched). Still bounded by the
