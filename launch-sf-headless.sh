@@ -20,7 +20,11 @@ mkdir -p "$PREFIX"
 
 export STEAM_COMPAT_CLIENT_INSTALL_PATH="$HOME/.local/share/Steam"
 export STEAM_COMPAT_DATA_PATH="$PREFIX"
-export WINEDLLOVERRIDES="winhttp=n,b"
+# winhttp=n,b loads the BepInEx doorstop. The *.drv= (empty = disabled) entries
+# turn OFF Wine's audio drivers so a HEADLESS instance is silent — it has no
+# reason to open the audio device, and on a dev laptop with speakers the menu
+# music/SFX is just noise. Wine falls back to a null audio device cleanly.
+export WINEDLLOVERRIDES="winhttp=n,b;winepulse.drv=;winealsa.drv=;wineoss.drv="
 export WINEDEBUG=-all
 export PROTON_USE_XALIA=0
 
