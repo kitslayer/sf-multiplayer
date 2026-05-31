@@ -1,35 +1,65 @@
 // Command sf-router is the single-port UDP front-door for sf-multiplayer.
 //
-// Stage 0: transparent relay to one fixed backend.
+// Routing mode (normal operation) — route by lobby code via the launch-lobby.sh
+// registry, with an HTTP stats endpoint for the lifecycle reaper:
+//
+//	sf-router -listen 0.0.0.0:1337 -registry /tmp/sf-lobbies -stats 127.0.0.1:8081
+//
+// Stage-0 transparent mode (debugging) — relay everything to one fixed backend:
 //
 //	sf-router -listen 0.0.0.0:1337 -backend 127.0.0.1:1338
 //
-// Every client datagram on :1337 is forwarded to the backend, and replies are
-// relayed back so the client only ever talks to :1337. Stage 1 will add
-// SELECT-based per-lobby routing (registry-driven).
+// In both modes a client only ever talks to :1337; the router relays replies
+// back from that port. In routing mode a client must first send a SELECT
+// control datagram naming its lobby code.
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	router "github.com/kitslayer/sf-multiplayer/sf-router"
 )
 
 func main() {
 	listen := flag.String("listen", "0.0.0.0:1337", "public UDP address clients connect to")
-	backend := flag.String("backend", "127.0.0.1:1338", "backend SF.exe UDP address (stage-0 fixed)")
+	registry := flag.String("registry", "", "lobby registry dir (e.g. /tmp/sf-lobbies); enables routing mode")
+	backend := flag.String("backend", "", "stage-0 fixed backend (e.g. 127.0.0.1:1338); used only when -registry is empty")
+	stats := flag.String("stats", "", "optional HTTP addr for GET /router/stats (e.g. 127.0.0.1:8081)")
+	regTTL := flag.Duration("registry-ttl", 2*time.Second, "lobby registry cache TTL")
 	flag.Parse()
 
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
 	log.SetPrefix("")
 
-	r, err := router.New(*listen, *backend)
+	var (
+		r   *router.Router
+		err error
+	)
+	switch {
+	case *registry != "":
+		reg := router.NewRegistry(*registry, *regTTL)
+		r, err = router.NewRouting(*listen, reg.Lookup)
+		if err == nil {
+			log.Printf("[router] routing mode: registry=%s ttl=%s", *registry, *regTTL)
+		}
+	case *backend != "":
+		r, err = router.New(*listen, *backend)
+	default:
+		log.Fatalf("[router] need -registry DIR (routing mode) or -backend HOST:PORT (stage-0)")
+	}
 	if err != nil {
 		log.Fatalf("[router] startup failed: %v", err)
+	}
+
+	if *stats != "" {
+		go serveStats(*stats, r)
 	}
 
 	// Clean shutdown on SIGINT/SIGTERM so flows + sockets close tidily.
@@ -43,5 +73,19 @@ func main() {
 
 	if err := r.Run(); err != nil {
 		log.Fatalf("[router] run error: %v", err)
+	}
+}
+
+// serveStats exposes GET /router/stats for the serve-lobbies.py reaper to find
+// empty lobbies (and for monitoring).
+func serveStats(addr string, r *router.Router) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/router/stats", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(r.Stats())
+	})
+	log.Printf("[router] stats HTTP on %s/router/stats", addr)
+	if err := http.ListenAndServe(addr, mux); err != nil {
+		log.Printf("[router] stats server error: %v", err)
 	}
 }

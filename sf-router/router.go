@@ -10,10 +10,15 @@
 // stateless raw UDP on both protocols, the router needs no connection state to
 // preserve — it is a per-client-endpoint NAT/relay.
 //
-// Stage 0 (this file): transparent relay to a single fixed backend, so the
-// relay + return-path addressing can be proven with a trivial UDP echo before
-// any client changes. Stage 1 adds SELECT-based per-lobby backend choice; the
-// seam is Router.pickBackend, currently a constant.
+// Two modes:
+//   - Stage 0 (New): transparent relay to one fixed backend — proves the relay
+//     + return-path addressing with a trivial UDP echo, no client changes.
+//   - Stage 1 (NewRouting): SELECT-gated per-lobby routing. A client sends a
+//     SELECT control datagram naming its lobby code; the router resolves it to
+//     a backend (via the lobby registry) and pins the client. Game traffic
+//     from a client that hasn't SELECTed is dropped. Bindings are per-endpoint
+//     with a per-IP fallback so the patched-DLL game socket (same IP, never
+//     SELECTs) rides the recon socket's selection.
 package router
 
 import (
@@ -43,10 +48,18 @@ const upstreamBufBytes = 2048
 type flow struct {
 	clientAddr *net.UDPAddr // the real client (public side)
 	backend    *net.UDPAddr // the backend SF.exe we forward to
+	code       string       // lobby code (routing mode; "" in stage-0)
 	upSock     *net.UDPConn // dialed socket toward the backend
 	lastSeen   time.Time    // refreshed on any traffic either direction
 	rxFromCli  uint64       // datagrams client→backend
 	rxFromSrv  uint64       // datagrams backend→client
+}
+
+// bound records which lobby (and resolved backend) a client endpoint/IP is
+// pinned to via SELECT.
+type bound struct {
+	code    string
+	backend *net.UDPAddr
 }
 
 // Router relays UDP between clients on a single public port and per-lobby
@@ -55,10 +68,17 @@ type flow struct {
 // WriteToUDP).
 type Router struct {
 	pub     *net.UDPConn // public listener (clients send here)
-	backend *net.UDPAddr // Stage 0: the single fixed backend
+	backend *net.UDPAddr // Stage 0 fixed-backend mode (nil in routing mode)
 
-	mu    sync.Mutex
-	flows map[string]*flow // keyed by clientAddr.String()
+	// Routing mode (Stage 1): resolve a lobby code → backend, and require a
+	// SELECT before forwarding a client's game traffic.
+	resolve       func(code string) (*net.UDPAddr, bool)
+	requireSelect bool
+
+	mu     sync.Mutex
+	flows  map[string]*flow  // by clientAddr.String() (per source endpoint)
+	epBind map[string]*bound // by client endpoint string (the endpoint that SELECTed)
+	ipBind map[string]*bound // by client IP (fallback for the game socket, which never SELECTs)
 
 	stop chan struct{}
 	wg   sync.WaitGroup
@@ -83,21 +103,42 @@ func New(listenAddr, backendAddr string) (*Router, error) {
 		pub:     pub,
 		backend: ba,
 		flows:   make(map[string]*flow),
+		epBind:  make(map[string]*bound),
+		ipBind:  make(map[string]*bound),
 		stop:    make(chan struct{}),
 	}, nil
 }
 
-// pickBackend chooses the backend for a client's first datagram. Stage 0
-// returns the single fixed backend. Stage 1 replaces this with SELECT-based
-// lookup against the lobby registry (and returns ok=false to drop traffic from
-// a client that has not selected a lobby yet).
-func (r *Router) pickBackend(clientAddr *net.UDPAddr, firstPacket []byte) (*net.UDPAddr, bool) {
-	return r.backend, true
+// NewRouting binds the public listener in routing mode: clients must SELECT a
+// lobby code, which resolve maps to a backend. Game traffic from a client that
+// hasn't selected is dropped.
+func NewRouting(listenAddr string, resolve func(code string) (*net.UDPAddr, bool)) (*Router, error) {
+	la, err := net.ResolveUDPAddr("udp", listenAddr)
+	if err != nil {
+		return nil, fmt.Errorf("resolve listen %q: %w", listenAddr, err)
+	}
+	pub, err := net.ListenUDP("udp", la)
+	if err != nil {
+		return nil, fmt.Errorf("listen %q: %w", listenAddr, err)
+	}
+	return &Router{
+		pub:           pub,
+		resolve:       resolve,
+		requireSelect: true,
+		flows:         make(map[string]*flow),
+		epBind:        make(map[string]*bound),
+		ipBind:        make(map[string]*bound),
+		stop:          make(chan struct{}),
+	}, nil
 }
 
 // Run services the public socket until Close. Blocks.
 func (r *Router) Run() error {
-	log.Printf("[router] listening on %s → backend %s (stage-0 fixed)", r.pub.LocalAddr(), r.backend)
+	mode := "stage-0 fixed → " + r.backend.String()
+	if r.requireSelect {
+		mode = "routing (SELECT-gated)"
+	}
+	log.Printf("[router] listening on %s [%s]", r.pub.LocalAddr(), mode)
 	r.wg.Add(1)
 	go r.reaper()
 
@@ -119,19 +160,26 @@ func (r *Router) Run() error {
 }
 
 // handleClientDatagram forwards one client→backend datagram, creating the flow
-// on first contact.
+// on first contact. In routing mode, a SELECT/LEAVE control datagram is handled
+// here and never forwarded.
 func (r *Router) handleClientDatagram(cliAddr *net.UDPAddr, data []byte) {
+	if r.requireSelect && isControl(data) {
+		r.handleControl(cliAddr, data)
+		return
+	}
+
 	key := cliAddr.String()
 
 	r.mu.Lock()
 	fl := r.flows[key]
 	if fl == nil {
-		backend, ok := r.pickBackend(cliAddr, data)
+		backend, code, ok := r.backendFor(cliAddr)
 		if !ok {
 			r.mu.Unlock()
-			return // not selected a lobby yet → drop (Stage 1)
+			// Routing mode + no SELECT yet → drop (client resends after SELECT).
+			return
 		}
-		nf, err := r.newFlow(cliAddr, backend)
+		nf, err := r.newFlow(cliAddr, backend, code)
 		if err != nil {
 			r.mu.Unlock()
 			log.Printf("[router] dial backend %s for %s failed: %v", backend, key, err)
@@ -139,7 +187,7 @@ func (r *Router) handleClientDatagram(cliAddr *net.UDPAddr, data []byte) {
 		}
 		fl = nf
 		r.flows[key] = fl
-		log.Printf("[router] new flow %s → %s", key, backend)
+		log.Printf("[router] new flow %s → %s (%s)", key, backend, code)
 	}
 	fl.lastSeen = time.Now()
 	fl.rxFromCli++
@@ -150,9 +198,96 @@ func (r *Router) handleClientDatagram(cliAddr *net.UDPAddr, data []byte) {
 	}
 }
 
+// backendFor selects the backend (and lobby code) for a client endpoint. Caller
+// holds r.mu. Stage 0: the single fixed backend (no code). Routing mode: the
+// endpoint's own SELECT binding first, then its IP-level fallback (covers the
+// patched-DLL game socket that shares the client's IP but never SELECTs).
+func (r *Router) backendFor(cliAddr *net.UDPAddr) (*net.UDPAddr, string, bool) {
+	if !r.requireSelect {
+		return r.backend, "", true
+	}
+	if b := r.epBind[cliAddr.String()]; b != nil {
+		return b.backend, b.code, true
+	}
+	if b := r.ipBind[cliAddr.IP.String()]; b != nil {
+		return b.backend, b.code, true
+	}
+	return nil, "", false
+}
+
+// handleControl processes a SELECT/LEAVE datagram and replies with an ACK.
+func (r *Router) handleControl(cliAddr *net.UDPAddr, data []byte) {
+	op, code, nonce, ok := parseControl(data)
+	if !ok {
+		return
+	}
+	switch op {
+	case opLeave:
+		r.mu.Lock()
+		r.unbindLocked(cliAddr)
+		r.mu.Unlock()
+		r.sendAck(cliAddr, nonce, ackOK)
+		log.Printf("[router] LEAVE from %s", cliAddr)
+		return
+	case opSelect:
+		backend, found := r.resolve(code)
+		if !found {
+			r.sendAck(cliAddr, nonce, ackNoSuchCode)
+			log.Printf("[router] SELECT %q from %s → no such lobby", code, cliAddr)
+			return
+		}
+		r.mu.Lock()
+		ip := cliAddr.IP.String()
+		prev := r.ipBind[ip]
+		changed := prev == nil || prev.code != code
+		r.epBind[cliAddr.String()] = &bound{code: code, backend: backend}
+		r.ipBind[ip] = &bound{code: code, backend: backend}
+		if changed {
+			// A switch (or first select): tear down this IP's existing flows so
+			// they rebuild to the new backend on the next datagram. (Same-IP
+			// two-player NAT is the documented edge case in the plan.)
+			r.teardownByIPLocked(cliAddr.IP)
+		}
+		r.mu.Unlock()
+		r.sendAck(cliAddr, nonce, ackOK)
+		log.Printf("[router] SELECT %q from %s → %s (changed=%v)", code, cliAddr, backend, changed)
+		return
+	default:
+		// Unknown op — ignore.
+		return
+	}
+}
+
+// unbindLocked removes an endpoint's bindings (and its IP fallback) and tears
+// down its flows. Caller holds r.mu.
+func (r *Router) unbindLocked(cliAddr *net.UDPAddr) {
+	delete(r.epBind, cliAddr.String())
+	delete(r.ipBind, cliAddr.IP.String())
+	r.teardownByIPLocked(cliAddr.IP)
+}
+
+// teardownByIPLocked closes + removes all flows whose client shares the given
+// IP, so subsequent datagrams rebuild against the current binding. Caller holds
+// r.mu.
+func (r *Router) teardownByIPLocked(ip net.IP) {
+	for key, fl := range r.flows {
+		if fl.clientAddr.IP.Equal(ip) {
+			_ = fl.upSock.Close()
+			delete(r.flows, key)
+		}
+	}
+}
+
+// sendAck writes a SELECT-ACK back to the client via the public socket.
+func (r *Router) sendAck(cliAddr *net.UDPAddr, nonce uint32, status byte) {
+	if _, err := r.pub.WriteToUDP(buildAck(nonce, status), cliAddr); err != nil {
+		log.Printf("[router] ack to %s failed: %v", cliAddr, err)
+	}
+}
+
 // newFlow dials a per-client socket toward the backend and starts its upstream
 // pump. Caller holds r.mu.
-func (r *Router) newFlow(cliAddr, backend *net.UDPAddr) (*flow, error) {
+func (r *Router) newFlow(cliAddr, backend *net.UDPAddr, code string) (*flow, error) {
 	up, err := net.DialUDP("udp", nil, backend)
 	if err != nil {
 		return nil, err
@@ -160,6 +295,7 @@ func (r *Router) newFlow(cliAddr, backend *net.UDPAddr) (*flow, error) {
 	fl := &flow{
 		clientAddr: cliAddr,
 		backend:    backend,
+		code:       code,
 		upSock:     up,
 		lastSeen:   time.Now(),
 	}
@@ -213,16 +349,24 @@ func (r *Router) reaper() {
 }
 
 // Stats is a point-in-time view for the HTTP /router/stats endpoint (used by
-// the lifecycle reaper to find empty lobbies).
+// the lifecycle reaper to find empty lobbies). ByCode counts flows per lobby
+// code; a registry lobby absent from ByCode (or with 0) has no live clients.
 type Stats struct {
-	Flows int `json:"flows"`
+	Flows  int            `json:"flows"`
+	ByCode map[string]int `json:"byCode"`
 }
 
-// Stats returns current flow counts.
+// Stats returns current flow counts, total and per lobby code.
 func (r *Router) Stats() Stats {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return Stats{Flows: len(r.flows)}
+	byCode := make(map[string]int)
+	for _, fl := range r.flows {
+		if fl.code != "" {
+			byCode[fl.code]++
+		}
+	}
+	return Stats{Flows: len(r.flows), ByCode: byCode}
 }
 
 // LocalAddr is the public listener's bound address (useful when listening on
