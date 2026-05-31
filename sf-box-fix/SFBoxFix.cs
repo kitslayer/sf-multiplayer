@@ -507,10 +507,10 @@ namespace SFBoxFix
                 {
                     _gripMaterial = new PhysicMaterial("CrateGrip")
                     {
-                        staticFriction = 0.9f,
-                        dynamicFriction = 0.9f,
+                        staticFriction = 0.3f,
+                        dynamicFriction = 0.25f,
                         bounciness = 0f,
-                        frictionCombine = PhysicMaterialCombine.Maximum,
+                        frictionCombine = PhysicMaterialCombine.Minimum,
                         bounceCombine = PhysicMaterialCombine.Minimum
                     };
                 }
@@ -590,9 +590,15 @@ namespace SFBoxFix
                     var cols = rb.GetComponentsInChildren<Collider>();
                     if (cols != null)
                         foreach (var col in cols)
-                            if ((object)col != null && !col.isTrigger) col.material = GripMaterial;
+                            // sharedMaterial, not material — `.material` clones a new
+                            // PhysicMaterial per collider per round (memory leak).
+                            if ((object)col != null && !col.isTrigger) col.sharedMaterial = GripMaterial;
                     rb.sleepThreshold = 0.05f;
-                    rb.angularDrag = 0.9f;
+                    // Match client: near-vanilla so crates react to hits; light
+                    // angular drag so spin decays without feeling dead.
+                    rb.drag = 0.05f;
+                    rb.angularDrag = 0.6f;
+                    rb.maxAngularVelocity = 7f;
 
                     // NOTE: the old CAJAS-3 "unfreeze" (flip kinematic→dynamic on
                     // Xmas-style maps) is REMOVED. It fired ~2s after the scene

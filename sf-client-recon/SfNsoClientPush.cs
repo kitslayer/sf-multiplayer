@@ -38,7 +38,17 @@ namespace SFClientRecon
                 if ((object)disableRb != null)
                     harmony.Patch(disableRb, prefix: new HarmonyMethod(typeof(Plugin), nameof(DisableAllRigidBodies_PushPrefix)));
 
-                Log.LogInfo("[nso-push] Pushable crates stay dynamic; ObjectUpdate relay active.");
+                // Bulletproof local physics: skip the network-driven transform lerp
+                // for pushable crates. mIsListening gets re-set to true by Init /
+                // InitNetworkIndex / UpdateHost (e.g. the pre-combat re-init ~3s in),
+                // which would otherwise restart the lerp and make crates fall "por
+                // partes" + feel rigid again. Patching LerpLocalDummy guarantees the
+                // network never moves a pushable crate regardless of mIsListening.
+                var lerpDummy = AccessTools.Method(_nsoPushType, "LerpLocalDummy");
+                if ((object)lerpDummy != null)
+                    harmony.Patch(lerpDummy, prefix: new HarmonyMethod(typeof(Plugin), nameof(LerpLocalDummy_PushPrefix)));
+
+                Log.LogInfo("[nso-push] Pushable crates = pure local physics (LerpLocalDummy skipped); relay active.");
             }
             catch (Exception e) { Log.LogWarning($"[nso-push] install failed: {e.Message}"); }
         }
@@ -56,6 +66,33 @@ namespace SFClientRecon
             if (Time.realtimeSinceStartup < _nextPushRelayAt) return;
             _nextPushRelayAt = Time.realtimeSinceStartup + PushRelayInterval;
             try { RelayPushableCrateUpdates(); } catch { }
+        }
+
+        // Cache: NSO instanceID -> is a pushable ground crate (true => skip the
+        // network lerp; local physics owns it). Computed once per object.
+        private static readonly Dictionary<int, bool> _pushableLerpCache = new Dictionary<int, bool>();
+        internal static void ClearPushableLerpCache() { _pushableLerpCache.Clear(); }
+
+        // Prefix on NetworkSyncableObject.LerpLocalDummy. Returns false to skip the
+        // original (the network-driven transform lerp) for pushable crates.
+        internal static bool LerpLocalDummy_PushPrefix(object __instance)
+        {
+            if (!_oraclePushMode) return true;
+            var comp = __instance as Component;
+            if ((object)comp == null) return true;
+            int id = comp.GetInstanceID();
+            bool pushable;
+            if (!_pushableLerpCache.TryGetValue(id, out pushable))
+            {
+                var go = comp.gameObject;
+                if ((object)_dontEnableRigType == null)
+                    _dontEnableRigType = AccessTools.TypeByName("DontEnableRig");
+                bool floating = (object)_dontEnableRigType != null
+                    && (object)go.GetComponentInChildren(_dontEnableRigType, true) != null;
+                pushable = !floating && IsPushableCrateRoot(go);
+                _pushableLerpCache[id] = pushable;
+            }
+            return !pushable;   // pushable => skip lerp; everything else => normal
         }
 
         internal static bool DisableAllRigidBodies_PushPrefix(object __instance)
@@ -86,12 +123,82 @@ namespace SFClientRecon
                         if ((object)_dontEnableRigType != null
                             && (object)rb.GetComponent(_dontEnableRigType) != null) continue;
                         rb.isKinematic = false;
+                        // Configure crate physics HERE — at map load, BEFORE the
+                        // crate settles. Doing it later (in the NSO cache rebuild,
+                        // which first fires ~3s in) re-applied constraints/collision
+                        // mode to already-settled, touching crates and jolted them:
+                        // that was the "a los 3 segundos de la nada explotan /
+                        // desaparecen / se caen" bug. We also NO LONGER freeze
+                        // position Z (locking a settled crate at a mismatched depth
+                        // dropped it through the floor / destabilised stacks).
+                        ConfigureCratePhysics(rb);
                     }
+                // CRITICAL: mIsListening = FALSE for local-physics crates.
+                // When a NetworkSyncableObject "listens", its Update/LerpLocalDummy
+                // continuously lerps the crate's transform toward the position it
+                // receives over the network (ObjectUpdate / msg 26). With it TRUE
+                // the server's 30Hz stream was dragging our crates around: they
+                // fell "por partes" (stepped lerp toward server pos) and felt
+                // rigid / un-pushable (the lerp yanked them back the instant you
+                // pushed). FALSE = the network never touches the transform, so our
+                // local Unity physics fully owns them; we still push our positions
+                // UP to the server via the relay.
                 var listenF = AccessTools.Field(__instance.GetType(), "mIsListening");
-                if ((object)listenF != null) listenF.SetValue(__instance, true);
+                if ((object)listenF != null) listenF.SetValue(__instance, false);
             }
             catch { }
             return false;
+        }
+
+        // Applied once, at map-load, to every pushable ground-crate rigidbody.
+        // Stable settling values so crates grip + stack, settle fast after a hit,
+        // and can't spin up forever. NO position-Z freeze (the game owns the
+        // play plane; forcing it here dropped crates through the floor).
+        internal static void ConfigureCratePhysics(Rigidbody rb)
+        {
+            if ((object)rb == null) return;
+            try
+            {
+                var cols = rb.GetComponentsInChildren<Collider>();
+                if (cols != null)
+                    foreach (var col in cols)
+                        // sharedMaterial (NOT material): assigning `.material`
+                        // clones a NEW PhysicMaterial per collider, and we do this
+                        // for every crate every round → a steady material leak that
+                        // made FPS degrade the longer you played. sharedMaterial
+                        // reuses the one instance.
+                        if ((object)col != null && !col.isTrigger) col.sharedMaterial = ClientGripMaterial;
+                // Near-vanilla feel: crates REACT to bullets/pushes (low drag),
+                // but a touch of angular drag so a spin decays instead of going
+                // near-forever, and a sane spin cap (7 = Unity default-ish) so a
+                // hit can't pump runaway energy. Heavy damping made them feel dead
+                // ("no reaccionan a los tiros") — reverted.
+                // Weight tuning. Vanilla crates (>=50) were immovable in a cluster;
+                // mass 8 was the opposite — they had no weight and slid all over
+                // from a walk/bump/bullet. 25 is the middle: they feel heavy (a
+                // walk barely nudges them, bullets push a little) but a deliberate
+                // push or an explosion still moves a whole row, because friction is
+                // kept low (0.3 / Minimum) so a cluster doesn't fight the floor.
+                // Same logic as the responsive build, just a bit heavier.
+                rb.mass                = 35f;
+                rb.sleepThreshold      = 0.05f;
+                rb.drag                = 0.25f;
+                // Low angular drag so a crate balanced on the EDGE of another
+                // actually tips over and falls (it was "costando girar y caer" =
+                // too much angular damping kept it perched). Still bounded by the
+                // spin cap so it can't whirl forever.
+                rb.angularDrag         = 0.15f;
+                rb.maxAngularVelocity  = 7f;
+                // Discrete = cheapest (ContinuousDynamic on every crate was a big
+                // CPU cost → FPS lag). Crates are slow enough not to tunnel.
+                rb.collisionDetectionMode = CollisionDetectionMode.Discrete;
+                rb.interpolation       = RigidbodyInterpolation.Interpolate;          // smooth render
+                // Only freeze tumbling out of the 2.5D plane (X/Y rotation). Leave
+                // position free so the game's own plane setup / floor support holds.
+                rb.constraints |= RigidbodyConstraints.FreezeRotationX
+                                | RigidbodyConstraints.FreezeRotationY;
+            }
+            catch { }
         }
 
         private void RelayPushableCrateUpdates()

@@ -240,6 +240,8 @@ namespace SFClientRecon
             InstallClientTerrainPatches();
             InstallOracleLobbyConnectPatches();
             InstallNsoClientPushPatches();
+            // InstallMapScriptLocalPatches();  // OFF — reverted to the known-good
+            // state (crates working). Map-script local-drive caused regressions.
             InstallMusicCrashGuard();
 
             Log.LogInfo($"{PluginName} {PluginVersion}: starting v26 snapshot listener on UDP :{_listenPort}. vSync off, FPS uncapped.");
@@ -721,10 +723,19 @@ namespace SFClientRecon
                 {
                     foreach (var kv in _nsoTargets)
                     {
-                        if (!_nsoCache.TryGetValue(kv.Key, out var entry) || entry == null || (object)entry.Comp == null) continue;
+                        // Unity-aware null checks (NO (object) cast): a crate/NSO
+                        // destroyed on a round change leaves a stale ref in the
+                        // cache. `(object)comp == null` is FALSE for a destroyed
+                        // Unity object, so the old guard let it through and every
+                        // subsequent member access threw — flooding [smooth] and
+                        // aborting ALL smoothing each frame ("anda raro"). The
+                        // Unity == overload detects destroyed objects.
+                        if (!_nsoCache.TryGetValue(kv.Key, out var entry) || entry == null) continue;
+                        if (entry.Comp == null) continue;
                         if (entry.SkipSmooth) continue;   // weapon / ice / chain
                         var comp = entry.Comp;
                         var rb = entry.Rb;
+                        if (rb == null && comp == null) continue;
                         var pose = kv.Value;
                         if (pose == null || !pose.HasRender) continue;
 
@@ -805,14 +816,24 @@ namespace SFClientRecon
                 {
                     foreach (var kv in _mapSyncTargets)
                     {
-                        if (!_mapSyncCache.TryGetValue(kv.Key, out var comp) || (object)comp == null) continue;
+                        // Unity-aware null check (destroyed map objects between rounds).
+                        if (!_mapSyncCache.TryGetValue(kv.Key, out var comp) || comp == null) continue;
                         var rb = comp.GetComponent<Rigidbody>();
-                        if ((object)rb != null) rb.position = Vector3.Lerp(rb.position, kv.Value, nsoT);
+                        if (rb != null) rb.position = Vector3.Lerp(rb.position, kv.Value, nsoT);
                         else comp.transform.position = Vector3.Lerp(comp.transform.position, kv.Value, nsoT);
                     }
                 }
             }
-            catch (Exception ex) { Log.LogWarning($"[P6.11.2 smooth] {ex.Message}"); }
+            catch (Exception ex)
+            {
+                // Throttle: a per-frame throw here used to flood the log (which
+                // itself tanks FPS) and gave no type. Log type+message once/sec.
+                if (Time.realtimeSinceStartup - _lastSmoothErrAt > 1f)
+                {
+                    _lastSmoothErrAt = Time.realtimeSinceStartup;
+                    Log.LogWarning($"[P6.11.2 smooth] {ex.GetType().Name}: {ex.Message}");
+                }
+            }
         }
 
         // Phase 6.14 — apply server-authoritative NSO positions (boxes,
@@ -834,6 +855,7 @@ namespace SFClientRecon
         // continuous collision, constraints) — so the 2s cache rebuild doesn't
         // re-touch / wake settled crates.
         private readonly HashSet<int> _crateConfigured = new HashSet<int>();
+        private float _lastSmoothErrAt = -1f;
 
         // High-friction, no-bounce material so locally-simulated crates grip and
         // stack instead of sliding off each other. Single shared instance.
@@ -844,12 +866,17 @@ namespace SFClientRecon
             {
                 if ((object)_clientGripMaterial == null)
                 {
+                    // Low friction + Minimum combine: a crate (even with neighbours)
+                    // slides easily when pushed/shot/blasted — pushing a row no
+                    // longer has to fight the floor friction of every crate. A
+                    // resting flat stack still holds (no lateral force at rest), so
+                    // we don't reintroduce the "slide apart" problem.
                     _clientGripMaterial = new PhysicMaterial("CrateGripClient")
                     {
-                        staticFriction = 0.9f,
-                        dynamicFriction = 0.9f,
+                        staticFriction = 0.4f,
+                        dynamicFriction = 0.4f,
                         bounciness = 0f,
-                        frictionCombine = PhysicMaterialCombine.Maximum,
+                        frictionCombine = PhysicMaterialCombine.Average,
                         bounceCombine = PhysicMaterialCombine.Minimum
                     };
                 }
@@ -905,41 +932,13 @@ namespace SFClientRecon
                                 _dontEnableRigType = AccessTools.TypeByName("DontEnableRig");
                             bool floating = (object)_dontEnableRigType != null
                                 && (object)c.GetComponentInChildren(_dontEnableRigType, true) != null;
-                            // BOX-GRIP (client): real (non-floating) local-physics
-                            // crates need high friction or a stack slides apart.
-                            // Configure each crate's physics ONCE. The NSO cache
-                            // rebuilds every ~2s; re-applying material/constraints
-                            // (and worse, re-touching the rigidbody) on a sleeping
-                            // crate every rebuild can wake it and cause the "se
-                            // mueven solos" micro-jitter. Guard with a per-instance
-                            // configured set.
-                            if (pushable && !floating && (object)rbc != null
-                                && _crateConfigured.Add(rbc.GetInstanceID()))
-                            {
-                                var cols = c.GetComponentsInChildren<Collider>();
-                                if (cols != null)
-                                    foreach (var col in cols)
-                                        if ((object)col != null && !col.isTrigger) col.material = ClientGripMaterial;
-                                {
-                                    rbc.sleepThreshold = 0.05f;
-                                    rbc.angularDrag = 0.9f;
-                                    // Continuous collision so a fast push can't
-                                    // tunnel a crate through a neighbour or the
-                                    // floor ("se traspasan entre ellas").
-                                    rbc.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
-                                    // Interpolate so local-physics crates render
-                                    // smoothly between FixedUpdate steps.
-                                    rbc.interpolation = RigidbodyInterpolation.Interpolate;
-                                    // Freeze Z position + X/Y rotation: SF is a 2.5D
-                                    // plane. Without this, contact impulses can shove
-                                    // a crate in depth (Z) so two crates end up on
-                                    // different planes → they visually overlap / pass
-                                    // through each other from the camera's view.
-                                    rbc.constraints |= RigidbodyConstraints.FreezePositionZ
-                                                     | RigidbodyConstraints.FreezeRotationX
-                                                     | RigidbodyConstraints.FreezeRotationY;
-                                }
-                            }
+                            // NOTE: crate physics (grip, drag, spin cap, continuous
+                            // collision) is configured EARLY at map-load in
+                            // DisableAllRigidBodies_PushPrefix → ConfigureCratePhysics,
+                            // NOT here. Doing it at cache-build time (first fires
+                            // ~3s in) re-touched already-settled crates and jolted
+                            // them ("a los 3 segundos explotan/desaparecen"). The
+                            // cache build now only records flags/refs.
                             _nsoCache[id] = new NsoCacheEntry
                             {
                                 Comp = c,
@@ -1116,54 +1115,16 @@ namespace SFClientRecon
         private System.Reflection.FieldInfo _mapSyncStartPosField;
         private void ApplyMapSyncSnapshot(List<MapSyncSnapEntry> snap, uint tick)
         {
-            if (snap.Count == 0) return;
-            try
-            {
-                if ((object)_mapSyncBaseType == null)
-                {
-                    _mapSyncBaseType = AccessTools.TypeByName("MapInfoSyncableBase");
-                    if ((object)_mapSyncBaseType == null) return;
-                    _mapSyncStartPosField = AccessTools.Field(_mapSyncBaseType, "m_StartPos");
-                }
-                if ((object)_mapSyncStartPosField == null) return;
-                // Rebuild cache every 60 ticks (~2s at 30Hz) or on first run.
-                if (_mapSyncCache.Count == 0 || _mapSyncCacheRebuildAt <= 0)
-                {
-                    _mapSyncCache.Clear();
-                    var all = UnityEngine.Object.FindObjectsOfType(_mapSyncBaseType);
-                    if (all != null)
-                    {
-                        foreach (var obj in all)
-                        {
-                            var c = obj as Component;
-                            if ((object)c == null) continue;
-                            Vector2 key = QuantizeMapSyncKeyClient((Vector2)_mapSyncStartPosField.GetValue(obj));
-                            _mapSyncCache[key] = c;
-                            // First-sight: force the rigidbody kinematic so local
-                            // physics (AddForce in MoveAlongPathUsingForce; spring
-                            // in PillarHandler) doesn't fight the snapshot stream.
-                            // GhostPlatform doesn't have a Rigidbody so this is a
-                            // no-op for it.
-                            var rb = c.GetComponent<Rigidbody>();
-                            if ((object)rb != null && !rb.isKinematic) rb.isKinematic = true;
-                        }
-                    }
-                    _mapSyncCacheRebuildAt = 60;
-                }
-                _mapSyncCacheRebuildAt--;
-
-                int applied = 0;
-                foreach (var e in snap)
-                {
-                    Vector2 key = QuantizeMapSyncKeyClient(new Vector2(e.StartX, e.StartY));
-                    if (!_mapSyncCache.ContainsKey(key)) continue;
-                    _mapSyncTargets[key] = new Vector3(e.X, e.Y, e.Z);
-                    applied++;
-                }
-                if (_snapsApplied == 1 || _snapsApplied % 90 == 0)
-                    Log.LogInfo($"[P0-14] MapSync snap tick={tick} targeted {applied}/{snap.Count} (cache={_mapSyncCache.Count})");
-            }
-            catch (Exception ex) { Log.LogWarning($"[P0-14 MapSync apply] {ex.Message}"); }
+            // DISABLED (P0-14 client position sync). Moving platforms / pillars /
+            // animated map pieces run their OWN deterministic local scripts
+            // (MoveAlongPathUsingForce, PillarHandler spring, Animator). We used to
+            // force them kinematic and lerp their position from the 30Hz server
+            // stream, which KILLED the local script and replaced smooth motion with
+            // a laggy/jittery network follow → "los mapas con algo que se mueve se
+            // bugean / se mueven raro al empezar". Letting the local script run
+            // (vanilla behaviour) is correct and smooth. mapState/event sync
+            // (visibility, on/off) still flows via ApplyMapStateSnapshot.
+            return;
         }
 
         // Phase 6.12 — pack and send a PktPlayerInput packet to the oracle.

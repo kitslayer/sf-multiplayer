@@ -169,6 +169,13 @@ namespace SFClientRecon
             Instance._mapSyncTargets.Clear();
             Instance._mapSyncCacheRebuildAt = 0;
             Instance._mapStateApplied = 0;
+            // Drop stale NSO refs (crates from the previous round are destroyed on
+            // map change). Keeping them risked per-frame throws on destroyed objects.
+            Instance._nsoCache.Clear();
+            Instance._nsoTargets.Clear();
+            Instance._nsoCacheRebuildAt = 0;
+            Instance._crateConfigured.Clear();
+            ClearPushableLerpCache();
             _countDownDeferred = false;
             Instance.StartCoroutine(Instance.RebuildMapCachesAfterLoadCoroutine());
             try { Instance.StartCoroutine(Instance.ForceMapLoadWatchdog(data)); }
@@ -510,7 +517,11 @@ namespace SFClientRecon
                 foreach (var e in snap)
                 {
                     Vector2 key = QuantizeMapSyncKeyClient(new Vector2(e.StartX, e.StartY));
-                    if (!_mapSyncCache.TryGetValue(key, out var comp) || (object)comp == null) continue;
+                    if (!_mapSyncCache.TryGetValue(key, out var comp) || comp == null) continue;
+                    // Self-driven gimmicks (moving platforms / ghost blocks) now run
+                    // their own local script — applying the server's SetData would
+                    // fight it (rewind target / double-toggle). Skip them.
+                    if (IsSelfDrivenMapObject(comp)) continue;
                     _mapSetDataMethod.Invoke(comp, new object[] { e.Data });
                     applied++;
                 }
