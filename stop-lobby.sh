@@ -43,5 +43,13 @@ if [ -n "$BRIDGE" ]; then
   pkill -9 -f "StickFight.exe.*-logFile.*sf-oracle-unity-${BRIDGE}\.log" 2>/dev/null || true
 fi
 
-rm "$CONF"
+# Reclaim the per-lobby wineprefix. On a dev laptop these live in /tmp, which is
+# tmpfs (RAM-backed) — leaving them after a stop LEAKS RAM (~300MB each). On a
+# server they're on disk under $SF_ORACLE_ROOT. Removing means a same-bridge
+# relaunch is cold again (cheap). Covers both launcher layouts.
+if [ -n "$BRIDGE" ]; then
+  rm -rf "/tmp/sf-oracle-prefix-${BRIDGE}" "${SF_ORACLE_ROOT:-$HOME/sf-oracle}/prefix-${BRIDGE}" 2>/dev/null || true
+fi
+
+rm -f "$CONF"
 echo "Lobby '$CODE' stopped."
