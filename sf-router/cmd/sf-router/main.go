@@ -16,7 +16,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/StickFightDev/StickFightDedicatedSrv/router"
+	router "github.com/kitslayer/sf-multiplayer/sf-router"
 )
 
 func main() {
