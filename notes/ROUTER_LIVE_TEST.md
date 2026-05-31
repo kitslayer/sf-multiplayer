@@ -108,10 +108,10 @@ Two-machine test (validates isolation — do when a second box is available):
   server (stop router, run oracle on 1337) is enough to return to normal.
 
 ## Status checklist
-- [x] Go router (relay, SELECT routing, registry, reaper) — unit-tested, reviewed, hardened
+- [x] Go router (relay, SELECT routing, registry, reaper) — 16 unit tests (-race), reviewed + hardened (3 findings fixed)
 - [x] serve-lobbies.py control plane (create/stop/reaper) — smoke-tested (auth/GET); token'd create needs live
-- [x] Client SELECT + RequestJoinLobby — compiles; C# review in progress
-- [x] Browser JOIN/JOIN-CODE/CREATE — compiles
-- [ ] Live 2-client test (this doc) — NOT YET RUN
+- [x] Client SELECT + RequestJoinLobby — compiles; C# reviewed (critical Mono2Polyfills fix applied to server-browser; SELECT-ACK feedback added)
+- [x] Browser JOIN/JOIN-CODE/CREATE — compiles; Mono2Polyfills.cs added (was missing → would have TypeLoad-failed the whole plugin)
+- [ ] Live 2-client test (this doc) — NOT YET RUN (needs the game; user-driven)
 - [ ] Installer: bake router endpoint + SF_LOBBY_ENDPOINT + SF_CONTROL_TOKEN (ops step, do when deploying publicly)
 - [ ] (deferred) patched-DLL game-socket SELECT → removes the same-IP NAT limit
