@@ -94,7 +94,10 @@ namespace SFServerBrowser
 
             _lobbyEndpoint = Environment.GetEnvironmentVariable("SF_LOBBY_ENDPOINT");
             if (string.IsNullOrEmpty(_lobbyEndpoint))
-                _lobbyEndpoint = "http://69.53.117.43:8080/lobbies";
+            {
+                _lobbyEndpoint = null;  // no baked-in IP — fail closed with a clear message
+                Log.LogWarning($"{PluginName}: SF_LOBBY_ENDPOINT not set — server browser disabled. Set it to e.g. http://HOST:8080/lobbies.");
+            }
 
             Log.LogInfo($"{PluginName} v{PluginVersion} starting. Endpoint: {_lobbyEndpoint}");
 
@@ -372,8 +375,34 @@ namespace SFServerBrowser
             StartCoroutine(FetchServersCoroutine());
         }
 
+        // Host for manual-launch fallback args — derived from the configured
+        // endpoint, never a baked-in IP; "SERVER_IP" placeholder if unknown.
+        private string EndpointHost()
+        {
+            if (string.IsNullOrEmpty(_lobbyEndpoint)) return "SERVER_IP";
+            try { return new Uri(_lobbyEndpoint).Host; } catch { return "SERVER_IP"; }
+        }
+
+        // WebClient with a finite timeout (WebClient has none) — without it an
+        // unreachable server blocks the worker thread for ~100s.
+        private sealed class TimedWebClient : WebClient
+        {
+            protected override WebRequest GetWebRequest(Uri address)
+            {
+                var req = base.GetWebRequest(address);
+                if (req != null) req.Timeout = 6000;
+                return req;
+            }
+        }
+
         private IEnumerator FetchServersCoroutine()
         {
+            if (string.IsNullOrEmpty(_lobbyEndpoint))
+            {
+                _statusText = "Set SF_LOBBY_ENDPOINT (e.g. http://HOST:8080/lobbies) to use the browser.";
+                _servers.Clear();
+                yield break;
+            }
             string body = null;
             string err = null;
             // Use System.Net.WebRequest synchronously on a thread to avoid Unity coroutine complexity
@@ -382,8 +411,7 @@ namespace SFServerBrowser
             {
                 try
                 {
-                    System.Net.ServicePointManager.ServerCertificateValidationCallback = (a, b, c, d) => true;
-                    using (var wc = new WebClient())
+                    using (var wc = new TimedWebClient())
                     {
                         wc.Headers.Add("User-Agent", "SFServerBrowser/" + PluginVersion);
                         body = wc.DownloadString(_lobbyEndpoint);
@@ -428,7 +456,7 @@ namespace SFServerBrowser
                         string obj = arr.Substring(start, i - start + 1);
                         var e = new ServerEntry();
                         e.Code = ExtractString(obj, "code") ?? "?";
-                        e.Host = ExtractString(obj, "host") ?? "69.53.117.43";
+                        e.Host = ExtractString(obj, "host") ?? "";
                         e.Port = ExtractInt(obj, "port", 1337);
                         e.Players = ExtractInt(obj, "players", 0);
                         e.Capacity = ExtractInt(obj, "capacity", 4);
@@ -500,7 +528,7 @@ namespace SFServerBrowser
                 return;
             }
             // Fallback: SFClientRecon absent — copy launch args for a manual restart.
-            string host = "69.53.117.43"; int port = 1337;
+            string host = EndpointHost(); int port = 1337;
             for (int i = 0; i < _servers.Count; i++)
             {
                 if (_servers[i].Code == code)
@@ -548,6 +576,11 @@ namespace SFServerBrowser
 
         private IEnumerator CreateLobbyCoroutine()
         {
+            if (string.IsNullOrEmpty(_lobbyEndpoint))
+            {
+                _statusText = "Set SF_LOBBY_ENDPOINT to create lobbies.";
+                yield break;
+            }
             string body = null, err = null;
             // The create endpoint is POST to the SAME URL as the lobby list
             // (serve-lobbies.py: GET /lobbies lists, POST /lobbies creates).
@@ -557,8 +590,7 @@ namespace SFServerBrowser
             {
                 try
                 {
-                    System.Net.ServicePointManager.ServerCertificateValidationCallback = (a, b, c, d) => true;
-                    using (var wc = new WebClient())
+                    using (var wc = new TimedWebClient())
                     {
                         wc.Headers.Add("User-Agent", "SFServerBrowser/" + PluginVersion);
                         if (token.Length > 0) wc.Headers.Add("X-SF-Token", token);

@@ -30,9 +30,11 @@ No external deps; only stdlib.
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
 import os
 import random
+import re
 import signal
 import subprocess
 import sys
@@ -55,6 +57,10 @@ CONTROL_TOKEN = os.environ.get("SF_CONTROL_TOKEN", "")
 MAX_LOBBIES = int(os.environ.get("SF_MAX_LOBBIES", "10"))   # matches launch-lobby.sh
 CREATE_MIN_INTERVAL = float(os.environ.get("SF_CREATE_MIN_INTERVAL", "10"))  # sec/IP between creates
 LAUNCH_TIMEOUT = float(os.environ.get("SF_LAUNCH_TIMEOUT", "45"))  # launch-lobby.sh waits ≤30s for bind
+
+# Lobby codes are A-Z0-9 (router maxCodeLen=16). Validate any client-supplied
+# code before it reaches the shell or a registry file path.
+LOBBY_CODE_RE = re.compile(r"^[A-Z0-9]{1,16}$")
 
 # --- Reaper config -----------------------------------------------------------
 ROUTER_STATS_URL = os.environ.get("SF_ROUTER_STATS", "http://127.0.0.1:8081/router/stats")
@@ -152,23 +158,29 @@ fetch("/lobbies").then(r=>r.json()).then(d=>{
   // localhost, leave as 127.0.0.1 (the user will edit); otherwise use the
   // page hostname.
   const host = location.hostname || "127.0.0.1";
+  // Escape registry values before injecting into the DOM (defense in depth —
+  // codes are server-generated A-Z0-9, but never trust .conf data); attach the
+  // copy handler via a listener instead of an inline onclick (no string injection).
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const cards = d.lobbies.map(l =>{
-    const code = l.code || "?";
-    const port = l.port || "?";
-    const cmd = `-address ${host} -port ${port}`;
-    const startedShort = (l.started||"").slice(11,19);
+    const code = esc(l.code || "?");
+    const port = esc(l.port || "?");
+    const pid = esc(l.pid || "?");
+    const cmd = `-address ${esc(host)} -port ${port}`;
+    const startedShort = esc((l.started||"").slice(11,19));
     return `<div class="lobby">
       <h2>${code}</h2>
-      <div class="meta"><span>port ${port}</span><span>pid ${l.pid||"?"}</span>${startedShort?`<span>since ${startedShort}</span>`:""}</div>
+      <div class="meta"><span>port ${port}</span><span>pid ${pid}</span>${startedShort?`<span>since ${startedShort}</span>`:""}</div>
       <div class="connect">
         <div class="connect-string">
           <code>${cmd}</code>
-          <button onclick="copyToClipboard('${cmd}', this)">copy</button>
+          <button class="copybtn" data-cmd="${cmd}">copy</button>
         </div>
       </div>
     </div>`;
   }).join("");
   grid.innerHTML = cards;
+  grid.querySelectorAll(".copybtn").forEach(b => b.addEventListener("click", () => copyToClipboard(b.getAttribute("data-cmd"), b)));
 });
 </script></body></html>
 """
@@ -212,17 +224,21 @@ class LobbyHandler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": "not found"})
 
     def _client_ip(self) -> str:
-        # Behind no proxy on the home box; X-Forwarded-For honored only if set.
-        xff = self.headers.get("X-Forwarded-For", "")
-        if xff:
-            return xff.split(",")[0].strip()
+        # Do NOT trust X-Forwarded-For by default: a client can spoof it to evade
+        # the per-IP rate limit. Only honor it behind a trusted reverse proxy
+        # (set SF_TRUST_XFF=1 in that deployment).
+        if os.environ.get("SF_TRUST_XFF") == "1":
+            xff = self.headers.get("X-Forwarded-For", "")
+            if xff:
+                return xff.split(",")[0].strip()
         return self.client_address[0]
 
     def _authed(self) -> bool:
         # Fail closed: no server token configured → creation disabled.
         if not CONTROL_TOKEN:
             return False
-        return self.headers.get("X-SF-Token", "") == CONTROL_TOKEN
+        # Constant-time compare (avoid a token-timing side channel).
+        return hmac.compare_digest(self.headers.get("X-SF-Token", ""), CONTROL_TOKEN)
 
     def _handle_create(self) -> None:
         if not self._authed():
@@ -253,14 +269,15 @@ class LobbyHandler(BaseHTTPRequestHandler):
             self._send_json(403, {"error": "forbidden"})
             return
         try:
-            length = int(self.headers.get("Content-Length", "0"))
+            # Cap the body read so a huge Content-Length can't stall/OOM a thread.
+            length = min(int(self.headers.get("Content-Length", "0")), 4096)
             body = json.loads(self.rfile.read(length) or b"{}")
             code = str(body.get("code", "")).strip().upper()
         except (ValueError, json.JSONDecodeError):
             self._send_json(400, {"error": "bad json"})
             return
-        if not code:
-            self._send_json(400, {"error": "missing code"})
+        if not LOBBY_CODE_RE.match(code):
+            self._send_json(400, {"error": "missing or invalid code"})
             return
         ok = stop_lobby(code)
         self._send_json(200 if ok else 500, {"code": code, "stopped": ok})
@@ -272,7 +289,6 @@ class LobbyHandler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(body)
 

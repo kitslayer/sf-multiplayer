@@ -1,6 +1,6 @@
 # ===================================================================
 #  ALKA-KITSLAYER  -  Stick Fight: The Game  -  Oracle 1-Click Installer
-#  Team: kitslayer + AlkaDev  |  Discord: kitslayer, Tyralka0660
+#  Team: kitslayer + AlkaDev  |  GitHub: kitslayer, AlkaPrime12
 #
 #  Qué hace (sin romper nada de tu carpeta):
 #   1. Encuentra Stick Fight en cualquier biblioteca de Steam.
@@ -37,7 +37,7 @@ function Show-AlkaKitslayerBanner {
     Write-Host ''
     Write-Host '        A L K A - K I T S L A Y E R   x   Stick Fight Oracle' -ForegroundColor $y
     Write-Host '        ------------------------------------------------------' -ForegroundColor DarkGray
-    Write-Host '        Team: kitslayer + AlkaDev    Discord: kitslayer / Tyralka0660' -ForegroundColor DarkGray
+    Write-Host '        Team: kitslayer + AlkaDev    GitHub: kitslayer / AlkaPrime12' -ForegroundColor DarkGray
     Write-Host ''
     Start-Sleep -Milliseconds 600
 }
@@ -175,6 +175,10 @@ $batPath = Join-Path $desktop 'Jugar-StickFight-ALKA.bat'
 @"
 @echo off
 title ALKA-KITSLAYER  Stick Fight Oracle
+rem Menu SERVERS en el juego (listar + unirse a lobbies de este servidor):
+set "SF_LOBBY_ENDPOINT=http://${ServerIp}:8080/lobbies"
+rem Para CREAR lobbies desde el juego necesitas el token del servidor:
+rem   set "SF_CONTROL_TOKEN=pide-el-token-al-operador"
 start "" "$Sf\StickFight.exe" $launchArgs
 "@ | Set-Content -Path $batPath -Encoding ASCII
 Ok ("Acceso directo: {0}" -f $batPath)
