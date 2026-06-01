@@ -634,111 +634,10 @@ namespace SFClientRecon
         private static Type _clientDpType;
         private static System.Reflection.FieldInfo _clientDpSimpleField;
         private static System.Reflection.FieldInfo _clientDpEventField;
-        // ====================================================================
-        // PUSHABLE CRATE RECONCILER (v2 — force/velocity based)
-        // --------------------------------------------------------------------
-        // The previous reconciler did `rb.position = Lerp(rb.position, server)`
-        // on a DYNAMIC rigidbody every frame. Teleporting a dynamic body that is
-        // touching another collider forces interpenetration; Unity's solver then
-        // ejects both bodies at high speed on the next step → the crates
-        // "explode / salen volando" the instant they touch. It also fought the
-        // local push simulation, so behaviour differed per map.
-        //
-        // v2 keeps the nice local-physics feel (crates are dynamic, the player
-        // pushes them directly, they fall + stack under real gravity + friction)
-        // but reconciles toward the authoritative server position using ONLY
-        // collision-respecting means:
-        //   * small error  -> nothing (deadzone); local physics + grip hold it.
-        //   * medium error -> a clamped, critically-damped corrective velocity
-        //                     (the solver still resolves contacts, so a crate
-        //                     pressed against another just leans on it — never
-        //                     tunnels/explodes).
-        //   * huge error   -> a single clean hard reset (respawn / round change /
-        //                     teleport), with momentum zeroed so it can't fling.
-        // Correction strength is scaled DOWN while the crate is essentially at
-        // rest (a settled stack) so towers stay glued, and UP while it is moving
-        // fast (catch a diverging crate before it drifts far). Rotation is only
-        // gently nudged in Z (X/Y are frozen server-side via BOX-ROT).
-        // ====================================================================
-        private const float CrateDeadzone      = 0.06f;  // m: below this, leave it to local physics
-        private const float CrateHardSnapDist  = 2.5f;   // m: above this, hard reset (rare)
-        private const float CrateMaxCorrSpeed  = 6.0f;   // m/s cap on corrective velocity (anti-fling)
-        private const float CrateStiffness     = 9.0f;   // 1/s spring gain toward server pos
-        private const float CrateRestSpeed     = 0.35f;  // m/s below which a crate counts as "resting"
-        private const float CrateRestCorrScale = 0.25f;  // correction multiplier while resting (hold stacks)
-        private const float CrateRotCorrRate   = 6.0f;   // 1/s Z-rotation chase rate
-
-        private void ReconcilePushableCrate(Rigidbody rb, PoseTarget pose)
-        {
-            // Guard: should be dynamic. (Floating/DontEnableRig crates never get
-            // here — they are not flagged Pushable.)
-            if (rb.isKinematic) rb.isKinematic = false;
-
-            float dt = Time.deltaTime;
-            if (dt <= 0f) return;
-
-            Vector3 cur = rb.position;
-            Vector3 err = pose.Pos - cur;
-            float errMag = err.magnitude;
-
-            // --- Huge divergence: clean hard reset (respawn / round change) ---
-            if (errMag > CrateHardSnapDist)
-            {
-                rb.velocity = Vector3.zero;
-                rb.angularVelocity = Vector3.zero;
-                rb.position = pose.Pos;
-                rb.rotation = pose.Rot;
-                return;
-            }
-
-            // --- Inside deadzone: trust local physics + grip; do nothing. ---
-            // This is what lets a settled stack stay perfectly still instead of
-            // being nudged every frame.
-            if (errMag > CrateDeadzone)
-            {
-                // Critically-damped spring expressed as a target velocity. We
-                // push the crate's velocity toward (error * stiffness), clamped,
-                // so the physics solver still owns collision resolution.
-                Vector3 desiredVel = err * CrateStiffness;
-                float dvMag = desiredVel.magnitude;
-                if (dvMag > CrateMaxCorrSpeed)
-                    desiredVel *= CrateMaxCorrSpeed / dvMag;
-
-                // Scale correction down when the crate is basically at rest so a
-                // stack doesn't get jiggled by sub-deadzone server noise, and up
-                // (full) when it is moving / diverging.
-                float speed = rb.velocity.magnitude;
-                float scale = speed < CrateRestSpeed ? CrateRestCorrScale : 1f;
-
-                // Blend current velocity toward the corrective velocity. Using a
-                // velocity change (not a teleport) means a crate jammed against a
-                // neighbour simply presses on it — the solver prevents overlap, so
-                // there is no ejection/explosion.
-                float blend = 1f - Mathf.Exp(-CrateStiffness * scale * dt);
-                Vector3 newVel = Vector3.Lerp(rb.velocity, desiredVel, blend);
-
-                // Preserve gravity's downward pull when the crate is airborne and
-                // the server isn't asking it to go UP (prevents the correction
-                // from cancelling a legitimate fall into a floaty hover).
-                if (err.y < 0.1f && newVel.y > rb.velocity.y)
-                    newVel.y = rb.velocity.y;
-
-                rb.velocity = newVel;
-            }
-
-            // --- Rotation: gentle Z-only chase (X/Y frozen by BOX-ROT). Done via
-            // MoveRotation-equivalent slerp; rotation correction is far less
-            // explosive than positional teleport and keeps crates visually
-            // aligned with the server. Skipped while spinning fast (a real
-            // tumble in progress). ---
-            if (rb.angularVelocity.sqrMagnitude < 9f)
-            {
-                Quaternion target = pose.Rot;
-                float rotBlend = 1f - Mathf.Exp(-CrateRotCorrRate * dt);
-                Quaternion next = Quaternion.Slerp(rb.rotation, target, rotBlend);
-                rb.MoveRotation(next);
-            }
-        }
+        // (Removed the v2 ReconcilePushableCrate spring reconciler — dead code.
+        // Pushable crates are now pure local physics with no per-frame server
+        // correction; only the velocity clamp below + the hard-snap in
+        // ApplyNsoSnapshot touch them.)
 
         // Cap how fast a pushable crate can move. SF bullets impart velocity in a
         // mass-INDEPENDENT way (direct velocity change), so a heavy crate still got
@@ -746,46 +645,26 @@ namespace SFClientRecon
         // AddExplosionForce) behaved fine. Clamping linear velocity per frame stops
         // the fling without touching the player push (which never reaches the cap)
         // or explosions (good distances stay under it).
-        private const float CrateMaxSpeed = 4.0f;   // m/s
-        private float _crateDiagAt = -1f;
+        private const float CrateMaxSpeed = 4.0f;   // m/s — hard cap so a bullet can't fling a crate
         private void ClampCrateVelocities()
         {
             if (_nsoCache.Count == 0) return;
             float maxSqr = CrateMaxSpeed * CrateMaxSpeed;
-            int crates = 0, dyn = 0, clamped = 0; float maxSeen = 0f;
             foreach (var kv in _nsoCache)
             {
                 var entry = kv.Value;
                 // Clamp EVERY crate (not just pushable-classified) — a bullet
                 // flings whichever crate it hits. Skip weapons/ice/chains.
                 if (entry == null || entry.SkipSmooth) continue;
-                crates++;
                 var rbs = entry.Rbs;
                 if (rbs == null) continue;
                 for (int i = 0; i < rbs.Length; i++)
                 {
                     var rb = rbs[i];
-                    if (rb == null) continue;
-                    if (!rb.isKinematic) dyn++;
-                    if (rb.isKinematic) continue;
+                    if (rb == null || rb.isKinematic) continue;
                     var v = rb.velocity;
-                    float m = v.magnitude;
-                    if (m > maxSeen) maxSeen = m;
-                    if (v.sqrMagnitude > maxSqr) { rb.velocity = v * (CrateMaxSpeed / m); clamped++; }
+                    if (v.sqrMagnitude > maxSqr) rb.velocity = v * (CrateMaxSpeed / v.magnitude);
                 }
-            }
-            int pushable = crates;
-            // DIAG: confirms whether crates are local-physics (dynamic) and being
-            // clamped, or server-driven (kinematic → physics changes do nothing).
-            bool fling = maxSeen > 6.5f;
-            if ((fling || Time.realtimeSinceStartup - _crateDiagAt > 3f)
-                && Time.realtimeSinceStartup - _crateDiagAt > 0.5f)
-            {
-                _crateDiagAt = Time.realtimeSinceStartup;
-                int total = _nsoCache.Count, skip = 0, floating = 0, hasRb = 0;
-                foreach (var kv2 in _nsoCache) { var e2 = kv2.Value; if (e2 == null) continue; if (e2.SkipSmooth) skip++; if (e2.Floating) floating++; if ((object)e2.Rb != null) hasRb++; }
-                bool dpType = (object)_clientDpType != null, dpSimple = (object)_clientDpSimpleField != null, dpEvent = (object)_clientDpEventField != null;
-                Log.LogInfo($"[crate-diag] cacheTotal={total} pushable={pushable} skip={skip} floating={floating} hasRb={hasRb} | dpType={dpType} dpSimpleF={dpSimple} dpEventF={dpEvent} | dynRBs={dyn} clamped={clamped} maxVel={maxSeen:0.0} fling={fling}");
             }
         }
 
@@ -1209,10 +1088,18 @@ namespace SFClientRecon
         private static bool IsPushableCrateNsoClient(GameObject root)
         {
             if ((object)root == null) return false;
-            if (IsChainStyleDestructibleRoot(root) || IsWeaponNsoRootClient(root)) return false;
-            if ((object)_clientDpType == null) return false;
+            // Exclude the special destructibles handled elsewhere.
+            if (IsChainStyleDestructibleRoot(root) || IsWeaponNsoRootClient(root) || IsIceOnlyDestructibleRoot(root)) return false;
+            // MUST match IsPushableCrateRoot (used by DisableAllRigidBodies prefix)
+            // or the two disagree: the crate gets made dynamic (local physics) but
+            // cached as non-pushable → it falls into the kinematic-follow path that
+            // FIGHTS the local sim, and the velocity clamp skips it → bullet fling.
+            // So: an NSO with NO DestructiblePiece (plain rigidbody crate) IS
+            // pushable, and one WITH destructibles is pushable when any piece is
+            // simpleDestruction && !eventDestruction.
+            if ((object)_clientDpType == null) return true;
             var dps = root.GetComponentsInChildren(_clientDpType);
-            if (dps == null || dps.Length == 0) return false;
+            if (dps == null || dps.Length == 0) return true;
             foreach (var dp in dps)
             {
                 if ((object)dp == null) continue;
