@@ -260,8 +260,10 @@ namespace SFClientRecon
             InstallClientTerrainPatches();
             InstallOracleLobbyConnectPatches();
             InstallNsoClientPushPatches();
-            // InstallMapScriptLocalPatches();  // OFF — reverted to the known-good
-            // state (crates working). Map-script local-drive caused regressions.
+            // Per-type ONLY (transpiles the 3 gimmick types' Update; never touches
+            // crate NSOs). The earlier "imposibles de mover" was the 0.7 friction,
+            // not this patch — friction is back to normal now, so re-enabled.
+            InstallMapScriptLocalPatches();
             InstallMusicCrashGuard();
 
             Log.LogInfo($"{PluginName} {PluginVersion}: starting v26 snapshot listener on UDP :{_listenPort}. vSync off, FPS uncapped.");
