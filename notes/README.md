@@ -19,6 +19,9 @@ Newcomer to the project? Read these in order:
 ## Operating manuals
 
 - [`VPS.md`](VPS.md) — deployment guide (Proton + BepInEx + Goldberg + systemd + firewall)
+- [`MULTI_LOBBY_LIVE.md`](MULTI_LOBBY_LIVE.md) — single-port multi-lobby: deployed state, capacity, ops, revert
+- [`ROUTER.md`](ROUTER.md) — sf-router architecture + operations
+- [`ROUTER_LIVE_TEST.md`](ROUTER_LIVE_TEST.md) — router deploy + 2-client verification runbook
 
 ## Phase 6 design history
 
