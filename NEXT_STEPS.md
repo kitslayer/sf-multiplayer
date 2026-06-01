@@ -2,6 +2,8 @@
 
 Where the project is and what's coming next. Refreshed continuously — see [`WHATS_NEW.md`](WHATS_NEW.md) for the running session log, [`notes/PROTOCOL.md`](notes/PROTOCOL.md) for the wire-format spec.
 
+> **Update (2026-06):** single-port multi-lobby (router + control plane + in-game browser) and the box-physics fixes are merged to `main` and deployed live — see [`WHATS_NEW.md`](WHATS_NEW.md) and [`notes/MULTI_LOBBY_LIVE.md`](notes/MULTI_LOBBY_LIVE.md) for current state + capacity. Sections below dated 2026-05-23 are partially superseded.
+
 ## Current state
 
 Live server end-to-end. Steam Stick Fight (Windows or Linux/Proton) connects to a headless SF instance running [`sf-headless-host/SFHeadlessHost.dll`](sf-headless-host/) — a BepInEx + Harmony plugin that turns SF into its own v25-speaking dedicated server.
@@ -183,7 +185,7 @@ Verify on VPS log: `mapSync=N`, `nsos>0` after Desert3 load, `[BOXES] Reset fall
 
 ## Client patched Assembly-CSharp (imported reference)
 
-UDP mod DLLs, hashes, and decompiled networking sources from the CustomServers worktree are referenced in the design docs at [`notes/`](notes/) but the source artifacts are NOT yet in this repo (`client-mod/` directory was referenced but never committed). When/if they're imported, document the difference between that codepath and the Miles oracle stack vs the old Go server in a dedicated file.
+Prebuilt client artifacts — the patched `Assembly-CSharp.srv.v25.dll`, `SFClientRecon.dll`, and `SFServerBrowser.dll` — ship in [`dist/`](dist) and are bundled by the [`1-click-install/`](1-click-install) installer. (Earlier notes referenced a `client-mod/` directory that was never committed; these prebuilt DLLs supersede it.)
 
 ## Where to start reading
 

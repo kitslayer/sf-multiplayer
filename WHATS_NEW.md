@@ -1,10 +1,14 @@
-# What's new — `sharding` branch (in progress)
+# What's new — single-port multi-lobby (merged to `main`)
 
 Single-port multi-lobby front-door so one server hosts many lobbies and players
 pick/create them **in-game**, while each lobby stays an isolated `SF.exe` (no
-fragile in-process "true sharding"). Server side is unit-tested; client side
-compiles and awaits a live 2-player test. Plan: `~/.claude/plans/iterative-sparking-pascal.md`.
-Docs: [`notes/ROUTER.md`](notes/ROUTER.md), [`notes/ROUTER_LIVE_TEST.md`](notes/ROUTER_LIVE_TEST.md), [`notes/PROTOCOL.md`](notes/PROTOCOL.md) (router control framing).
+fragile in-process "true sharding"). **Merged to `main` and deployed live**
+(systemd router + control plane); per-code routing + isolation verified across
+two IPs and capacity measured. Docs:
+[`notes/MULTI_LOBBY_LIVE.md`](notes/MULTI_LOBBY_LIVE.md) (deployed state +
+capacity + ops), [`notes/ROUTER.md`](notes/ROUTER.md),
+[`notes/ROUTER_LIVE_TEST.md`](notes/ROUTER_LIVE_TEST.md),
+[`notes/PROTOCOL.md`](notes/PROTOCOL.md) (router control framing).
 
 - **`sf-router/`** (new Go module) — stateless per-client UDP relay on one public
   port (1337). Clients send a magic-framed SELECT naming their lobby code; the
