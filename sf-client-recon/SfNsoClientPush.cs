@@ -186,17 +186,17 @@ namespace SFClientRecon
                 // so it feels heavy to shove. Friction stays low (set on the
                 // material) so crate-vs-crate stays normal and clusters still slide.
                 rb.mass                = 110f;
-                rb.sleepThreshold      = 0.05f;
-                // Drag halves the BULLET knockback (an instantaneous impulse decays
-                // fast under drag → the crate travels ~half) while leaving the
-                // PLAYER push intact (a sustained contact force keeps overcoming
-                // drag, so walking-push feels the same).
+                // Very low sleep threshold so a crate balanced on the edge of
+                // another doesn't "fall asleep" while it still has a tipping torque
+                // — that was why it sat perched instead of toppling. It still
+                // sleeps once truly settled.
+                rb.sleepThreshold      = 0.005f;
                 rb.drag                = 0.45f;
-                // Low angular drag so a crate balanced on the EDGE of another
-                // actually tips over and falls (it was "costando girar y caer" =
-                // too much angular damping kept it perched). Still bounded by the
-                // spin cap so it can't whirl forever.
-                rb.angularDrag         = 0.15f;
+                // Near-zero angular drag so the crate freely TIPS/rotates (around
+                // Z, the 2.5D plane axis) and topples off edges + tumbles in the
+                // air like real physics. maxAngularVelocity keeps it from whirling
+                // insanely.
+                rb.angularDrag         = 0.05f;
                 rb.maxAngularVelocity  = 7f;
                 // Discrete = cheapest (ContinuousDynamic on every crate was a big
                 // CPU cost → FPS lag). Crates are slow enough not to tunnel.

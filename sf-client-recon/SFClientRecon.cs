@@ -649,8 +649,8 @@ namespace SFClientRecon
         // Y<-30). We cap HORIZONTAL speed (X/Z — that's the direction bullets fling
         // a crate) and the UPWARD impulse, but let a crate FALL naturally (large
         // downward cap) so it doesn't descend in slow motion.
-        private const float CrateMaxHoriz = 4.0f;   // m/s sideways/depth — kills bullet fling
-        private const float CrateMaxUp    = 5.0f;   // m/s upward — kills upward fling
+        private const float CrateMaxHoriz = 2.5f;   // m/s sideways/depth — kills bullet fling
+        private const float CrateMaxUp    = 4.0f;   // m/s upward — kills upward fling
         private const float CrateMaxFall  = 30.0f;  // m/s downward — natural gravity fall
         private void ClampCrateVelocities()
         {

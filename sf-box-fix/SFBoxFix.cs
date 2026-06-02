@@ -506,8 +506,8 @@ namespace SFBoxFix
         // direction) and UPWARD impulse, but allow a natural downward fall so
         // crates don't descend in slow motion. (A single magnitude cap throttled
         // the fall speed → "caen en camara lenta".)
-        private const float CrateMaxHorizSrv = 3.5f;
-        private const float CrateMaxUpSrv    = 5.0f;
+        private const float CrateMaxHorizSrv = 2.5f;
+        private const float CrateMaxUpSrv    = 4.0f;
         private const float CrateMaxFallSrv  = 30.0f;
         private static readonly List<Rigidbody> _crateRbs = new List<Rigidbody>();
         private void FixedUpdate()
@@ -635,14 +635,14 @@ namespace SFBoxFix
                             // sharedMaterial, not material — `.material` clones a new
                             // PhysicMaterial per collider per round (memory leak).
                             if ((object)col != null && !col.isTrigger) col.sharedMaterial = GripMaterial;
-                    rb.sleepThreshold = 0.05f;
-                    // Heavier + more drag so a bullet impulse barely moves a crate
-                    // (the server is authoritative; clients just follow, so this is
-                    // where "al dispararles salen volando" must be fixed).
+                    // Very low sleep threshold + near-zero angular drag so a crate
+                    // balanced on an edge keeps its tipping torque and TOPPLES /
+                    // tumbles instead of sitting perched (matches client).
+                    rb.sleepThreshold = 0.005f;
                     rb.mass = 110f;
                     rb.drag = 0.45f;
-                    rb.angularDrag = 1.0f;
-                    rb.maxAngularVelocity = 5f;
+                    rb.angularDrag = 0.05f;
+                    rb.maxAngularVelocity = 7f;
 
                     // NOTE: the old CAJAS-3 "unfreeze" (flip kinematic→dynamic on
                     // Xmas-style maps) is REMOVED. It fired ~2s after the scene
