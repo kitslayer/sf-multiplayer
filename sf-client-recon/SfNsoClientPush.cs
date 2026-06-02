@@ -190,7 +190,10 @@ namespace SFClientRecon
                 // crates barely rotate when shoved/hit. 30 lets them tip & tumble.
                 // (Bullet fling is bounded by the velocity clamp, NOT by mass, so
                 // lowering mass doesn't bring back "salen disparadas".)
-                rb.mass                = 30f;
+                // Mid mass: enough that the player can't shove it weightlessly,
+                // light enough that impact rotation still reads. Gravity-tipping is
+                // mass-independent (handled by friction grip + free Z rotation).
+                rb.mass                = 60f;
                 // Very low sleep threshold so a crate balanced on the edge of
                 // another doesn't "fall asleep" while it still has a tipping torque
                 // — that was why it sat perched instead of toppling. It still

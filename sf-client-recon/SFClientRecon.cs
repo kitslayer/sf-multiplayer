@@ -896,8 +896,12 @@ namespace SFClientRecon
                     // we don't reintroduce the "slide apart" problem.
                     _clientGripMaterial = new PhysicMaterial("CrateGripClient")
                     {
-                        staticFriction = 0.4f,
-                        dynamicFriction = 0.4f,
+                        // Higher friction so a crate pushed to a ledge GRIPS the
+                        // edge and pivots/topples instead of frictionlessly sliding
+                        // off flat. This is what makes the barrel-like gravity tip
+                        // actually happen.
+                        staticFriction = 0.6f,
+                        dynamicFriction = 0.55f,
                         bounciness = 0f,
                         frictionCombine = PhysicMaterialCombine.Average,
                         bounceCombine = PhysicMaterialCombine.Minimum
