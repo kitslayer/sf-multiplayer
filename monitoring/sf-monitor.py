@@ -470,7 +470,11 @@ th{color:#6b6f78;font-weight:normal} td.n{text-align:right;font-variant-numeric:
 select,#logbox{background:#0c0d10;color:#d8dade;border:1px solid #23252c;border-radius:6px;font:inherit}
 #logbox{width:100%;height:260px;overflow:auto;white-space:pre;padding:8px;margin-top:8px}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
-.cores{display:flex;gap:3px;margin:-4px 0 16px}.cores span{flex:1;height:22px;background:#14151a;border:1px solid #23252c;border-radius:3px;position:relative;overflow:hidden}.cores i{position:absolute;bottom:0;left:0;right:0}
+.cores{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:5px 16px;margin:-4px 0 16px}
+.core{display:flex;align-items:center;gap:7px;font-size:11px;color:#6b6f78}
+.core .bar{flex:1;height:9px;background:#1a1a1f;border-radius:4px;overflow:hidden}
+.core .bar i{display:block;height:100%}
+.core .pct{width:32px;text-align:right;color:#8a8f99;font-variant-numeric:tabular-nums}
 </style></head><body>
 <header><h1>sf-monitor</h1><span class=sub id=host></span><span class=sub id=upt></span><span class=sub id=stamp></span></header>
 <div class=wrap>
@@ -529,7 +533,7 @@ async function tick(){
   card('Net','↓'+n.net.rxKBs+' ↑'+n.net.txKBs+' <small>KB/s</small>')+
   card('tmpfs',n.disk.tmp?Math.round(n.disk.tmp.usedMB/n.disk.tmp.totalMB*100)+'%':'?')+
   card('swap',n.mem.swapUsedMB+' <small>MB</small>',n.mem.swapUsedMB>200?'warn':'');
- document.getElementById('cores').innerHTML=(n.percore||[]).map((p,i)=>'<span title="core '+i+': '+p+'%"><i style="height:'+Math.max(2,p)+'%;background:'+color(p,70,90)+'"></i></span>').join('');
+ document.getElementById('cores').innerHTML=(n.percore||[]).map((p,i)=>'<div class=core><span>c'+i+'</span><span class=bar><i style="width:'+Math.max(2,p)+'%;background:'+color(p,70,90)+'"></i></span><span class=pct>'+Math.round(p)+'%</span></div>').join('');
  chart('cpuC',[{data:series.cpu,color:'#8fb6ff'}],{max:100,unit:'%'});
  chart('memC',[{data:series.mem,color:'#c39bff'}],{max:n.mem.totalMB,fmt:v=>(v/1024).toFixed(1)+'G'});
  chart('netC',[{data:series.netRx,color:'#7fdca4'},{data:series.netTx,color:'#8fb6ff'}],{unit:'KB/s'});
