@@ -194,6 +194,18 @@ namespace SFClientRecon
                 // light enough that impact rotation still reads. Gravity-tipping is
                 // mass-independent (handled by friction grip + free Z rotation).
                 rb.mass                = 60f;
+                // GRAVITY-TIP FIX: PhysX box-on-box keeps contacts across the full
+                // bottom face, so a crate with most of its mass overhanging the
+                // edge of another still has "support" contacts and never pivots —
+                // it just slides off flat. Two changes force the natural tip:
+                //   1) Raise center-of-mass above the geometric center → as soon
+                //      as the CoM passes the support point, gravity has a LONG
+                //      moment arm and the crate pivots (the barrel-like topple).
+                //   2) Reset the inertia tensor so Unity recomputes a clean one
+                //      from the collider (the prefab can ship a tensor that
+                //      resists Z rotation specifically).
+                rb.ResetInertiaTensor();
+                rb.centerOfMass        = new Vector3(0f, 0.35f, 0f);
                 // Very low sleep threshold so a crate balanced on the edge of
                 // another doesn't "fall asleep" while it still has a tipping torque
                 // — that was why it sat perched instead of toppling. It still

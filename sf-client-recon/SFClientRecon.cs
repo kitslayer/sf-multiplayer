@@ -900,10 +900,13 @@ namespace SFClientRecon
                         // edge and pivots/topples instead of frictionlessly sliding
                         // off flat. This is what makes the barrel-like gravity tip
                         // actually happen.
-                        staticFriction = 0.6f,
-                        dynamicFriction = 0.55f,
+                        staticFriction = 0.7f,
+                        dynamicFriction = 0.6f,
                         bounciness = 0f,
-                        frictionCombine = PhysicMaterialCombine.Average,
+                        // Maximum: the crate's high friction dominates the edge
+                        // contact even if the crate below has low friction, so it
+                        // GRIPS the corner and pivots/topples instead of sliding off.
+                        frictionCombine = PhysicMaterialCombine.Maximum,
                         bounceCombine = PhysicMaterialCombine.Minimum
                     };
                 }
