@@ -506,7 +506,7 @@ namespace SFBoxFix
         // direction) and UPWARD impulse, but allow a natural downward fall so
         // crates don't descend in slow motion. (A single magnitude cap throttled
         // the fall speed → "caen en camara lenta".)
-        private const float CrateMaxHorizSrv = 2.5f;
+        private const float CrateMaxHorizSrv = 3.5f;
         private const float CrateMaxUpSrv    = 4.0f;
         private const float CrateMaxFallSrv  = 30.0f;
         private static readonly List<Rigidbody> _crateRbs = new List<Rigidbody>();
@@ -643,7 +643,9 @@ namespace SFBoxFix
                     // balanced on an edge keeps its tipping torque and TOPPLES /
                     // tumbles instead of sitting perched (matches client).
                     rb.sleepThreshold = 0.005f;
-                    rb.mass = 110f;
+                    // Lower mass = responsive rotation/tipping (fling still bounded
+                    // by the velocity clamp, not mass). Matches client.
+                    rb.mass = 30f;
                     rb.drag = 0.45f;
                     rb.angularDrag = 0.05f;
                     rb.maxAngularVelocity = 7f;

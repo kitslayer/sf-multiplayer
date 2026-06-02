@@ -185,7 +185,12 @@ namespace SFClientRecon
                 // means the player's collision impulse moves the crate much less,
                 // so it feels heavy to shove. Friction stays low (set on the
                 // material) so crate-vs-crate stays normal and clusters still slide.
-                rb.mass                = 110f;
+                // Lower mass = responsive ROTATION/tipping. Push/bullet-induced
+                // angular velocity is ~ torque/inertia ∝ 1/mass, so mass 110 made
+                // crates barely rotate when shoved/hit. 30 lets them tip & tumble.
+                // (Bullet fling is bounded by the velocity clamp, NOT by mass, so
+                // lowering mass doesn't bring back "salen disparadas".)
+                rb.mass                = 30f;
                 // Very low sleep threshold so a crate balanced on the edge of
                 // another doesn't "fall asleep" while it still has a tipping torque
                 // — that was why it sat perched instead of toppling. It still
