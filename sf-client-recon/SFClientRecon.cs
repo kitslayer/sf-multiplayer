@@ -645,16 +645,20 @@ namespace SFClientRecon
         // AddExplosionForce) behaved fine. Clamping linear velocity per frame stops
         // the fling without touching the player push (which never reaches the cap)
         // or explosions (good distances stay under it).
-        private const float CrateMaxSpeed = 4.0f;   // m/s — hard cap so a bullet can't fling a crate
+        // Axis-aware caps. Y is the vertical axis in SF (gravity = -Y, killbox at
+        // Y<-30). We cap HORIZONTAL speed (X/Z — that's the direction bullets fling
+        // a crate) and the UPWARD impulse, but let a crate FALL naturally (large
+        // downward cap) so it doesn't descend in slow motion.
+        private const float CrateMaxHoriz = 4.0f;   // m/s sideways/depth — kills bullet fling
+        private const float CrateMaxUp    = 5.0f;   // m/s upward — kills upward fling
+        private const float CrateMaxFall  = 30.0f;  // m/s downward — natural gravity fall
         private void ClampCrateVelocities()
         {
             if (_nsoCache.Count == 0) return;
-            float maxSqr = CrateMaxSpeed * CrateMaxSpeed;
+            float hSqr = CrateMaxHoriz * CrateMaxHoriz;
             foreach (var kv in _nsoCache)
             {
                 var entry = kv.Value;
-                // Clamp EVERY crate (not just pushable-classified) — a bullet
-                // flings whichever crate it hits. Skip weapons/ice/chains.
                 if (entry == null || entry.SkipSmooth) continue;
                 var rbs = entry.Rbs;
                 if (rbs == null) continue;
@@ -663,7 +667,16 @@ namespace SFClientRecon
                     var rb = rbs[i];
                     if (rb == null || rb.isKinematic) continue;
                     var v = rb.velocity;
-                    if (v.sqrMagnitude > maxSqr) rb.velocity = v * (CrateMaxSpeed / v.magnitude);
+                    bool changed = false;
+                    float hMagSqr = v.x * v.x + v.z * v.z;
+                    if (hMagSqr > hSqr)
+                    {
+                        float s = CrateMaxHoriz / Mathf.Sqrt(hMagSqr);
+                        v.x *= s; v.z *= s; changed = true;
+                    }
+                    if (v.y > CrateMaxUp) { v.y = CrateMaxUp; changed = true; }
+                    else if (v.y < -CrateMaxFall) { v.y = -CrateMaxFall; changed = true; }
+                    if (changed) rb.velocity = v;
                 }
             }
         }

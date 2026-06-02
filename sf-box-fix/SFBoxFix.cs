@@ -502,19 +502,30 @@ namespace SFBoxFix
         // the crate's velocity each physics step on the SERVER stops the launch at
         // the source. A deliberate push stays under the cap; explosions stay near
         // it. Runs in FixedUpdate so it catches the impulse the same step.
-        private const float CrateMaxSpeedSrv = 3.5f;
+        // Axis-aware caps (Y = vertical in SF). Cap HORIZONTAL (X/Z — bullet fling
+        // direction) and UPWARD impulse, but allow a natural downward fall so
+        // crates don't descend in slow motion. (A single magnitude cap throttled
+        // the fall speed → "caen en camara lenta".)
+        private const float CrateMaxHorizSrv = 3.5f;
+        private const float CrateMaxUpSrv    = 5.0f;
+        private const float CrateMaxFallSrv  = 30.0f;
         private static readonly List<Rigidbody> _crateRbs = new List<Rigidbody>();
         private void FixedUpdate()
         {
             if (_crateRbs.Count == 0) return;
-            float maxSqr = CrateMaxSpeedSrv * CrateMaxSpeedSrv;
+            float hSqr = CrateMaxHorizSrv * CrateMaxHorizSrv;
             for (int i = _crateRbs.Count - 1; i >= 0; i--)
             {
                 var rb = _crateRbs[i];
                 if ((object)rb == null) { _crateRbs.RemoveAt(i); continue; }
                 if (rb.isKinematic) continue;
                 var v = rb.velocity;
-                if (v.sqrMagnitude > maxSqr) rb.velocity = v * (CrateMaxSpeedSrv / v.magnitude);
+                bool changed = false;
+                float hMagSqr = v.x * v.x + v.z * v.z;
+                if (hMagSqr > hSqr) { float s = CrateMaxHorizSrv / Mathf.Sqrt(hMagSqr); v.x *= s; v.z *= s; changed = true; }
+                if (v.y > CrateMaxUpSrv) { v.y = CrateMaxUpSrv; changed = true; }
+                else if (v.y < -CrateMaxFallSrv) { v.y = -CrateMaxFallSrv; changed = true; }
+                if (changed) rb.velocity = v;
             }
         }
 
