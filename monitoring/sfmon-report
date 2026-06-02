@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Convenience wrapper to run the sf-monitor report against the server's data dir,
+# usable by any account on the box (miles or sfdev). On .115 a copy lives at
+# /home/miles/sf-monitor/report.sh. Pass-through args: --tail N, --lobby CODE,
+# --bucket MIN, or a specific metrics-YYYY-MM-DD.jsonl file.
+exec env SF_MON_DATADIR="${SF_MON_DATADIR:-/home/miles/sf-monitor/data}" \
+  python3 /home/miles/sf-multiplayer/monitoring/sf-monitor-report.py "$@"

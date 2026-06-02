@@ -1,0 +1,35 @@
+[Unit]
+Description=Stick Fight host + lobby telemetry (read-only monitor + dashboard)
+Documentation=https://github.com/kitslayer/sf-multiplayer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=miles
+Group=miles
+WorkingDirectory=/home/miles/sf-multiplayer
+
+# Loopback only — view via an SSH tunnel; no firewall change, no exposure.
+Environment=SF_MON_BIND=127.0.0.1:8090
+Environment=SF_MON_INTERVAL=5
+Environment=SF_MON_DATADIR=/home/miles/sf-monitor/data
+Environment=SF_MON_RETAIN_DAYS=14
+ExecStart=/usr/bin/python3 /home/miles/sf-multiplayer/monitoring/sf-monitor.py
+
+Restart=on-failure
+RestartSec=5
+
+# Be a strict good citizen: this must NEVER compete with the game. Lowest CPU
+# priority + idle I/O + a hard memory cap. Read-only sampling only.
+Nice=19
+CPUWeight=10
+IOSchedulingClass=idle
+MemoryMax=200M
+TasksMax=32
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
