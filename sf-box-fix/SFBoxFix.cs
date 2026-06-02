@@ -652,7 +652,8 @@ namespace SFBoxFix
                     // GRAVITY-TIP: high CoM + clean inertia tensor so a crate
                     // overhanging an edge actually pivots (matches client).
                     rb.ResetInertiaTensor();
-                    rb.centerOfMass = new Vector3(0f, 0.35f, 0f);
+                    rb.centerOfMass = new Vector3(0f, 1.0f, 0f);
+                    rb.useGravity = true;
 
                     // NOTE: the old CAJAS-3 "unfreeze" (flip kinematic→dynamic on
                     // Xmas-style maps) is REMOVED. It fired ~2s after the scene

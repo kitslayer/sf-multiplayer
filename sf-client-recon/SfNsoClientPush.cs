@@ -205,7 +205,11 @@ namespace SFClientRecon
                 //      from the collider (the prefab can ship a tensor that
                 //      resists Z rotation specifically).
                 rb.ResetInertiaTensor();
-                rb.centerOfMass        = new Vector3(0f, 0.35f, 0f);
+                // Push CoM well ABOVE the top face of the crate. With CoM outside
+                // the box, the box becomes self-unstable: any overhang at all gives
+                // gravity a huge moment arm → the box pivots/topples on its own.
+                rb.centerOfMass        = new Vector3(0f, 1.0f, 0f);
+                rb.useGravity          = true;
                 // Very low sleep threshold so a crate balanced on the edge of
                 // another doesn't "fall asleep" while it still has a tipping torque
                 // — that was why it sat perched instead of toppling. It still
