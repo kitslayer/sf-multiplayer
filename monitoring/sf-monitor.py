@@ -470,18 +470,20 @@ th{color:#6b6f78;font-weight:normal} td.n{text-align:right;font-variant-numeric:
 select,#logbox{background:#0c0d10;color:#d8dade;border:1px solid #23252c;border-radius:6px;font:inherit}
 #logbox{width:100%;height:260px;overflow:auto;white-space:pre;padding:8px;margin-top:8px}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+.cores{display:flex;gap:3px;margin:-4px 0 16px}.cores span{flex:1;height:22px;background:#14151a;border:1px solid #23252c;border-radius:3px;position:relative;overflow:hidden}.cores i{position:absolute;bottom:0;left:0;right:0}
 </style></head><body>
 <header><h1>sf-monitor</h1><span class=sub id=host></span><span class=sub id=upt></span><span class=sub id=stamp></span></header>
 <div class=wrap>
  <div class=cards id=cards></div>
+ <div class=cores id=cores title="per-core CPU %"></div>
  <div class=grid2>
   <div class=panel><h2>CPU %</h2><canvas id=cpuC></canvas></div>
   <div class=panel><h2>RAM used (MB)</h2><canvas id=memC></canvas></div>
   <div class=panel><h2>Network (KB/s) — rx green / tx blue</h2><canvas id=netC></canvas></div>
-  <div class=panel><h2>Server processes CPU %</h2><canvas id=srvC></canvas></div>
+  <div class=panel><h2>Server CPU (cores)</h2><canvas id=srvC></canvas></div>
  </div>
  <div class=panel><h2>Lobbies</h2><table id=lob><thead><tr>
-   <th>code</th><th>port</th><th class=n>clients</th><th class=n>flows</th><th class=n>cpu%</th><th class=n>rss MB</th><th class=n>rx/s</th><th class=n>tick</th><th>state</th>
+   <th>code</th><th>port</th><th class=n>clients</th><th class=n>flows</th><th class=n>cpu(core)</th><th class=n>rss MB</th><th class=n>rx/s</th><th class=n>tick</th><th>state</th>
  </tr></thead><tbody></tbody></table></div>
  <div class=panel><h2>Lobby log</h2>
    <select id=logsel></select> <select id=logkind><option value=plugin>plugin</option><option value=unity>unity</option></select>
@@ -498,10 +500,15 @@ function color(p,warn,bad){return p>=bad?'#ff7b72':p>=warn?'#ffd479':'#7fdca4';}
 function chart(id,sets,opts){const c=document.getElementById(id),x=c.getContext('2d');
  const W=c.width=c.clientWidth*devicePixelRatio,H=c.height=120*devicePixelRatio;x.clearRect(0,0,W,H);
  let max=opts.max||0; sets.forEach(s=>s.data.forEach(v=>{if(v>max)max=v;})); max=max||1; max*=1.15;
+ const fmt=opts.fmt||(v=>Math.round(v));
  x.strokeStyle='#23252c';x.lineWidth=1;for(let g=0;g<=2;g++){let y=H*g/2;x.beginPath();x.moveTo(0,y);x.lineTo(W,y);x.stroke();}
- x.fillStyle='#6b6f78';x.font=(11*devicePixelRatio)+'px monospace';x.fillText(Math.round(max)+(opts.unit||''),4,12*devicePixelRatio);
- sets.forEach(s=>{x.strokeStyle=s.color;x.lineWidth=1.5*devicePixelRatio;x.beginPath();
-  s.data.forEach((v,i)=>{let px=W*i/(HIST-1),py=H-(v/max)*H;i?x.lineTo(px,py):x.moveTo(px,py);});x.stroke();});}
+ x.fillStyle='#6b6f78';x.font=(11*devicePixelRatio)+'px monospace';x.textAlign='left';x.fillText(fmt(max)+(opts.unit||''),4,12*devicePixelRatio);
+ sets.forEach((s,si)=>{const n=s.data.length;if(!n)return;const px=i=>W*i/(HIST-1),py=i=>H-(s.data[i]/max)*H;
+  x.beginPath();s.data.forEach((v,i)=>{i?x.lineTo(px(i),py(i)):x.moveTo(px(i),py(i));});
+  x.lineTo(px(n-1),H);x.lineTo(px(0),H);x.closePath();x.fillStyle=s.color+'1f';x.fill();
+  x.strokeStyle=s.color;x.lineWidth=1.5*devicePixelRatio;x.beginPath();s.data.forEach((v,i)=>{i?x.lineTo(px(i),py(i)):x.moveTo(px(i),py(i));});x.stroke();
+  x.fillStyle=s.color;x.textAlign='right';x.fillText(fmt(s.data[n-1])+(opts.unit||''),W-6,(14+si*15)*devicePixelRatio);});
+ x.textAlign='left';}
 function card(k,v,cls){return `<div class=card><div class=k>${k}</div><div class="v ${cls||''}">${v}</div></div>`;}
 async function tick(){
  let r; try{r=await (await fetch('/api/now')).json();}catch(e){return;}
@@ -517,19 +524,20 @@ async function tick(){
   card('Load',l1.toFixed(2)+' <small>/'+n.ncpu+'</small>',color(loadPct,75,100))+
   card('Lobbies',n.server.lobbyCount)+
   card('Clients',n.server.clients)+
-  card('Server CPU',n.server.cpu+'%')+
+  card('Server CPU',(n.server.cpu/100).toFixed(2)+' <small>cores /'+n.ncpu+'</small>')+
   card('Server RAM',(n.server.rssMB/1024).toFixed(1)+'G')+
   card('Net','↓'+n.net.rxKBs+' ↑'+n.net.txKBs+' <small>KB/s</small>')+
   card('tmpfs',n.disk.tmp?Math.round(n.disk.tmp.usedMB/n.disk.tmp.totalMB*100)+'%':'?')+
   card('swap',n.mem.swapUsedMB+' <small>MB</small>',n.mem.swapUsedMB>200?'warn':'');
+ document.getElementById('cores').innerHTML=(n.percore||[]).map((p,i)=>'<span title="core '+i+': '+p+'%"><i style="height:'+Math.max(2,p)+'%;background:'+color(p,70,90)+'"></i></span>').join('');
  chart('cpuC',[{data:series.cpu,color:'#8fb6ff'}],{max:100,unit:'%'});
- chart('memC',[{data:series.mem,color:'#c39bff'}],{max:n.mem.totalMB});
+ chart('memC',[{data:series.mem,color:'#c39bff'}],{max:n.mem.totalMB,fmt:v=>(v/1024).toFixed(1)+'G'});
  chart('netC',[{data:series.netRx,color:'#7fdca4'},{data:series.netTx,color:'#8fb6ff'}],{unit:'KB/s'});
- push(srv,n.server.cpu); chart('srvC',[{data:srv,color:'#ffb86c'}],{unit:'%'});
+ push(srv,n.server.cpu/100); chart('srvC',[{data:srv,color:'#ffb86c'}],{unit:' cores',fmt:v=>v.toFixed(2)});
  // lobby table
  const tb=document.querySelector('#lob tbody');tb.innerHTML=n.lobbies.map(l=>{
   const st=l.running?'<span class=dot style=background:#7fdca4></span>up':'<span class=dot style=background:#ff7b72></span>down';
-  return `<tr><td>${l.code}</td><td>${l.port}</td><td class=n>${l.clients}</td><td class=n>${l.flows}</td><td class=n>${l.cpu}</td><td class=n>${l.rssMB}</td><td class=n>${l.rxps}</td><td class=n>${l.tick}</td><td>${st}</td></tr>`;}).join('');
+  return `<tr><td>${l.code}</td><td>${l.port}</td><td class=n>${l.clients}</td><td class=n>${l.flows}</td><td class=n>${(l.cpu/100).toFixed(2)}</td><td class=n>${l.rssMB}</td><td class=n>${l.rxps}</td><td class=n>${l.tick}</td><td>${st}</td></tr>`;}).join('');
  // log selector options
  const sel=document.getElementById('logsel'),cur=sel.value;
  const opts=n.lobbies.map(l=>`<option value=${l.bridge}>${l.code} (${l.bridge})</option>`).join('');
