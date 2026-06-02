@@ -104,14 +104,29 @@ namespace SFClientRecon
             var rootGo = (__instance as Component)?.gameObject;
             if (!_oraclePushMode || !IsPushableCrateRoot(rootGo)) return true;
             // Floating crates (DontEnableRig) are suspended on purpose. Do NOT
-            // force them dynamic or they fall "porque sí". Let vanilla disable
-            // their rigidbody (keep kinematic); the game re-enables them only on
-            // activation. Only ground/pushable crates stay dynamic for local feel.
+            // force them dynamic or they fall "porque sí". BUT we still want our
+            // physics tuning (CoM, mass, grip, free Z rotation) to be on them so
+            // that WHEN the game activates them (hit / event), they immediately
+            // fall + tip naturally instead of using vanilla physics. So:
+            //   1) pre-configure every rigidbody (idempotent; doesn't touch
+            //      isKinematic),
+            //   2) let vanilla run (keeps them kinematic / floating).
             if ((object)_dontEnableRigType == null)
                 _dontEnableRigType = AccessTools.TypeByName("DontEnableRig");
-            if ((object)_dontEnableRigType != null && (object)rootGo != null
-                && (object)rootGo.GetComponentInChildren(_dontEnableRigType, true) != null)
-                return true;   // run vanilla → stays kinematic/floating
+            bool isFloating = (object)_dontEnableRigType != null && (object)rootGo != null
+                && (object)rootGo.GetComponentInChildren(_dontEnableRigType, true) != null;
+            if (isFloating)
+            {
+                try
+                {
+                    var rbsF = (__instance as Component)?.GetComponentsInChildren<Rigidbody>();
+                    if (rbsF != null)
+                        foreach (var rbF in rbsF)
+                            if ((object)rbF != null) ConfigureCratePhysics(rbF);
+                }
+                catch { }
+                return true;   // run vanilla → stays kinematic/floating until activated
+            }
             try
             {
                 var rbs = (__instance as Component)?.GetComponentsInChildren<Rigidbody>();
