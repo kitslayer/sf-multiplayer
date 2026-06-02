@@ -76,3 +76,6 @@ TabInfo/
 tools/external-mods/
 # Large decompiled reference source
 decompiled-working/
+
+# Release staging (BepInEx binaries) — only the zipped artifact is tracked
+release-build/
