@@ -202,10 +202,15 @@ namespace SFClientRecon
                 // CPU cost → FPS lag). Crates are slow enough not to tunnel.
                 rb.collisionDetectionMode = CollisionDetectionMode.Discrete;
                 rb.interpolation       = RigidbodyInterpolation.Interpolate;          // smooth render
-                // Only freeze tumbling out of the 2.5D plane (X/Y rotation). Leave
-                // position free so the game's own plane setup / floor support holds.
-                rb.constraints |= RigidbodyConstraints.FreezeRotationX
-                                | RigidbodyConstraints.FreezeRotationY;
+                // Rotation: freeze X/Y (out-of-plane tilt) but FORCE Z FREE so the
+                // crate can tip/tumble in the 2.5D plane. The prefab ships crates
+                // with Z rotation frozen (for stability), and a `|=` never unfroze
+                // it → crates only slid, never rotated ("no giran, se salen de la
+                // hitbox sin voltearse"). Clear the Z-rotation bit explicitly.
+                var c = rb.constraints;
+                c |= RigidbodyConstraints.FreezeRotationX | RigidbodyConstraints.FreezeRotationY;
+                c &= ~RigidbodyConstraints.FreezeRotationZ;
+                rb.constraints = c;
             }
             catch { }
         }

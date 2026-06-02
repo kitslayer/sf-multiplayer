@@ -652,21 +652,29 @@ namespace SFClientRecon
         private const float CrateMaxHoriz = 2.5f;   // m/s sideways/depth — kills bullet fling
         private const float CrateMaxUp    = 4.0f;   // m/s upward — kills upward fling
         private const float CrateMaxFall  = 30.0f;  // m/s downward — natural gravity fall
+        private float _crateDiagAt2 = -1f;
         private void ClampCrateVelocities()
         {
             if (_nsoCache.Count == 0) return;
             float hSqr = CrateMaxHoriz * CrateMaxHoriz;
+            int crates = 0, kin = 0, dyn = 0, push = 0; float maxAng = 0f, maxLin = 0f;
             foreach (var kv in _nsoCache)
             {
                 var entry = kv.Value;
                 if (entry == null || entry.SkipSmooth) continue;
+                crates++;
+                if (entry.Pushable) push++;
                 var rbs = entry.Rbs;
                 if (rbs == null) continue;
                 for (int i = 0; i < rbs.Length; i++)
                 {
                     var rb = rbs[i];
-                    if (rb == null || rb.isKinematic) continue;
+                    if (rb == null) continue;
+                    if (rb.isKinematic) { kin++; continue; }
+                    dyn++;
+                    float av = rb.angularVelocity.magnitude; if (av > maxAng) maxAng = av;
                     var v = rb.velocity;
+                    float lm = v.magnitude; if (lm > maxLin) maxLin = lm;
                     bool changed = false;
                     float hMagSqr = v.x * v.x + v.z * v.z;
                     if (hMagSqr > hSqr)
@@ -678,6 +686,14 @@ namespace SFClientRecon
                     else if (v.y < -CrateMaxFall) { v.y = -CrateMaxFall; changed = true; }
                     if (changed) rb.velocity = v;
                 }
+            }
+            // DIAG: shows if crates are dynamic (local physics) and whether they
+            // ever get angular velocity (rotate). If kin>0 and dyn==0 they're
+            // server-kinematic-followed → no local rotation.
+            if ((maxLin > 1f || maxAng > 0.5f) && Time.realtimeSinceStartup - _crateDiagAt2 > 1f)
+            {
+                _crateDiagAt2 = Time.realtimeSinceStartup;
+                Log.LogInfo($"[crate-rot] crates={crates} pushable={push} dynRB={dyn} kinRB={kin} maxLin={maxLin:0.0} maxAng={maxAng:0.00}");
             }
         }
 

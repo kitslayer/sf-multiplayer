@@ -613,10 +613,14 @@ namespace SFBoxFix
                     // depth can trap two crates in different planes so they never
                     // collide and visually overlap/vanish. Vanilla box physics
                     // already keeps them coplanar; let it run.)
+                    // Freeze X/Y rotation but FORCE Z FREE — the prefab freezes Z
+                    // rotation, and a `|=` never unfroze it, so crates only slid
+                    // and never tipped/tumbled. Clear the Z-rotation bit.
                     var prevConstraints = rb.constraints;
-                    var newConstraints = prevConstraints
+                    var newConstraints = (prevConstraints
                         | RigidbodyConstraints.FreezeRotationX
-                        | RigidbodyConstraints.FreezeRotationY;
+                        | RigidbodyConstraints.FreezeRotationY)
+                        & ~RigidbodyConstraints.FreezeRotationZ;
                     if (prevConstraints != newConstraints)
                     {
                         rb.constraints = newConstraints;
