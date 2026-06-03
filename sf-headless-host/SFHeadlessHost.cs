@@ -3358,10 +3358,34 @@ namespace SFHeadlessHost
         private static readonly System.Random _mapRng = new System.Random();
         static Plugin()
         {
+            // Build the playable scene set. Excludes:
+            //  - 1-5  : menu / lobby scenes
+            //  - 102  : the stats / non-MP scene
+            //  - SF_EXCLUDE_MAPS : a comma list of extra scene indices to drop —
+            //           this is how you remove the LEVEL EDITOR scene (and any
+            //           other map that bugs the round logic) from the rotation
+            //           WITHOUT a recompile, e.g. SF_EXCLUDE_MAPS="7,118".
+            var excluded = new HashSet<int> { 102 };
+            try
+            {
+                string ex = System.Environment.GetEnvironmentVariable("SF_EXCLUDE_MAPS");
+                if (!string.IsNullOrEmpty(ex))
+                    foreach (var tok in ex.Split(','))
+                    {
+                        int v;
+                        if (int.TryParse(tok.Trim(), out v)) excluded.Add(v);
+                    }
+            }
+            catch { }
             var list = new List<int>();
-            // Skip 1-5 (likely menu/lobby) and 102 (stats). Range 6-124.
-            for (int i = 6; i <= 124; i++) { if (i != 102) list.Add(i); }
+            for (int i = 6; i <= 124; i++) { if (!excluded.Contains(i)) list.Add(i); }
             _allLandfallMaps = list.ToArray();
+        }
+        // Exposed so a chat command / log can show what's excluded.
+        internal static string ExcludedMapsInfo()
+        {
+            string ex = System.Environment.GetEnvironmentVariable("SF_EXCLUDE_MAPS");
+            return string.IsNullOrEmpty(ex) ? "102 (stats)" : ("102 (stats), " + ex);
         }
         // Recently-played history so we don't revisit the same map back-to-back
         // (or within the last few rounds).
