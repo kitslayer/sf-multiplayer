@@ -973,15 +973,36 @@ namespace SFClientRecon
             return hit.rigidbody;
         }
 
-        // Clamp in FixedUpdate (the physics step) — a bullet imparts velocity in
-        // FixedUpdate, so clamping in Update let the crate fly a full render frame
-        // first. FixedUpdate catches it the same physics step. After clamping, run
-        // stack/contact behavior so cohesion + damping observe the clamped speeds.
+        // Match-active gate: never touch crate physics outside an active match.
+        // The PLAY ONLINE menu (and main menu) renders decorative barrels that
+        // are themselves NetworkSyncableObjects; running ApplyStackAndContactBehavior
+        // there applied torques + clamps to those decorations → menu barrels flew
+        // around like crazy. We check GameManager.inFight via reflection (cached).
+        private static Type _gmTypeFx; private static System.Reflection.FieldInfo _gmInFightFx;
+        private static bool _gmFxLooked;
+        private static bool IsMatchActive()
+        {
+            if (!_gmFxLooked)
+            {
+                _gmFxLooked = true;
+                _gmTypeFx = AccessTools.TypeByName("GameManager");
+                if ((object)_gmTypeFx != null)
+                    _gmInFightFx = AccessTools.Field(_gmTypeFx, "inFight");
+            }
+            if ((object)_gmInFightFx == null) return false;   // can't tell → safest is OFF
+            try { return (bool)_gmInFightFx.GetValue(null); } catch { return false; }
+        }
+
+        // Clamp in FixedUpdate (the physics step). All crate behaviours gated on
+        // IsMatchActive() so menus / lobbies are NEVER touched. The aggressive
+        // tip/pop/tumble code was reverted — it created more visual chaos than
+        // benefit. Only the velocity clamp remains (kills bullet fling) which is
+        // both safe and necessary. Stack/player damping kept but minimal.
         private void FixedUpdate()
         {
             if (!_running) return;
-            try { ClampCrateVelocities();         } catch { }
-            try { ApplyStackAndContactBehavior(); } catch { }
+            if (!IsMatchActive()) return;
+            try { ClampCrateVelocities(); } catch { }
         }
 
         private void SmoothTowardTargets()
@@ -1878,72 +1899,14 @@ namespace SFClientRecon
                     // Below SoftDriftThresholdSq → ignore (natural RTT jitter).
                     if (isLocal)
                     {
+                        // Drift correction TEMPORARILY DISABLED. The previous version
+                        // applied a position shift every snapshot when the server's
+                        // view differed from local prediction → caused hyper-push of
+                        // the player at /start. The rate-limited version still felt
+                        // weird. For now, let local prediction own the player
+                        // entirely; the server's authoritative position is reflected
+                        // by InjectInput / movement only. Just track the acked seq.
                         _serverLastAckedSeq = entry.LastInputSeq;
-                        // ────────  HYPER-PUSH GUARD  ────────
-                        // The drift correction below shifts the local rigidbody by
-                        // (server_pos - predicted_at_seq) every snapshot. If the
-                        // server's view consistently disagrees with ours (e.g.
-                        // controller drift not in our keyboard-only input read, or
-                        // the server is dragging the rig while we're still in lobby
-                        // UI), each 30Hz snapshot stacks another shift → the player
-                        // visibly "hyper-pushes" toward an arbitrary point. Three
-                        // belts and suspenders:
-                        //   (1) Higher SOFT threshold (1.5u) → ignore casual jitter.
-                        //   (2) Hard rate limit — at most one shift per 200ms.
-                        //   (3) Skip the absolute-snap fallback unless the local
-                        //       player is genuinely lost (>20u away). It used to
-                        //       snap+zero-vel every snapshot when history missed.
-                        if (_historyLookup.TryGetValue(entry.LastInputSeq, out var predictedAtSeq))
-                        {
-                            Vector3 driftVec = target - predictedAtSeq;
-                            float driftSq = driftVec.sqrMagnitude;
-                            const float SoftDriftThresholdSq = 1.5f * 1.5f;
-                            const float HardDriftThresholdSq = 6.0f * 6.0f;
-                            float now = Time.realtimeSinceStartup;
-                            bool rateLimited = (now - _lastShiftAt) < 0.20f;
-                            if (driftSq > SoftDriftThresholdSq && !rateLimited)
-                            {
-                                _lastShiftAt = now;
-                                // Cap the per-shift magnitude → no single snapshot
-                                // can teleport us > 3u (prevents catastrophic snap).
-                                if (driftSq > 9f)
-                                    driftVec = driftVec.normalized * 3f;
-                                foreach (var np2 in nps)
-                                {
-                                    if (!TryGetPlayerSlotFromNetworkPlayer(np2, out var pi2) || pi2 != localSlot) continue;
-                                    var npComp2 = np2 as Component;
-                                    var rb2 = npComp2.GetComponent<Rigidbody>() ?? npComp2.GetComponentInChildren<Rigidbody>();
-                                    if ((object)rb2 != null) rb2.position = rb2.position + driftVec;
-                                    else npComp2.transform.position += driftVec;
-                                    _historyLookup[entry.LastInputSeq] = target;
-                                    break;
-                                }
-                                _divergenceLogged++;
-                                if (driftSq > HardDriftThresholdSq
-                                    && (_divergenceLogged == 1 || _divergenceLogged % 15 == 0))
-                                    Log.LogWarning($"[P6.12.2 SHIFT] seq={entry.LastInputSeq} drift={Mathf.Sqrt(driftSq):0.00}u");
-                            }
-                        }
-                        else
-                        {
-                            // Absolute-snap fallback: only fire when the player is
-                            // GENUINELY lost (>20u from server view), not on every
-                            // snapshot — the old "snap every time history misses"
-                            // is exactly the hyper-push behavior we just removed.
-                            foreach (var np2 in nps)
-                            {
-                                if (!TryGetPlayerSlotFromNetworkPlayer(np2, out var pi2) || pi2 != localSlot) continue;
-                                var npComp2 = np2 as Component;
-                                var rb2 = npComp2.GetComponent<Rigidbody>() ?? npComp2.GetComponentInChildren<Rigidbody>();
-                                Vector3 cur = (object)rb2 != null ? rb2.position : npComp2.transform.position;
-                                if ((target - cur).sqrMagnitude > 20f * 20f)
-                                {
-                                    if ((object)rb2 != null) { rb2.position = target; rb2.velocity = Vector3.zero; }
-                                    else npComp2.transform.position = target;
-                                }
-                                break;
-                            }
-                        }
                     }
                     else
                     {
