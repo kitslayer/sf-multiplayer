@@ -37,7 +37,7 @@ namespace SFServerBrowser
     {
         public const string PluginGuid = "com.stickfightdev.server-browser";
         public const string PluginName = "SFServerBrowser";
-        public const string PluginVersion = "0.3.0";
+        public const string PluginVersion = "0.4.0";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance;
@@ -114,14 +114,30 @@ namespace SFServerBrowser
             _lobbyEndpoint = Environment.GetEnvironmentVariable("SF_LOBBY_ENDPOINT");
             if (string.IsNullOrEmpty(_lobbyEndpoint))
             {
-                _lobbyEndpoint = null;
-                Log.LogWarning($"{PluginName}: SF_LOBBY_ENDPOINT not set — browser/create disabled until configured (e.g. http://HOST:8080/lobbies).");
+                // FALLBACK: derive the lobby endpoint from the SAME oracle the
+                // client connects to (-address / SF_ORACLE_ADDRESS), defaulting to
+                // the lobby HTTP port 8080. This is why the menu said "needs
+                // endpoint": the launcher passes -address but not SF_LOBBY_ENDPOINT.
+                // Now BROWSE/JOIN/CREATE just work without an extra env var.
+                string host = ResolveOracleHost();
+                if (!string.IsNullOrEmpty(host))
+                {
+                    string port = Environment.GetEnvironmentVariable("SF_LOBBY_PORT");
+                    if (string.IsNullOrEmpty(port)) port = "8080";
+                    _lobbyEndpoint = "http://" + host + ":" + port + "/lobbies";
+                    Log.LogInfo($"{PluginName}: SF_LOBBY_ENDPOINT not set — derived {_lobbyEndpoint} from -address.");
+                }
+                else
+                {
+                    _lobbyEndpoint = null;
+                    Log.LogWarning($"{PluginName}: no SF_LOBBY_ENDPOINT and no -address — browser disabled. Set SF_LOBBY_ENDPOINT or launch with -address HOST.");
+                }
             }
 
             Log.LogInfo($"{PluginName} v{PluginVersion} starting. Endpoint: {_lobbyEndpoint}");
             SceneManager.sceneLoaded += OnSceneLoaded;
 
-            // The native uGUI lobby overlay (Centauri-style) lives on its own
+            // The native uGUI lobby overlay (native-uGUI style) lives on its own
             // GameObject so it survives scene loads. Toggle with F2 / Tab.
             try
             {
@@ -372,6 +388,44 @@ namespace SFServerBrowser
         {
             if (string.IsNullOrEmpty(_lobbyEndpoint)) return "SERVER_IP";
             try { return new Uri(_lobbyEndpoint).Host; } catch { return "SERVER_IP"; }
+        }
+
+        // Resolve the oracle host from the same sources SfOracleLobbyConnect uses:
+        // the -address launch arg, then SF_ORACLE_ADDRESS, then the endpoint file
+        // BepInEx writes. Lets the browser auto-configure off the game's launch.
+        private static string ResolveOracleHost()
+        {
+            try
+            {
+                var args = Environment.GetCommandLineArgs();
+                for (int i = 0; i < args.Length - 1; i++)
+                    if (args[i] == "-address" && !string.IsNullOrEmpty(args[i + 1]))
+                        return args[i + 1].Trim();
+            }
+            catch { }
+            var env = Environment.GetEnvironmentVariable("SF_ORACLE_ADDRESS");
+            if (!string.IsNullOrEmpty(env)) return env.Trim();
+            try
+            {
+                string gameRoot = System.IO.Path.GetFullPath(System.IO.Path.Combine(Application.dataPath, ".."));
+                string[] candidates =
+                {
+                    System.IO.Path.Combine(System.IO.Path.Combine(System.IO.Path.Combine(gameRoot, "BepInEx"), "config"), "sf-oracle-endpoint.txt"),
+                    System.IO.Path.Combine(System.IO.Path.Combine(System.IO.Path.Combine(gameRoot, "BepInEx"), "plugins"), "sf-oracle-endpoint.txt"),
+                };
+                foreach (var path in candidates)
+                {
+                    if (!System.IO.File.Exists(path)) continue;
+                    var lines = System.IO.File.ReadAllLines(path);
+                    if (lines.Length == 0) continue;
+                    string line = (lines[0] ?? "").Trim();
+                    if (line.Length == 0) continue;
+                    int colon = line.IndexOf(':');
+                    return colon > 0 ? line.Substring(0, colon).Trim() : line;
+                }
+            }
+            catch { }
+            return null;
         }
 
         private static void ResolveBridges()

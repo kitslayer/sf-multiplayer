@@ -2,16 +2,16 @@
 #  ALKA-KITSLAYER  -  Stick Fight: The Game  -  Oracle 1-Click Installer
 #  Team: kitslayer + AlkaDev  |  GitHub: kitslayer, AlkaPrime12
 #
-#  Qué hace (sin romper nada de tu carpeta):
-#   1. Encuentra Stick Fight en cualquier biblioteca de Steam.
-#   2. Hace BACKUP de tu Assembly-CSharp.dll y doorstop_config.ini.
-#   3. Detecta tu loader: BepInEx y/o MelonLoader, y se adapta solo.
-#   4. Instala BepInEx (si falta), el Assembly-CSharp parcheado y el plugin
-#      SFClientRecon (+ SFServerBrowser).
-#   5. Deja las opciones de lanzamiento listas (-address del oracle).
-#   6. Crea "Jugar-StickFight-ALKA.bat" en el escritorio.
+#  What it does (without breaking your folder):
+#   1. Finds Stick Fight in any Steam library.
+#   2. BACKS UP your Assembly-CSharp.dll and doorstop_config.ini.
+#   3. Detects your loader: BepInEx and/or MelonLoader, and adapts.
+#   4. Installs BepInEx (if missing), the patched Assembly-CSharp and the
+#      SFClientRecon (+ SFServerBrowser) plugins.
+#   5. Sets the launch options (-address of the oracle).
+#   6. Creates "Jugar-StickFight-ALKA.bat" on the desktop.
 #
-#  Para revertir: corre DESINSTALAR-ALKA-KITSLAYER.bat (restaura el backup).
+#  To revert: run DESINSTALAR-ALKA-KITSLAYER.bat (restores the backup).
 # ===================================================================
 
 param(
@@ -77,12 +77,12 @@ function Find-StickFight {
 # ============================================================ MAIN
 Show-AlkaKitslayerBanner
 
-Step 1 'Buscando Stick Fight: The Game...'
+Step 1 'Searching for Stick Fight: The Game...'
 $Sf = Find-StickFight
 if (-not $Sf) {
     Write-Host ''
-    Warn 'No encontre Stick Fight automaticamente.'
-    $Sf = Read-Host '    Pega la ruta de la carpeta StickFightTheGame'
+    Warn 'Could not find Stick Fight automatically.'
+    $Sf = Read-Host '    Paste the path to your StickFightTheGame folder'
     if (-not (Test-Path (Join-Path $Sf 'StickFight.exe'))) { throw 'Ruta invalida: no hay StickFight.exe ahi.' }
 }
 Ok $Sf
@@ -108,11 +108,11 @@ foreach ($f in @($SrvDll, $ReconDll)) {
 }
 
 # ----------------------------------------------------- detectar loaders
-Step 2 'Detectando loader (BepInEx / MelonLoader)...'
+Step 2 'Detecting loader (BepInEx / MelonLoader)...'
 $hasBepInEx = (Test-Path (Join-Path $Sf 'BepInEx')) -or (Test-Path (Join-Path $Sf 'winhttp.dll'))
 $hasMelon   = (Test-Path (Join-Path $Sf 'MelonLoader')) -or (Test-Path (Join-Path $Sf 'version.dll'))
-if ($hasMelon) { Warn 'MelonLoader detectado.' } else { Ok 'Sin MelonLoader.' }
-if ($hasBepInEx) { Ok 'BepInEx ya presente.' } else { Warn 'BepInEx no esta: lo instalo.' }
+if ($hasMelon) { Warn 'MelonLoader detected.' } else { Ok 'No MelonLoader.' }
+if ($hasBepInEx) { Ok 'BepInEx already present.' } else { Warn 'BepInEx missing: installing it.' }
 
 # ----------------------------------------------------- instalar BepInEx si falta
 if (-not $hasBepInEx) {
@@ -124,38 +124,38 @@ if (-not $hasBepInEx) {
         Invoke-WebRequest -Uri $bepUrl -OutFile $tmpZip -UseBasicParsing
         Expand-Archive -Path $tmpZip -DestinationPath $Sf -Force
         Remove-Item $tmpZip -Force
-        Ok 'BepInEx instalado.'
+        Ok 'BepInEx installed.'
     } catch {
         throw ("No pude descargar BepInEx automaticamente: {0}. Instalalo manual y reintenta." -f $_.Exception.Message)
     }
 }
 
 # ----------------------------------------------------- backup (no romper nada)
-Step 3 'Backup de tus archivos originales...'
+Step 3 'Backing up your original files...'
 if (-not (Test-Path $VanillaBak)) {
-    if (Test-Path $TargetAsm) { Copy-Item $TargetAsm $VanillaBak -Force; Ok 'Assembly-CSharp.dll respaldado (.vanilla.bak).' }
-} else { Ok 'Backup vanilla ya existe (no lo piso).' }
+    if (Test-Path $TargetAsm) { Copy-Item $TargetAsm $VanillaBak -Force; Ok 'Backed up your Assembly-CSharp.dll (.vanilla.bak).' }
+} else { Ok 'Backup already exists (not overwriting).' }
 $doorstop = Join-Path $Sf 'doorstop_config.ini'
 if ((Test-Path $doorstop) -and -not (Test-Path "$doorstop.alka.bak")) {
     Copy-Item $doorstop "$doorstop.alka.bak" -Force
 }
 
 # ----------------------------------------------------- instalar parche + plugins
-Step 4 'Instalando Assembly-CSharp parcheado (lobby -> oracle)...'
+Step 4 'Installing patched Assembly-CSharp (lobby -> oracle)...'
 Copy-Item $SrvDll $TargetAsm -Force
-Ok 'Assembly-CSharp.srv.v25 activo.'
+Ok 'Assembly-CSharp.srv.v25 active.'
 
-Step 5 'Instalando plugins en BepInEx...'
+Step 5 'Installing plugins into BepInEx...'
 if (-not (Test-Path $Plug)) { New-Item -ItemType Directory -Path $Plug -Force | Out-Null }
 Copy-Item $ReconDll (Join-Path $Plug 'SFClientRecon.dll') -Force
 Ok 'SFClientRecon.dll'
 if (Test-Path $BrowDll) { Copy-Item $BrowDll (Join-Path $Plug 'SFServerBrowser.dll') -Force; Ok 'SFServerBrowser.dll' }
 # El host NUNCA va en la PC del jugador
 $hostDll = Join-Path $Plug 'SFHeadlessHost.dll'
-if (Test-Path $hostDll) { Move-Item $hostDll "$hostDll.server-only" -Force; Warn 'SFHeadlessHost.dll movido (solo va en el servidor).' }
+if (Test-Path $hostDll) { Move-Item $hostDll "$hostDll.server-only" -Force; Warn 'SFHeadlessHost.dll moved (server-only).' }
 
 # ----------------------------------------------------- activar BepInEx doorstop
-Step 6 'Activando BepInEx (doorstop)...'
+Step 6 'Enabling BepInEx (doorstop)...'
 if (Test-Path $doorstop) {
     $ini = Get-Content $doorstop -Raw
     $ini = $ini -replace 'enabled\s*=\s*false', 'enabled = true'
@@ -164,11 +164,11 @@ if (Test-Path $doorstop) {
 }
 # Si hay MelonLoader, BepInEx (winhttp) y Melon (version) pueden convivir; avisamos
 if ($hasMelon) {
-    Warn 'Tenes MelonLoader + BepInEx. Si el menu online falla, renombra version.dll temporalmente.'
+    Warn 'You have MelonLoader + BepInEx. If the online menu fails, temporarily rename version.dll.'
 }
 
 # ----------------------------------------------------- launch options + acceso directo
-Step 7 'Dejando opciones de lanzamiento y acceso directo...'
+Step 7 'Setting launch options and desktop shortcut...'
 $launchArgs = ("-address {0} -port {1}" -f $ServerIp, $ServerPort)
 $desktop = [Environment]::GetFolderPath('Desktop')
 $batPath = Join-Path $desktop 'Jugar-StickFight-ALKA.bat'
@@ -181,21 +181,21 @@ rem Para CREAR lobbies desde el juego necesitas el token del servidor:
 rem   set "SF_CONTROL_TOKEN=pide-el-token-al-operador"
 start "" "$Sf\StickFight.exe" $launchArgs
 "@ | Set-Content -Path $batPath -Encoding ASCII
-Ok ("Acceso directo: {0}" -f $batPath)
+Ok ("Shortcut: {0}" -f $batPath)
 
 Write-Host ''
 Write-Host '===================================================================' -ForegroundColor Green
-Write-Host '   INSTALACION COMPLETA  -  ALKA-KITSLAYER' -ForegroundColor Yellow
+Write-Host '   INSTALL COMPLETE  -  ALKA-KITSLAYER' -ForegroundColor Yellow
 Write-Host '===================================================================' -ForegroundColor Green
 Write-Host ''
-Write-Host '  Para jugar (cualquiera de las dos):' -ForegroundColor White
-Write-Host ('   A) Doble clic en el escritorio: Jugar-StickFight-ALKA.bat') -ForegroundColor Gray
-Write-Host  '   B) Steam -> Stick Fight -> Propiedades -> Opciones de lanzamiento:' -ForegroundColor Gray
+Write-Host '  To play (either way):' -ForegroundColor White
+Write-Host ('   A) Double-click on the desktop: Jugar-StickFight-ALKA.bat') -ForegroundColor Gray
+Write-Host  '   B) Steam -> Stick Fight -> Properties -> Launch options:' -ForegroundColor Gray
 Write-Host ('        {0}' -f $launchArgs) -ForegroundColor Cyan
 Write-Host ''
-Write-Host '  En el juego: PLAY ONLINE -> QUICK MATCH. En el lobby escribi /start' -ForegroundColor White
+Write-Host '  In game: PLAY ONLINE -> QUICK MATCH. In the lobby type /start' -ForegroundColor White
 Write-Host ''
-Write-Host '  Revertir todo: DESINSTALAR-ALKA-KITSLAYER.bat' -ForegroundColor DarkGray
+Write-Host '  Roll back everything: DESINSTALAR-ALKA-KITSLAYER.bat' -ForegroundColor DarkGray
 Write-Host ''
-Write-Host '  Gracias por jugar en ALKA-KITSLAYER !' -ForegroundColor Magenta
+Write-Host '  Thanks for playing ALKA-KITSLAYER!' -ForegroundColor Magenta
 Write-Host ''

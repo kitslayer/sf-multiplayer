@@ -1,27 +1,32 @@
 ===================================================================
-  ALKA-KITSLAYER  -  Stick Fight Oracle  -  Instalacion 1-Click
+  ALKA-KITSLAYER  -  Stick Fight Oracle  -  1-Click Install
 ===================================================================
 
-COMO INSTALAR (1 clic):
-  1) Doble clic en:  INSTALAR-ALKA-KITSLAYER.bat
-  2) Acepta el permiso de administrador (necesario para escribir en Steam).
-  3) Espera a que diga "INSTALACION COMPLETA".
+HOW TO INSTALL (1 click):
+  1) Double-click:  INSTALAR-ALKA-KITSLAYER.bat
+  2) Accept the administrator prompt (needed to write into Steam).
+  3) Wait until it says "INSTALL COMPLETE".
 
-LISTO. Para jugar:
-  - Doble clic en el escritorio: "Jugar-StickFight-ALKA.bat"
-  - O abri Stick Fight desde Steam (ya quedan las opciones de lanzamiento).
-  - En el juego: PLAY ONLINE -> QUICK MATCH. En el lobby escribi /start.
+DONE. To play:
+  - Double-click on the desktop: "Jugar-StickFight-ALKA.bat"
+  - Or open Stick Fight from Steam (launch options are already set).
+  - In game: PLAY ONLINE -> QUICK MATCH, or press F2 for the ALKA lobby.
 
-QUE HACE EL INSTALADOR:
-  - Encuentra Stick Fight solo (cualquier biblioteca de Steam).
-  - Hace BACKUP de tus archivos antes de tocar nada (no rompe tu carpeta).
-  - Detecta si tenes BepInEx y/o MelonLoader y se adapta.
-  - Si te falta BepInEx, lo descarga e instala solo.
-  - Instala el cliente del oracle (SFClientRecon + browser).
+WHAT THE INSTALLER DOES:
+  - Finds Stick Fight automatically (any Steam library).
+  - BACKS UP your files before touching anything (won't break your folder).
+  - Detects whether you have BepInEx and/or MelonLoader and adapts.
+  - If BepInEx is missing, downloads and installs it.
+  - Installs the oracle client (SFClientRecon + SFServerBrowser).
 
-PARA REVERTIR TODO:
-  - Doble clic en:  DESINSTALAR-ALKA-KITSLAYER.bat
-    (restaura tu Assembly-CSharp.dll original y quita los plugins).
+TO ROLL BACK EVERYTHING:
+  - Double-click:  DESINSTALAR-ALKA-KITSLAYER.bat
+    It restores your original Assembly-CSharp.dll and removes ONLY the ALKA
+    plugins -- any other mods you had are left untouched.
+
+LANGUAGE:
+  - The UI is in English by default. Open the lobby (F2) -> SETTINGS to switch
+    to Spanish.
 
 -------------------------------------------------------------------
   Team: kitslayer + AlkaDev

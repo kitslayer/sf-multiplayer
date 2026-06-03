@@ -8,7 +8,7 @@ using UnityEngine.UI;
 namespace SFServerBrowser
 {
     // ============================================================================
-    //  LobbyOverlay — the native uGUI "hyper-complete" lobby (Centauri-style).
+    //  LobbyOverlay — the native uGUI "hyper-complete" lobby (native-uGUI style).
     //
     //  Toggle with F2 (works in the menu AND in a match). Three tabs:
     //    • LOBBY  — current code + COPY, host/ping/status, connected players,
@@ -37,9 +37,9 @@ namespace SFServerBrowser
         private CanvasGroup _group;
         private RectTransform _card;
 
-        // Tabs
-        private readonly GameObject[] _panels = new GameObject[3];
-        private readonly Button[] _tabBtns = new Button[3];
+        // Tabs (0 lobby, 1 browse, 2 join, 3 settings)
+        private readonly GameObject[] _panels = new GameObject[4];
+        private readonly Button[] _tabBtns = new Button[4];
 
         // Lobby tab dynamic refs
         private Text _codeText, _statusText, _hostText, _pingText, _playersEmpty;
@@ -149,9 +149,10 @@ namespace SFServerBrowser
             _panels[0] = BuildLobbyTab(content.transform);
             _panels[1] = BuildBrowseTab(content.transform);
             _panels[2] = BuildJoinTab(content.transform);
+            _panels[3] = BuildSettingsTab(content.transform);
 
             // footer hint
-            Ugui.Label(_card, "F2 toggle  ·  Esc close  ·  ALKA Online", new Vector2(0.025f, 0.005f), new Vector2(0.975f, 0.05f),
+            Ugui.Label(_card, Loc.T("FOOTER"), new Vector2(0.025f, 0.005f), new Vector2(0.975f, 0.05f),
                 12, Ugui.TextDim, TextAnchor.MiddleCenter, FontStyle.Normal);
         }
 
@@ -160,7 +161,7 @@ namespace SFServerBrowser
             Ugui.Panel(_card, "Header", new Vector2(0f, 0.86f), new Vector2(1f, 1f), Ugui.Header, false);
             Ugui.Label(_card, "<color=#3FD9F2>ALKA</color>  ONLINE", new Vector2(0.03f, 0.86f), new Vector2(0.6f, 1f),
                 30, Ugui.TextWhite, TextAnchor.MiddleLeft);
-            Ugui.Label(_card, "Centralized multiplayer lobby", new Vector2(0.03f, 0.865f), new Vector2(0.6f, 0.9f),
+            Ugui.Label(_card, Loc.T("SUBTITLE"), new Vector2(0.03f, 0.865f), new Vector2(0.6f, 0.9f),
                 13, Ugui.TextDim, TextAnchor.LowerLeft, FontStyle.Normal);
             Ugui.Btn(_card, "X", new Vector2(0.93f, 0.88f), new Vector2(0.985f, 0.98f),
                 delegate { SetOpen(false); }, 20, Ugui.Bad, new Color(1f, 0.45f, 0.45f, 1f));
@@ -168,21 +169,21 @@ namespace SFServerBrowser
 
         private void BuildTabs()
         {
-            string[] labels = { "LOBBY", "BROWSE", "JOIN" };
-            float x0 = 0.03f, w = 0.20f, gap = 0.012f;
-            for (int i = 0; i < 3; i++)
+            string[] labels = { Loc.T("TAB_LOBBY"), Loc.T("TAB_BROWSE"), Loc.T("TAB_JOIN"), Loc.T("TAB_SETTINGS") };
+            float x0 = 0.03f, w = 0.155f, gap = 0.01f;
+            for (int i = 0; i < 4; i++)
             {
                 int idx = i;
                 float xa = x0 + i * (w + gap);
                 _tabBtns[i] = Ugui.Btn(_card, labels[i], new Vector2(xa, 0.805f), new Vector2(xa + w, 0.852f),
-                    delegate { SelectTab(idx); }, 16);
+                    delegate { SelectTab(idx); }, 15);
             }
         }
 
         private void SelectTab(int tab)
         {
-            _tab = Mathf.Clamp(tab, 0, 2);
-            for (int i = 0; i < 3; i++)
+            _tab = Mathf.Clamp(tab, 0, 3);
+            for (int i = 0; i < 4; i++)
             {
                 if (_panels[i] != null) _panels[i].SetActive(i == _tab);
                 if (_tabBtns[i] != null)
@@ -203,25 +204,25 @@ namespace SFServerBrowser
             var go = Ugui.Panel(parent, "LobbyTab", Vector2.zero, Vector2.one, new Color(0, 0, 0, 0), false).gameObject;
 
             // Big code + copy
-            Ugui.Label(go.transform, "LOBBY CODE", new Vector2(0.04f, 0.86f), new Vector2(0.5f, 0.94f), 13, Ugui.TextDim, TextAnchor.LowerLeft);
+            Ugui.Label(go.transform, Loc.T("LOBBY_CODE"), new Vector2(0.04f, 0.86f), new Vector2(0.5f, 0.94f), 13, Ugui.TextDim, TextAnchor.LowerLeft);
             _codeText = Ugui.Label(go.transform, "—", new Vector2(0.04f, 0.74f), new Vector2(0.5f, 0.87f), 46, Ugui.Accent, TextAnchor.MiddleLeft);
-            Ugui.Btn(go.transform, "COPY CODE", new Vector2(0.52f, 0.79f), new Vector2(0.74f, 0.87f), OnCopyCode, 15);
-            Ugui.Btn(go.transform, "INVITE (COPY ARGS)", new Vector2(0.755f, 0.79f), new Vector2(0.96f, 0.87f), OnInvite, 13);
+            Ugui.Btn(go.transform, Loc.T("COPY_CODE"), new Vector2(0.52f, 0.79f), new Vector2(0.74f, 0.87f), OnCopyCode, 15);
+            Ugui.Btn(go.transform, Loc.T("INVITE"), new Vector2(0.755f, 0.79f), new Vector2(0.96f, 0.87f), OnInvite, 13);
 
             // host / ping / status row
-            _hostText = Ugui.Label(go.transform, "Host: —", new Vector2(0.04f, 0.66f), new Vector2(0.4f, 0.73f), 15, Ugui.TextWhite, TextAnchor.MiddleLeft);
-            _pingText = Ugui.Label(go.transform, "Ping: —", new Vector2(0.41f, 0.66f), new Vector2(0.62f, 0.73f), 15, Ugui.Good, TextAnchor.MiddleLeft);
-            _statusText = Ugui.Label(go.transform, "Status: in menu", new Vector2(0.63f, 0.66f), new Vector2(0.96f, 0.73f), 15, Ugui.Warn, TextAnchor.MiddleLeft);
+            _hostText = Ugui.Label(go.transform, Loc.T("HOST") + "—", new Vector2(0.04f, 0.66f), new Vector2(0.4f, 0.73f), 15, Ugui.TextWhite, TextAnchor.MiddleLeft);
+            _pingText = Ugui.Label(go.transform, Loc.T("PING") + "—", new Vector2(0.41f, 0.66f), new Vector2(0.62f, 0.73f), 15, Ugui.Good, TextAnchor.MiddleLeft);
+            _statusText = Ugui.Label(go.transform, Loc.T("STATUS") + Loc.T("ST_MENU"), new Vector2(0.63f, 0.66f), new Vector2(0.96f, 0.73f), 15, Ugui.Warn, TextAnchor.MiddleLeft);
 
             // players header + box
-            Ugui.Label(go.transform, "PLAYERS", new Vector2(0.04f, 0.58f), new Vector2(0.5f, 0.64f), 14, Ugui.TextDim, TextAnchor.LowerLeft);
+            Ugui.Label(go.transform, Loc.T("PLAYERS"), new Vector2(0.04f, 0.58f), new Vector2(0.5f, 0.64f), 14, Ugui.TextDim, TextAnchor.LowerLeft);
             _playersBox = Ugui.Panel(go.transform, "Players", new Vector2(0.04f, 0.16f), new Vector2(0.96f, 0.58f), new Color(0, 0, 0, 0.18f), false).rectTransform;
-            _playersEmpty = Ugui.Label(_playersBox, "No players detected yet.", Vector2.zero, Vector2.one, 14, Ugui.TextDim, TextAnchor.MiddleCenter, FontStyle.Normal);
+            _playersEmpty = Ugui.Label(_playersBox, Loc.T("NO_PLAYERS"), Vector2.zero, Vector2.one, 14, Ugui.TextDim, TextAnchor.MiddleCenter, FontStyle.Normal);
 
             // action buttons
-            Ugui.Btn(go.transform, "CREATE NEW LOBBY", new Vector2(0.04f, 0.03f), new Vector2(0.36f, 0.13f), OnCreate, 17, Ugui.AccentBtn, Ugui.AccentBtnHi);
-            _startBtn = Ugui.Btn(go.transform, "START MATCH", new Vector2(0.37f, 0.03f), new Vector2(0.66f, 0.13f), OnStart, 17, Ugui.GoBtn, Ugui.GoBtnHi);
-            _leaveBtn = Ugui.Btn(go.transform, "LEAVE", new Vector2(0.67f, 0.03f), new Vector2(0.96f, 0.13f), OnLeave, 17, new Color(0.4f, 0.22f, 0.24f, 1f), new Color(0.6f, 0.3f, 0.32f, 1f));
+            Ugui.Btn(go.transform, Loc.T("CREATE_HOST"), new Vector2(0.04f, 0.03f), new Vector2(0.36f, 0.13f), OnCreate, 17, Ugui.AccentBtn, Ugui.AccentBtnHi);
+            _startBtn = Ugui.Btn(go.transform, Loc.T("START"), new Vector2(0.37f, 0.03f), new Vector2(0.66f, 0.13f), OnStart, 17, Ugui.GoBtn, Ugui.GoBtnHi);
+            _leaveBtn = Ugui.Btn(go.transform, Loc.T("LEAVE"), new Vector2(0.67f, 0.03f), new Vector2(0.96f, 0.13f), OnLeave, 17, new Color(0.4f, 0.22f, 0.24f, 1f), new Color(0.6f, 0.3f, 0.32f, 1f));
             return go;
         }
 
@@ -229,10 +230,10 @@ namespace SFServerBrowser
         private GameObject BuildBrowseTab(Transform parent)
         {
             var go = Ugui.Panel(parent, "BrowseTab", Vector2.zero, Vector2.one, new Color(0, 0, 0, 0), false).gameObject;
-            Ugui.Btn(go.transform, "REFRESH", new Vector2(0.04f, 0.88f), new Vector2(0.24f, 0.97f),
+            Ugui.Btn(go.transform, Loc.T("REFRESH"), new Vector2(0.04f, 0.88f), new Vector2(0.24f, 0.97f),
                 delegate { Owner?.UiRefresh(); RefreshServerList(); }, 15);
             _browseStatus = Ugui.Label(go.transform, "", new Vector2(0.26f, 0.88f), new Vector2(0.7f, 0.97f), 14, Ugui.TextDim, TextAnchor.MiddleLeft, FontStyle.Normal);
-            Ugui.Btn(go.transform, "CREATE", new Vector2(0.76f, 0.88f), new Vector2(0.96f, 0.97f), OnCreate, 15, Ugui.AccentBtn, Ugui.AccentBtnHi);
+            Ugui.Btn(go.transform, Loc.T("CREATE"), new Vector2(0.76f, 0.88f), new Vector2(0.96f, 0.97f), OnCreate, 15, Ugui.AccentBtn, Ugui.AccentBtnHi);
             _serverBox = Ugui.Panel(go.transform, "List", new Vector2(0.04f, 0.03f), new Vector2(0.96f, 0.85f), new Color(0, 0, 0, 0.18f), false).rectTransform;
             return go;
         }
@@ -241,12 +242,54 @@ namespace SFServerBrowser
         private GameObject BuildJoinTab(Transform parent)
         {
             var go = Ugui.Panel(parent, "JoinTab", Vector2.zero, Vector2.one, new Color(0, 0, 0, 0), false).gameObject;
-            Ugui.Label(go.transform, "ENTER A LOBBY CODE", new Vector2(0.1f, 0.74f), new Vector2(0.9f, 0.84f), 22, Ugui.TextWhite, TextAnchor.MiddleCenter);
+            Ugui.Label(go.transform, Loc.T("ENTER_CODE"), new Vector2(0.1f, 0.74f), new Vector2(0.9f, 0.84f), 22, Ugui.TextWhite, TextAnchor.MiddleCenter);
             _joinInput = Ugui.Input(go.transform, "CODE", new Vector2(0.28f, 0.55f), new Vector2(0.72f, 0.70f), 40, 8);
-            Ugui.Btn(go.transform, "JOIN LOBBY", new Vector2(0.34f, 0.40f), new Vector2(0.66f, 0.52f), OnJoinFromInput, 18, Ugui.GoBtn, Ugui.GoBtnHi);
-            Ugui.Btn(go.transform, "PASTE", new Vector2(0.34f, 0.27f), new Vector2(0.49f, 0.37f), OnPaste, 14);
-            Ugui.Label(go.transform, "Codes are 4 characters (A–Z, 0–9).", new Vector2(0.1f, 0.15f), new Vector2(0.9f, 0.24f), 14, Ugui.TextDim, TextAnchor.MiddleCenter, FontStyle.Normal);
+            Ugui.Btn(go.transform, Loc.T("JOIN_LOBBY"), new Vector2(0.34f, 0.40f), new Vector2(0.66f, 0.52f), OnJoinFromInput, 18, Ugui.GoBtn, Ugui.GoBtnHi);
+            Ugui.Btn(go.transform, Loc.T("PASTE"), new Vector2(0.34f, 0.27f), new Vector2(0.49f, 0.37f), OnPaste, 14);
+            Ugui.Label(go.transform, Loc.T("CODE_HINT"), new Vector2(0.1f, 0.15f), new Vector2(0.9f, 0.24f), 14, Ugui.TextDim, TextAnchor.MiddleCenter, FontStyle.Normal);
             return go;
+        }
+
+        // ---- SETTINGS tab -----------------------------------------------------
+        private GameObject BuildSettingsTab(Transform parent)
+        {
+            var go = Ugui.Panel(parent, "SettingsTab", Vector2.zero, Vector2.one, new Color(0, 0, 0, 0), false).gameObject;
+            Ugui.Label(go.transform, Loc.T("SET_LANGUAGE"), new Vector2(0.06f, 0.80f), new Vector2(0.94f, 0.90f), 22, Ugui.TextWhite, TextAnchor.MiddleLeft);
+            Ugui.Label(go.transform, Loc.T("SET_LANG_HINT"), new Vector2(0.06f, 0.72f), new Vector2(0.94f, 0.80f), 14, Ugui.TextDim, TextAnchor.MiddleLeft, FontStyle.Normal);
+
+            // EN / ES buttons — selected one uses the accent colour.
+            bool es = Loc.IsSpanish;
+            Ugui.Btn(go.transform, Loc.T("ENGLISH"), new Vector2(0.06f, 0.58f), new Vector2(0.45f, 0.70f),
+                delegate { SetLanguage(Loc.Language.English); }, 18,
+                es ? Ugui.ButtonBg : Ugui.AccentBtn, es ? Ugui.ButtonHover : Ugui.AccentBtnHi);
+            Ugui.Btn(go.transform, Loc.T("SPANISH"), new Vector2(0.47f, 0.58f), new Vector2(0.86f, 0.70f),
+                delegate { SetLanguage(Loc.Language.Spanish); }, 18,
+                es ? Ugui.AccentBtn : Ugui.ButtonBg, es ? Ugui.AccentBtnHi : Ugui.ButtonHover);
+
+            Ugui.Label(go.transform, Loc.T("SET_ABOUT"), new Vector2(0.06f, 0.10f), new Vector2(0.94f, 0.30f), 14, Ugui.TextDim, TextAnchor.UpperLeft, FontStyle.Normal);
+            return go;
+        }
+
+        private void SetLanguage(Loc.Language lang)
+        {
+            if (Loc.Lang == lang) return;
+            Loc.Lang = lang;
+            Rebuild();           // rebuild the whole overlay in the new language
+        }
+
+        // Tear down and rebuild the canvas (used on language change).
+        private void Rebuild()
+        {
+            int keepTab = _tab;
+            try { if (_root != null) UnityEngine.Object.Destroy(_root); } catch { }
+            _root = null; _canvas = null; _card = null; _group = null;
+            for (int i = 0; i < _panels.Length; i++) _panels[i] = null;
+            for (int i = 0; i < _tabBtns.Length; i++) _tabBtns[i] = null;
+            _built = false;
+            EnsureBuilt();
+            SelectTab(keepTab);
+            RefreshLobbyTab();
+            RefreshServerList();
         }
 
         // ---- dynamic refresh --------------------------------------------------
@@ -255,19 +298,19 @@ namespace SFServerBrowser
             if (Owner == null) return;
             string code = Owner.UiCurrentLobbyCode();
             if (_codeText != null) _codeText.text = string.IsNullOrEmpty(code) ? "—" : code;
-            if (_hostText != null) _hostText.text = "Host: " + (Owner.UiHasEndpoint ? Owner.UiEndpointHost : "—");
+            if (_hostText != null) _hostText.text = Loc.T("HOST") + (Owner.UiHasEndpoint ? Owner.UiEndpointHost : "—");
             if (_pingText != null)
             {
                 int ms = Owner.UiPingMs;
-                _pingText.text = ms > 0 ? "Ping: " + ms + " ms" : "Ping: —";
+                _pingText.text = Loc.T("PING") + (ms > 0 ? ms + " ms" : "—");
                 _pingText.color = ms <= 0 ? Ugui.TextDim : (ms < 90 ? Ugui.Good : (ms < 180 ? Ugui.Warn : Ugui.Bad));
             }
             if (_statusText != null)
             {
                 string joining = Owner.UiJoiningCode;
-                if (!string.IsNullOrEmpty(joining)) { _statusText.text = "Status: connecting " + joining + "…"; _statusText.color = Ugui.Warn; }
-                else if (Owner.UiInMatch) { _statusText.text = "Status: in match"; _statusText.color = Ugui.Good; }
-                else { _statusText.text = "Status: in menu"; _statusText.color = Ugui.TextDim; }
+                if (!string.IsNullOrEmpty(joining)) { _statusText.text = Loc.T("STATUS") + Loc.T("ST_CONNECTING") + joining + "…"; _statusText.color = Ugui.Warn; }
+                else if (Owner.UiInMatch) { _statusText.text = Loc.T("STATUS") + Loc.T("ST_MATCH"); _statusText.color = Ugui.Good; }
+                else { _statusText.text = Loc.T("STATUS") + Loc.T("ST_MENU"); _statusText.color = Ugui.TextDim; }
             }
             RefreshPlayers();
             if (_startBtn != null) _startBtn.interactable = Owner.UiInMatch == false;   // start only from lobby/menu
@@ -305,12 +348,12 @@ namespace SFServerBrowser
 
             var servers = Owner.UiServers;
             if (_browseStatus != null)
-                _browseStatus.text = Owner.UiFetching ? "Searching…"
-                    : (!Owner.UiHasEndpoint ? "Set SF_LOBBY_ENDPOINT" : (servers.Count + " online  ·  " + Owner.UiStatusText));
+                _browseStatus.text = Owner.UiFetching ? Loc.T("SEARCHING")
+                    : (!Owner.UiHasEndpoint ? Loc.T("NO_ENDPOINT") : (servers.Count + Loc.T("ONLINE")));
 
             if (servers.Count == 0)
             {
-                Ugui.Label(_serverBox, Owner.UiHasEndpoint ? "No lobbies. Hit CREATE to start one." : "Server browser disabled (no endpoint).",
+                Ugui.Label(_serverBox, Owner.UiHasEndpoint ? Loc.T("NO_LOBBIES") : Loc.T("NO_ENDPOINT"),
                     Vector2.zero, Vector2.one, 15, Ugui.TextDim, TextAnchor.MiddleCenter, FontStyle.Normal);
                 return;
             }
@@ -330,11 +373,11 @@ namespace SFServerBrowser
 
                 Color cap = CapColor(s);
                 Ugui.Pill(row.transform, s.Players + "/" + s.Capacity, new Vector2(0.54f, 0.24f), new Vector2(0.69f, 0.76f), cap);
-                Ugui.Pill(row.transform, s.Alive ? "ALIVE" : "DOWN", new Vector2(0.70f, 0.24f), new Vector2(0.82f, 0.76f), s.Alive ? Ugui.Good : Ugui.Bad);
+                Ugui.Pill(row.transform, s.Alive ? Loc.T("ALIVE") : Loc.T("DOWN"), new Vector2(0.70f, 0.24f), new Vector2(0.82f, 0.76f), s.Alive ? Ugui.Good : Ugui.Bad);
 
                 bool full = s.Capacity > 0 && s.Players >= s.Capacity;
                 string code = s.Code;
-                var jb = Ugui.Btn(row.transform, full ? "FULL" : "JOIN", new Vector2(0.83f, 0.18f), new Vector2(0.985f, 0.82f),
+                var jb = Ugui.Btn(row.transform, full ? Loc.T("FULL") : Loc.T("TAB_JOIN"), new Vector2(0.83f, 0.18f), new Vector2(0.985f, 0.82f),
                     delegate { Owner.UiJoinCode(code); SetOpen(false); }, 15, Ugui.GoBtn, Ugui.GoBtnHi);
                 jb.interactable = !full && s.Alive;
             }

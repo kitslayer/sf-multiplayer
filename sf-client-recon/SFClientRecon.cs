@@ -62,7 +62,7 @@ namespace SFClientRecon
     {
         public const string PluginGuid = "com.stickfightdev.client-recon";
         public const string PluginName = "SFClientRecon";
-        public const string PluginVersion = "0.4.0";
+        public const string PluginVersion = "0.4.1";
 
         internal static ManualLogSource Log;
         internal static bool RefOk(object o) => !ReferenceEquals(o, null);
@@ -558,9 +558,20 @@ namespace SFClientRecon
             if (!_ctrlHasCtrlLookupTried) { _ctrlHasCtrlLookupTried = true; _ctrlHasControlField = AccessTools.Field(_ctrlTypeForNp, "mHasControl"); }
         }
 
+        private static float _nextFpsReapplyAt;
         private void Update()
         {
             if (!_running) return;
+            // KEEP FPS UNCAPPED. Stock SF (and some menu transitions) re-assert
+            // Application.targetFrameRate = 60 / vSyncCount = 1 after our Awake,
+            // re-capping the game to 60 ("limitado a 60 fps"). Re-apply the uncap
+            // ~once a second so it always sticks. Cheap (two field writes).
+            if (Time.unscaledTime >= _nextFpsReapplyAt)
+            {
+                _nextFpsReapplyAt = Time.unscaledTime + 1f;
+                if (Application.targetFrameRate != -1) Application.targetFrameRate = -1;
+                if (QualitySettings.vSyncCount != 0) QualitySettings.vSyncCount = 0;
+            }
             try { TickOracleAutoConnect(); } catch { }
             List<SnapshotEntry> snap;
             List<NsoSnapEntry>  nsoSnap;
@@ -701,6 +712,13 @@ namespace SFClientRecon
         private const float CrateVertTrigger    = 2.0f;   // |v.y| above this enables the explosion cap
         private const float CrateMaxUp          = 9.0f;   // m/s upward — lets explosions launch crates
         private const float CrateMaxFall        = 30.0f;  // m/s downward — natural gravity fall
+        // Air-tumble: crates falling through the air with no spin look frozen/stiff
+        // ("no giran ni rotan en el aire"). Nudge a gentle Z-axis tumble (Z is the
+        // ONLY rotation axis synced over the NSO wire, so both clients see it the
+        // same). Bounded + deterministic sign per body so it stays consistent.
+        private const float CrateAirTumbleSpeed   = 3.0f; // |down v| above which we add tumble
+        private const float CrateAirTumbleTorque  = 0.16f;// mass-scaled gentle spin
+        private const float CrateAirTumbleMaxAngSqr = 9f; // skip if already spinning (~3 rad/s)
         private float _crateDiagAt2 = -1f;
         private void ClampCrateVelocities()
         {
@@ -740,6 +758,14 @@ namespace SFClientRecon
                     if (v.y > CrateMaxUp) { v.y = CrateMaxUp; changed = true; }
                     else if (v.y < -CrateMaxFall) { v.y = -CrateMaxFall; changed = true; }
                     if (changed) rb.velocity = v;
+
+                    // AIR TUMBLE — falling fast with little spin ⇒ add a gentle,
+                    // deterministic Z tumble so it rotates as it falls (synced axis).
+                    if (v.y < -CrateAirTumbleSpeed && rb.angularVelocity.sqrMagnitude < CrateAirTumbleMaxAngSqr)
+                    {
+                        float sign = ((rb.GetInstanceID() & 1) == 0) ? 1f : -1f;
+                        rb.AddTorque(new Vector3(0f, 0f, sign * rb.mass * CrateAirTumbleTorque), ForceMode.Force);
+                    }
                 }
             }
             // DIAG: shows if crates are dynamic (local physics) and whether they

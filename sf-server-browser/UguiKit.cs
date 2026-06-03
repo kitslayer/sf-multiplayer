@@ -9,7 +9,7 @@ namespace SFServerBrowser
     //
     //  Unlike the IMGUI browser (UiTheme/UiWidgets), this builds REAL uGUI objects
     //  (Canvas / Image / Text / Button / InputField) at runtime — the same native
-    //  approach the reference mod (Centauri "StickFightTeamsMod") uses, which is
+    //  approach the reference uGUI approach uses, which is
     //  proven to render correctly on this exact game build. That gives crisp text
     //  with outlines, shadowed buttons and smooth hover colour transitions that
     //  IMGUI can't match. CanvasScaler keeps it resolution-independent.
