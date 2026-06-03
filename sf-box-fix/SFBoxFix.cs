@@ -573,9 +573,9 @@ namespace SFBoxFix
                 {
                     _gripMaterial = new PhysicMaterial("CrateGrip")
                     {
-                        staticFriction = 0.45f,
-                        dynamicFriction = 0.4f,
-                        bounciness = 0.1f,
+                        staticFriction = 0.55f,
+                        dynamicFriction = 0.5f,
+                        bounciness = 0.05f,
                         frictionCombine = PhysicMaterialCombine.Multiply,
                         bounceCombine = PhysicMaterialCombine.Minimum
                     };
@@ -678,7 +678,7 @@ namespace SFBoxFix
                     rb.sleepThreshold = 0.005f;
                     // Lower mass = responsive rotation/tipping (fling still bounded
                     // by the velocity clamp, not mass). Matches client.
-                    rb.mass = 45f;
+                    rb.mass = 80f;
                     rb.drag = 0.3f;
                     rb.angularDrag = 0.8f;
                     rb.maxAngularVelocity = 7f;

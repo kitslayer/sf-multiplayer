@@ -208,7 +208,12 @@ namespace SFClientRecon
                 // Mid mass: enough that the player can't shove it weightlessly,
                 // light enough that impact rotation still reads. Gravity-tipping is
                 // mass-independent (handled by friction grip + free Z rotation).
-                rb.mass                = 45f;
+                // Heavier to resist the player's collision impulse (the user kept
+                // pushing crates around too easily). Bullet/explosion fling is
+                // bounded by the velocity clamp NOT by mass, so heavier mass only
+                // affects the response to the player's character controller and to
+                // crate-crate impacts → stacks feel more solid.
+                rb.mass                = 80f;
                 // GRAVITY-TIP FIX: PhysX box-on-box keeps contacts across the full
                 // bottom face, so a crate with most of its mass overhanging the
                 // edge of another still has "support" contacts and never pivots —

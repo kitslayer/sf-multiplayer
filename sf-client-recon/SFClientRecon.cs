@@ -711,17 +711,69 @@ namespace SFClientRecon
         }
 
         // ====================================================================
-        //  OVERHANG TORQUE ASSIST
-        //  PhysX box-on-box maintains contacts across the bottom face even when
-        //  most of the upper box hangs in air; the resulting normal forces cancel
-        //  the gravity torque and the crate sits perched. We compensate by
-        //  computing the gravity torque about the support edge and applying it
-        //  explicitly: τ = r × g · m  where r is the horizontal offset from the
-        //  support centre to the crate's CoM. This is exactly the torque the
-        //  solver SHOULD generate; we only apply it when the crate is essentially
-        //  still (so we don't fight a tip that's already happening on its own).
+        //  STACK BEHAVIOR + PLAYER PUSH DAMPING + OVERHANG TIP
+        //  Three coordinated behaviours run each FixedUpdate after the velocity
+        //  clamp, all driven by per-crate "is something above? is a player
+        //  touching? am I supported?" probes:
+        //
+        //  (A) STACK COHESION — if another crate is RIGHT ABOVE this one (we're
+        //      supporting load), damp our angular velocity strongly so the stack
+        //      doesn't twist apart when impacted (a vertical impulse lifts the
+        //      whole column instead of spreading sideways). Also skip the
+        //      overhang tip on load-bearing crates so a stack on a ledge doesn't
+        //      collapse from a phantom tip while still under load.
+        //
+        //  (B) PLAYER PUSH DAMPING — the player's character controller can shove
+        //      crates around easily via collision impulses. While a player is
+        //      touching this crate, attenuate the horizontal velocity each tick
+        //      → crates feel HEAVY when walked-into without being immovable
+        //      (the player can still push, just slower). Independent of mass so
+        //      explosions/bullets aren't affected.
+        //
+        //  (C) OVERHANG TIP — gravity torque about the unsupported edge, applied
+        //      explicitly because PhysX's box-on-box contact persistence cancels
+        //      the natural torque. Now also skipped when in a stack (A).
         // ====================================================================
-        private void ApplyOverhangAssist()
+        private static readonly Collider[] _contactBuf = new Collider[12];
+        private static Type _ctrlTypeClient, _npTypeClient;
+
+        // Detect a pushable crate (non-kinematic rigidbody) directly above this
+        // one. Used by stack cohesion + to disable overhang assist on load-bearing
+        // crates so a stack stays cohesive.
+        private static bool HasCrateAbove(Rigidbody self, Bounds b)
+        {
+            Vector3 origin = new Vector3(b.center.x, b.max.y + 0.02f, b.center.z);
+            RaycastHit hit;
+            if (!Physics.Raycast(origin, Vector3.up, out hit, 0.4f)) return false;
+            var rb = hit.rigidbody;
+            return rb != null && rb != self && !rb.isKinematic;
+        }
+
+        // Detect a player Controller / NetworkPlayer touching this crate.
+        // Uses cached reflected types so it's cheap (no per-frame TypeByName).
+        private static bool IsPlayerTouching(Rigidbody self, Bounds b)
+        {
+            if ((object)_ctrlTypeClient == null) _ctrlTypeClient = AccessTools.TypeByName("Controller");
+            if ((object)_npTypeClient == null)   _npTypeClient   = AccessTools.TypeByName("NetworkPlayer");
+            if ((object)_ctrlTypeClient == null && (object)_npTypeClient == null) return false;
+            int n = Physics.OverlapBoxNonAlloc(b.center, b.extents + Vector3.one * 0.12f, _contactBuf, Quaternion.identity);
+            for (int i = 0; i < n; i++)
+            {
+                var c = _contactBuf[i];
+                if ((object)c == null) continue;
+                if (c.attachedRigidbody == self) continue;
+                var root = c.transform.root;
+                if ((object)_ctrlTypeClient != null && root.GetComponentInChildren(_ctrlTypeClient, true) != null) return true;
+                if ((object)_npTypeClient   != null && root.GetComponentInChildren(_npTypeClient,   true) != null) return true;
+            }
+            return false;
+        }
+
+        private const float StackAngularDamp  = 0.55f;   // multiplied each tick when load above (so a stack rotates slowly)
+        private const float PlayerHorizDamp   = 0.78f;   // multiplied each tick while a player is touching
+        private const float OverhangTorqueMul = 0.4f;    // fraction of full gravity torque applied to perched crates
+
+        private void ApplyStackAndContactBehavior()
         {
             if (_nsoCache.Count == 0) return;
             foreach (var kv in _nsoCache)
@@ -731,45 +783,62 @@ namespace SFClientRecon
                 var rb = entry.Rb;
                 if (rb == null || rb.isKinematic) continue;
 
-                // Only assist near-still crates. If it's already moving/tipping,
-                // gravity is doing its job — don't pile extra torque on top.
+                var comp = entry.Comp; if (comp == null) continue;
+                var col = comp.GetComponent<Collider>() ?? comp.GetComponentInChildren<Collider>();
+                if (col == null || col.isTrigger) continue;
+                Bounds b = col.bounds;
+                if (b.extents.x < 0.05f || b.extents.y < 0.05f) continue;
+
+                bool loadAbove     = HasCrateAbove(rb, b);
+                bool playerTouches = IsPlayerTouching(rb, b);
+
+                // (A) Stack cohesion: a load-bearing crate must NOT spin freely —
+                // strongly damp angular velocity so the column stays vertical.
+                if (loadAbove && rb.angularVelocity.sqrMagnitude > 0.0001f)
+                    rb.angularVelocity *= StackAngularDamp;
+
+                // (B) Player push damping: scale down horizontal velocity (X/Z)
+                // gained from collisions while a player is in contact. Y left
+                // alone so the player can't stop a falling crate by walking under
+                // it. Skipped if velocity is already small or already a blast.
+                if (playerTouches)
+                {
+                    Vector3 v = rb.velocity;
+                    if (v.x * v.x + v.z * v.z > 0.04f && Mathf.Abs(v.y) < 1.5f)
+                    {
+                        v.x *= PlayerHorizDamp;
+                        v.z *= PlayerHorizDamp;
+                        rb.velocity = v;
+                    }
+                }
+
+                // (C) Overhang tip — skip while supporting load OR already moving.
+                if (loadAbove) continue;
                 if (rb.velocity.sqrMagnitude > 1.0f) continue;
                 if (rb.angularVelocity.sqrMagnitude > 0.3f) continue;
 
-                var comp = entry.Comp; if (comp == null) continue;
-                var col = comp.GetComponent<Collider>();
-                if (col == null) col = comp.GetComponentInChildren<Collider>();
-                if (col == null || col.isTrigger) continue;
-                Bounds b = col.bounds;
                 Vector3 c = b.center;
                 Vector3 e = b.extents;
-                if (e.x < 0.05f || e.y < 0.05f) continue;
-
-                // Probe support at left/right edges of the bottom (X is the
-                // tipping axis in SF's 2.5D plane; Z is depth).
-                float probeY    = c.y - e.y + 0.05f;     // just above bottom
-                float probeDist = 0.20f;                 // small reach below the box
-                float probeX    = e.x * 0.85f;           // near the edge
-                bool leftSup    = Physics.Raycast(new Vector3(c.x - probeX, probeY, c.z), Vector3.down, probeDist);
-                bool rightSup   = Physics.Raycast(new Vector3(c.x + probeX, probeY, c.z), Vector3.down, probeDist);
-                if (leftSup == rightSup) continue;       // fully supported or fully airborne
-
-                // Tip toward the unsupported side. τ = tipDir × gravity, scaled
-                // by mass + a 0.4 factor (full gravity torque feels too aggressive).
+                float probeY = c.y - e.y + 0.05f;
+                float probeX = e.x * 0.85f;
+                bool leftSup  = Physics.Raycast(new Vector3(c.x - probeX, probeY, c.z), Vector3.down, 0.20f);
+                bool rightSup = Physics.Raycast(new Vector3(c.x + probeX, probeY, c.z), Vector3.down, 0.20f);
+                if (leftSup == rightSup) continue;
                 Vector3 tipDir = leftSup ? Vector3.right : Vector3.left;
-                Vector3 torque = Vector3.Cross(tipDir, Physics.gravity) * rb.mass * 0.4f;
+                Vector3 torque = Vector3.Cross(tipDir, Physics.gravity) * rb.mass * OverhangTorqueMul;
                 rb.AddTorque(torque, ForceMode.Force);
             }
         }
 
         // Clamp in FixedUpdate (the physics step) — a bullet imparts velocity in
         // FixedUpdate, so clamping in Update let the crate fly a full render frame
-        // first. FixedUpdate catches it the same physics step.
+        // first. FixedUpdate catches it the same physics step. After clamping, run
+        // stack/contact behavior so cohesion + damping observe the clamped speeds.
         private void FixedUpdate()
         {
             if (!_running) return;
-            try { ClampCrateVelocities(); } catch { }
-            try { ApplyOverhangAssist();  } catch { }
+            try { ClampCrateVelocities();         } catch { }
+            try { ApplyStackAndContactBehavior(); } catch { }
         }
 
         private void SmoothTowardTargets()
@@ -971,9 +1040,13 @@ namespace SFClientRecon
                         // friction + Maximum combine made the cluster feel stuck).
                         // Tipping is now carried by CoM + solver iterations + scaled
                         // inertia, not by friction grip.
-                        staticFriction = 0.45f,
-                        dynamicFriction = 0.4f,
-                        bounciness = 0.1f,
+                        // Friction up slightly so stacked crates GRIP each other
+                        // (helps the new stack-cohesion behavior — a column of
+                        // crates moves together when impacted). Still Multiply
+                        // combine so they don't get pegajosas against the floor.
+                        staticFriction = 0.55f,
+                        dynamicFriction = 0.5f,
+                        bounciness = 0.05f,
                         frictionCombine = PhysicMaterialCombine.Multiply,
                         bounceCombine = PhysicMaterialCombine.Minimum
                     };
