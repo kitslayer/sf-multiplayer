@@ -208,7 +208,7 @@ namespace SFClientRecon
                 // Mid mass: enough that the player can't shove it weightlessly,
                 // light enough that impact rotation still reads. Gravity-tipping is
                 // mass-independent (handled by friction grip + free Z rotation).
-                rb.mass                = 60f;
+                rb.mass                = 45f;
                 // GRAVITY-TIP FIX: PhysX box-on-box keeps contacts across the full
                 // bottom face, so a crate with most of its mass overhanging the
                 // edge of another still has "support" contacts and never pivots —
@@ -227,15 +227,18 @@ namespace SFClientRecon
                 // Lower solver iterations (18/12 instead of 32/20) — 32 was overkill
                 // and made contacts feel sticky. 18 still resolves edge contacts
                 // correctly so tipping works, without over-precise solver behavior.
-                rb.solverIterations         = 18;
-                rb.solverVelocityIterations = 12;
+                // Moderate solver: enough precision for stacking, not so high that
+                // contacts feel sticky. The TIPPING problem is now solved by the
+                // explicit Overhang-Assist torque in FixedUpdate (which mimics
+                // gravity torque about the support edge — see ApplyOverhangAssist).
+                rb.solverIterations         = 14;
+                rb.solverVelocityIterations = 8;
                 rb.ResetInertiaTensor();
-                rb.centerOfMass             = new Vector3(0f, 0.9f, 0f);
-                // Inertia scale 0.75 (less aggressive than 0.6) — still helps the
-                // tip start quickly but doesn't over-amplify rotation from minor
-                // contacts, which contributed to crates feeling pegajosas.
+                // CoM slightly above center — keeps stacks stable but biases tipping.
+                rb.centerOfMass             = new Vector3(0f, 0.45f, 0f);
+                // Subtle inertia tilt — helps tip start, doesn't break stacks.
                 var it = rb.inertiaTensor;
-                it.x *= 0.75f; it.z *= 0.75f;
+                it.x *= 0.85f; it.z *= 0.85f;
                 rb.inertiaTensor            = it;
                 rb.useGravity               = true;
                 // Very low sleep threshold so a crate balanced on the edge of

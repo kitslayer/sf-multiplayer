@@ -526,7 +526,31 @@ namespace SFBoxFix
                 if (v.y > CrateMaxUpSrv) { v.y = CrateMaxUpSrv; changed = true; }
                 else if (v.y < -CrateMaxFallSrv) { v.y = -CrateMaxFallSrv; changed = true; }
                 if (changed) rb.velocity = v;
+                // Overhang torque assist (server): same algorithm as client so the
+                // two stay in sync. Compensates PhysX's contact-persistence bias so
+                // a crate overhanging an edge actually pivots.
+                if (rb.velocity.sqrMagnitude < 1.0f && rb.angularVelocity.sqrMagnitude < 0.3f)
+                    OverhangAssistOne(rb);
             }
+        }
+
+        private static void OverhangAssistOne(Rigidbody rb)
+        {
+            var col = rb.GetComponent<Collider>();
+            if ((object)col == null) col = rb.GetComponentInChildren<Collider>();
+            if ((object)col == null || col.isTrigger) return;
+            Bounds b = col.bounds;
+            Vector3 c = b.center;
+            Vector3 e = b.extents;
+            if (e.x < 0.05f || e.y < 0.05f) return;
+            float probeY = c.y - e.y + 0.05f;
+            float probeX = e.x * 0.85f;
+            bool leftSup  = Physics.Raycast(new Vector3(c.x - probeX, probeY, c.z), Vector3.down, 0.20f);
+            bool rightSup = Physics.Raycast(new Vector3(c.x + probeX, probeY, c.z), Vector3.down, 0.20f);
+            if (leftSup == rightSup) return;
+            Vector3 tipDir = leftSup ? Vector3.right : Vector3.left;
+            Vector3 torque = Vector3.Cross(tipDir, Physics.gravity) * rb.mass * 0.4f;
+            rb.AddTorque(torque, ForceMode.Force);
         }
 
         // High-friction, no-bounce material so stacked crates grip instead of
@@ -645,7 +669,7 @@ namespace SFBoxFix
                     rb.sleepThreshold = 0.005f;
                     // Lower mass = responsive rotation/tipping (fling still bounded
                     // by the velocity clamp, not mass). Matches client.
-                    rb.mass = 60f;
+                    rb.mass = 45f;
                     rb.drag = 0.3f;
                     rb.angularDrag = 0.8f;
                     rb.maxAngularVelocity = 7f;
@@ -654,12 +678,12 @@ namespace SFBoxFix
                     // Solver iterations up so PhysX resolves box-on-box edge
                     // contacts correctly (the default averages contacts across the
                     // bottom face and fakes stability — crate sat perched).
-                    rb.solverIterations         = 18;
-                    rb.solverVelocityIterations = 12;
+                    rb.solverIterations         = 14;
+                    rb.solverVelocityIterations = 8;
                     rb.ResetInertiaTensor();
-                    rb.centerOfMass             = new Vector3(0f, 0.9f, 0f);
+                    rb.centerOfMass             = new Vector3(0f, 0.45f, 0f);
                     var it = rb.inertiaTensor;
-                    it.x *= 0.75f; it.z *= 0.75f;
+                    it.x *= 0.85f; it.z *= 0.85f;
                     rb.inertiaTensor            = it;
                     rb.useGravity               = true;
 

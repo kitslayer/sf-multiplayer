@@ -697,6 +697,58 @@ namespace SFClientRecon
             }
         }
 
+        // ====================================================================
+        //  OVERHANG TORQUE ASSIST
+        //  PhysX box-on-box maintains contacts across the bottom face even when
+        //  most of the upper box hangs in air; the resulting normal forces cancel
+        //  the gravity torque and the crate sits perched. We compensate by
+        //  computing the gravity torque about the support edge and applying it
+        //  explicitly: τ = r × g · m  where r is the horizontal offset from the
+        //  support centre to the crate's CoM. This is exactly the torque the
+        //  solver SHOULD generate; we only apply it when the crate is essentially
+        //  still (so we don't fight a tip that's already happening on its own).
+        // ====================================================================
+        private void ApplyOverhangAssist()
+        {
+            if (_nsoCache.Count == 0) return;
+            foreach (var kv in _nsoCache)
+            {
+                var entry = kv.Value;
+                if (entry == null || entry.SkipSmooth || !entry.Pushable) continue;
+                var rb = entry.Rb;
+                if (rb == null || rb.isKinematic) continue;
+
+                // Only assist near-still crates. If it's already moving/tipping,
+                // gravity is doing its job — don't pile extra torque on top.
+                if (rb.velocity.sqrMagnitude > 1.0f) continue;
+                if (rb.angularVelocity.sqrMagnitude > 0.3f) continue;
+
+                var comp = entry.Comp; if (comp == null) continue;
+                var col = comp.GetComponent<Collider>();
+                if (col == null) col = comp.GetComponentInChildren<Collider>();
+                if (col == null || col.isTrigger) continue;
+                Bounds b = col.bounds;
+                Vector3 c = b.center;
+                Vector3 e = b.extents;
+                if (e.x < 0.05f || e.y < 0.05f) continue;
+
+                // Probe support at left/right edges of the bottom (X is the
+                // tipping axis in SF's 2.5D plane; Z is depth).
+                float probeY    = c.y - e.y + 0.05f;     // just above bottom
+                float probeDist = 0.20f;                 // small reach below the box
+                float probeX    = e.x * 0.85f;           // near the edge
+                bool leftSup    = Physics.Raycast(new Vector3(c.x - probeX, probeY, c.z), Vector3.down, probeDist);
+                bool rightSup   = Physics.Raycast(new Vector3(c.x + probeX, probeY, c.z), Vector3.down, probeDist);
+                if (leftSup == rightSup) continue;       // fully supported or fully airborne
+
+                // Tip toward the unsupported side. τ = tipDir × gravity, scaled
+                // by mass + a 0.4 factor (full gravity torque feels too aggressive).
+                Vector3 tipDir = leftSup ? Vector3.right : Vector3.left;
+                Vector3 torque = Vector3.Cross(tipDir, Physics.gravity) * rb.mass * 0.4f;
+                rb.AddTorque(torque, ForceMode.Force);
+            }
+        }
+
         // Clamp in FixedUpdate (the physics step) — a bullet imparts velocity in
         // FixedUpdate, so clamping in Update let the crate fly a full render frame
         // first. FixedUpdate catches it the same physics step.
@@ -704,6 +756,7 @@ namespace SFClientRecon
         {
             if (!_running) return;
             try { ClampCrateVelocities(); } catch { }
+            try { ApplyOverhangAssist();  } catch { }
         }
 
         private void SmoothTowardTargets()
