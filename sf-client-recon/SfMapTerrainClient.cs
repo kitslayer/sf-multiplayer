@@ -561,14 +561,16 @@ namespace SFClientRecon
         internal static bool IsLocalPlayerCollisionRigidbody(Rigidbody rb)
         {
             if ((object)rb == null) return false;
-            var ctrlType = AccessTools.TypeByName("Controller");
-            if ((object)ctrlType == null) return false;
-            var hasCtrlF = AccessTools.Field(ctrlType, "mHasControl");
-            if ((object)hasCtrlF == null) return false;
+            // Use the shared attempt-once Controller cache — this runs on EVERY
+            // DestructiblePiece collision, so the old per-call AccessTools.TypeByName
+            // + AccessTools.Field were pure per-collision reflection overhead (lag
+            // in dense combat). Now it's a cached type + field.
+            EnsureControllerRefs();
+            if ((object)_ctrlTypeForNp == null || (object)_ctrlHasControlField == null) return false;
             var root = rb.transform.root;
-            foreach (var c in root.GetComponentsInChildren(ctrlType))
+            foreach (var c in root.GetComponentsInChildren(_ctrlTypeForNp))
             {
-                if ((bool)hasCtrlF.GetValue(c)) return true;
+                if ((bool)_ctrlHasControlField.GetValue(c)) return true;
             }
             return false;
         }

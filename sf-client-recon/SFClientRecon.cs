@@ -62,7 +62,7 @@ namespace SFClientRecon
     {
         public const string PluginGuid = "com.stickfightdev.client-recon";
         public const string PluginName = "SFClientRecon";
-        public const string PluginVersion = "0.4.1";
+        public const string PluginVersion = "0.4.2";
 
         internal static ManualLogSource Log;
         internal static bool RefOk(object o) => !ReferenceEquals(o, null);
@@ -1654,6 +1654,9 @@ namespace SFClientRecon
         // can use it without instance overhead.
         private static Type _weaponPickUpType;
         private static int _weaponSkipCount;
+        // Cached (attempt-once) NSO type for the per-collision destructible filter.
+        private static Type _nsoTypeForCollision;
+        private static bool _nsoTypeForCollisionTried;
 
         // Harmony prefix on DestructiblePiece.OnCollisionEnter — returns false
         // (skip stock) in two cases:
@@ -1709,9 +1712,11 @@ namespace SFClientRecon
                     if (IsChainStyleDestructibleRoot(rootT.gameObject)
                         || IsWeaponNsoRootClient(rootT.gameObject))
                         return false;
+                    if ((object)_nsoTypeForCollision == null && !_nsoTypeForCollisionTried)
+                    { _nsoTypeForCollisionTried = true; _nsoTypeForCollision = AccessTools.TypeByName("NetworkSyncableObject"); }
                     if (!IsLocalPlayerCollisionRigidbody(rb)
                         && (IsIceOnlyDestructibleRoot(rootT.gameObject)
-                            || rootT.GetComponent(AccessTools.TypeByName("NetworkSyncableObject")) != null))
+                            || ((object)_nsoTypeForCollision != null && rootT.GetComponent(_nsoTypeForCollision) != null)))
                         return false;
                 }
 
