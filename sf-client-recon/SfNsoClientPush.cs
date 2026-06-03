@@ -224,18 +224,18 @@ namespace SFClientRecon
                 // contacts across the bottom face and producing fake stability →
                 // crate sat perched. 32/20 gives the solver enough work to remove
                 // non-touching contacts and let gravity tip the body.
-                rb.solverIterations         = 32;
-                rb.solverVelocityIterations = 20;
+                // Lower solver iterations (18/12 instead of 32/20) — 32 was overkill
+                // and made contacts feel sticky. 18 still resolves edge contacts
+                // correctly so tipping works, without over-precise solver behavior.
+                rb.solverIterations         = 18;
+                rb.solverVelocityIterations = 12;
                 rb.ResetInertiaTensor();
-                // CoM just under the top face. Lower than 1.0 (which floated above
-                // the box) but still well above geometric center, so any overhang
-                // gives gravity a big moment arm.
                 rb.centerOfMass             = new Vector3(0f, 0.9f, 0f);
-                // Reduce inertia around tipping axes (X and Z) so the crate
-                // accelerates angularly with less torque → visible tip starts fast
-                // instead of being damped by inertia.
+                // Inertia scale 0.75 (less aggressive than 0.6) — still helps the
+                // tip start quickly but doesn't over-amplify rotation from minor
+                // contacts, which contributed to crates feeling pegajosas.
                 var it = rb.inertiaTensor;
-                it.x *= 0.6f; it.z *= 0.6f;
+                it.x *= 0.75f; it.z *= 0.75f;
                 rb.inertiaTensor            = it;
                 rb.useGravity               = true;
                 // Very low sleep threshold so a crate balanced on the edge of
@@ -243,12 +243,10 @@ namespace SFClientRecon
                 // — that was why it sat perched instead of toppling. It still
                 // sleeps once truly settled.
                 rb.sleepThreshold      = 0.005f;
-                rb.drag                = 0.45f;
-                // Near-zero angular drag so the crate freely TIPS/rotates (around
-                // Z, the 2.5D plane axis) and topples off edges + tumbles in the
-                // air like real physics. maxAngularVelocity keeps it from whirling
-                // insanely.
-                rb.angularDrag         = 0.05f;
+                // Drag 0.3 + angularDrag 0.8 so a hit/push doesn't slide forever
+                // (less "pegajoso" feel between crates) but still rotates freely.
+                rb.drag                = 0.3f;
+                rb.angularDrag         = 0.8f;
                 rb.maxAngularVelocity  = 7f;
                 // Discrete = cheapest (ContinuousDynamic on every crate was a big
                 // CPU cost → FPS lag). Crates are slow enough not to tunnel.

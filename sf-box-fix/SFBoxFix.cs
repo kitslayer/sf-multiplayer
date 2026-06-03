@@ -540,10 +540,10 @@ namespace SFBoxFix
                 {
                     _gripMaterial = new PhysicMaterial("CrateGrip")
                     {
-                        staticFriction = 0.6f,
-                        dynamicFriction = 0.55f,
-                        bounciness = 0f,
-                        frictionCombine = PhysicMaterialCombine.Minimum,
+                        staticFriction = 0.45f,
+                        dynamicFriction = 0.4f,
+                        bounciness = 0.1f,
+                        frictionCombine = PhysicMaterialCombine.Multiply,
                         bounceCombine = PhysicMaterialCombine.Minimum
                     };
                 }
@@ -646,20 +646,20 @@ namespace SFBoxFix
                     // Lower mass = responsive rotation/tipping (fling still bounded
                     // by the velocity clamp, not mass). Matches client.
                     rb.mass = 60f;
-                    rb.drag = 0.45f;
-                    rb.angularDrag = 0.05f;
+                    rb.drag = 0.3f;
+                    rb.angularDrag = 0.8f;
                     rb.maxAngularVelocity = 7f;
                     // GRAVITY-TIP: high CoM + clean inertia tensor so a crate
                     // overhanging an edge actually pivots (matches client).
                     // Solver iterations up so PhysX resolves box-on-box edge
                     // contacts correctly (the default averages contacts across the
                     // bottom face and fakes stability — crate sat perched).
-                    rb.solverIterations         = 32;
-                    rb.solverVelocityIterations = 20;
+                    rb.solverIterations         = 18;
+                    rb.solverVelocityIterations = 12;
                     rb.ResetInertiaTensor();
                     rb.centerOfMass             = new Vector3(0f, 0.9f, 0f);
                     var it = rb.inertiaTensor;
-                    it.x *= 0.6f; it.z *= 0.6f;
+                    it.x *= 0.75f; it.z *= 0.75f;
                     rb.inertiaTensor            = it;
                     rb.useGravity               = true;
 

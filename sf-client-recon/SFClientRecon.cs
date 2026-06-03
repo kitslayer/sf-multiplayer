@@ -900,13 +900,15 @@ namespace SFClientRecon
                         // edge and pivots/topples instead of frictionlessly sliding
                         // off flat. This is what makes the barrel-like gravity tip
                         // actually happen.
-                        staticFriction = 0.7f,
-                        dynamicFriction = 0.6f,
-                        bounciness = 0f,
-                        // Maximum: the crate's high friction dominates the edge
-                        // contact even if the crate below has low friction, so it
-                        // GRIPS the corner and pivots/topples instead of sliding off.
-                        frictionCombine = PhysicMaterialCombine.Maximum,
+                        // Lower friction + Multiply combine so crates feel responsive
+                        // and don't get "pegajosas" against each other (the high
+                        // friction + Maximum combine made the cluster feel stuck).
+                        // Tipping is now carried by CoM + solver iterations + scaled
+                        // inertia, not by friction grip.
+                        staticFriction = 0.45f,
+                        dynamicFriction = 0.4f,
+                        bounciness = 0.1f,
+                        frictionCombine = PhysicMaterialCombine.Multiply,
                         bounceCombine = PhysicMaterialCombine.Minimum
                     };
                 }
