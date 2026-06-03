@@ -93,6 +93,7 @@ namespace SFClientRecon
         private readonly Queue<Vector3>  _historyPos = new Queue<Vector3>(InputHistoryCap);
         private readonly Dictionary<uint, Vector3> _historyLookup = new Dictionary<uint, Vector3>(InputHistoryCap);
         private uint _divergenceLogged;
+        private float _lastShiftAt = -1f;
 
         // Pending snapshot (set on RX thread, applied on main thread).
         private readonly object _snapLock = new object();
@@ -790,8 +791,10 @@ namespace SFClientRecon
         private const float StackAngularDamp     = 0.84f;   // light damp on settled stacks (no weld)
         private const float StackSettledSpeed    = 1.6f;    // ≤ this, the stack is "settled"
         // Player shove (heavy feel when player walks/jumps into a crate)
-        private const float PlayerHorizDamp      = 0.32f;   // strong damp on horizontal velocity
-        private const float PlayerAngularDamp   = 0.74f;   // also damp spin while player in contact
+        private const float PlayerHorizDamp      = 0.22f;   // very strong damp — player feels heavy
+        private const float PlayerAngularDamp   = 0.65f;   // damp spin while player in contact
+        // Hard player-impulse cap: a single tick can only impart this much horiz vel
+        private const float PlayerImpartCapH    = 0.9f;    // m/s per tick
         // Edge-tipping torque (mass × gravity × multiplier)
         private const float OverhangTorqueMul   = 0.85f;   // perched/static crate → strong tip
         private const float OverhangFallTorqueMul = 0.45f; // already-falling crate → moderate extra tumble
@@ -886,15 +889,30 @@ namespace SFClientRecon
                 if (loadAbove && settled && rb.angularVelocity.sqrMagnitude > 0.0001f)
                     rb.angularVelocity *= StackAngularDamp;
 
-                // ─── (B) PLAYER SHOVE DAMPING: cut horizontal velocity (and a bit of
-                //     spin) while a player Controller is touching. Skips during
-                //     blasts/falls (significant v.y) so explosions still throw.
+                // ─── (B) PLAYER SHOVE DAMPING — two-stage so a player walk-into
+                //     can't ever fling the crate: first a HARD cap on horizontal
+                //     velocity (so a fresh impulse can't exceed PlayerImpartCapH),
+                //     then exponential damping so existing horizontal motion
+                //     bleeds off fast. Skips during blasts/falls (|v.y| > 2) so
+                //     explosions / drops are unaffected.
                 if (playerHere && Mathf.Abs(vel.y) < 2.0f)
                 {
                     Vector3 v2 = vel;
                     float hSq = v2.x * v2.x + v2.z * v2.z;
-                    if (hSq > 0.02f) { v2.x *= PlayerHorizDamp; v2.z *= PlayerHorizDamp; rb.velocity = v2; vel = v2; }
-                    if (rb.angularVelocity.sqrMagnitude > 0.04f) rb.angularVelocity *= PlayerAngularDamp;
+                    if (hSq > PlayerImpartCapH * PlayerImpartCapH)
+                    {
+                        float s = PlayerImpartCapH / Mathf.Sqrt(hSq);
+                        v2.x *= s; v2.z *= s;
+                        rb.velocity = v2; vel = v2;
+                        hSq = v2.x * v2.x + v2.z * v2.z;
+                    }
+                    if (hSq > 0.02f)
+                    {
+                        v2.x *= PlayerHorizDamp; v2.z *= PlayerHorizDamp;
+                        rb.velocity = v2; vel = v2;
+                    }
+                    if (rb.angularVelocity.sqrMagnitude > 0.04f)
+                        rb.angularVelocity *= PlayerAngularDamp;
                 }
 
                 // ─── (C) STACK POP — if THIS crate is rising (hit from below) and has
@@ -1861,61 +1879,68 @@ namespace SFClientRecon
                     if (isLocal)
                     {
                         _serverLastAckedSeq = entry.LastInputSeq;
+                        // ────────  HYPER-PUSH GUARD  ────────
+                        // The drift correction below shifts the local rigidbody by
+                        // (server_pos - predicted_at_seq) every snapshot. If the
+                        // server's view consistently disagrees with ours (e.g.
+                        // controller drift not in our keyboard-only input read, or
+                        // the server is dragging the rig while we're still in lobby
+                        // UI), each 30Hz snapshot stacks another shift → the player
+                        // visibly "hyper-pushes" toward an arbitrary point. Three
+                        // belts and suspenders:
+                        //   (1) Higher SOFT threshold (1.5u) → ignore casual jitter.
+                        //   (2) Hard rate limit — at most one shift per 200ms.
+                        //   (3) Skip the absolute-snap fallback unless the local
+                        //       player is genuinely lost (>20u away). It used to
+                        //       snap+zero-vel every snapshot when history missed.
                         if (_historyLookup.TryGetValue(entry.LastInputSeq, out var predictedAtSeq))
                         {
                             Vector3 driftVec = target - predictedAtSeq;
                             float driftSq = driftVec.sqrMagnitude;
-                            const float SoftDriftThresholdSq = 0.3f * 0.3f; // ignore below 0.3u
-                            const float HardDriftThresholdSq = 2.5f * 2.5f; // log loud above 2.5u
-                            if (driftSq > SoftDriftThresholdSq)
+                            const float SoftDriftThresholdSq = 1.5f * 1.5f;
+                            const float HardDriftThresholdSq = 6.0f * 6.0f;
+                            float now = Time.realtimeSinceStartup;
+                            bool rateLimited = (now - _lastShiftAt) < 0.20f;
+                            if (driftSq > SoftDriftThresholdSq && !rateLimited)
                             {
+                                _lastShiftAt = now;
+                                // Cap the per-shift magnitude → no single snapshot
+                                // can teleport us > 3u (prevents catastrophic snap).
+                                if (driftSq > 9f)
+                                    driftVec = driftVec.normalized * 3f;
                                 foreach (var np2 in nps)
                                 {
                                     if (!TryGetPlayerSlotFromNetworkPlayer(np2, out var pi2) || pi2 != localSlot) continue;
                                     var npComp2 = np2 as Component;
                                     var rb2 = npComp2.GetComponent<Rigidbody>() ?? npComp2.GetComponentInChildren<Rigidbody>();
-                                    if ((object)rb2 != null)
-                                    {
-                                        Vector3 newPos = rb2.position + driftVec;
-                                        rb2.position = newPos;
-                                        // Velocity is preserved — local
-                                        // prediction continues unchanged.
-                                    }
-                                    else
-                                    {
-                                        npComp2.transform.position += driftVec;
-                                    }
-                                    // Re-stamp our history with the corrected
-                                    // position so subsequent comparisons are
-                                    // against the post-correction baseline,
-                                    // not the pre-correction prediction.
+                                    if ((object)rb2 != null) rb2.position = rb2.position + driftVec;
+                                    else npComp2.transform.position += driftVec;
                                     _historyLookup[entry.LastInputSeq] = target;
                                     break;
                                 }
                                 _divergenceLogged++;
                                 if (driftSq > HardDriftThresholdSq
                                     && (_divergenceLogged == 1 || _divergenceLogged % 15 == 0))
-                                {
-                                    Log.LogWarning($"[P6.12.2 v1.0 SHIFT] seq={entry.LastInputSeq} drift={Mathf.Sqrt(driftSq):0.00}u — applied as offset, current local pos shifted");
-                                }
-                                else if (_divergenceLogged == 1 || _divergenceLogged % 60 == 0)
-                                {
-                                    Log.LogInfo($"[P6.12.2 v1.0 shift] seq={entry.LastInputSeq} drift={Mathf.Sqrt(driftSq):0.00}u corrected #{_divergenceLogged}");
-                                }
+                                    Log.LogWarning($"[P6.12.2 SHIFT] seq={entry.LastInputSeq} drift={Mathf.Sqrt(driftSq):0.00}u");
                             }
                         }
                         else
                         {
-                            // No history for this seq (just connected, or
-                            // buffer wrapped). Fall back to absolute snap
-                            // so the player can't be permanently lost.
+                            // Absolute-snap fallback: only fire when the player is
+                            // GENUINELY lost (>20u from server view), not on every
+                            // snapshot — the old "snap every time history misses"
+                            // is exactly the hyper-push behavior we just removed.
                             foreach (var np2 in nps)
                             {
                                 if (!TryGetPlayerSlotFromNetworkPlayer(np2, out var pi2) || pi2 != localSlot) continue;
                                 var npComp2 = np2 as Component;
                                 var rb2 = npComp2.GetComponent<Rigidbody>() ?? npComp2.GetComponentInChildren<Rigidbody>();
-                                if ((object)rb2 != null) { rb2.position = target; rb2.velocity = Vector3.zero; }
-                                else npComp2.transform.position = target;
+                                Vector3 cur = (object)rb2 != null ? rb2.position : npComp2.transform.position;
+                                if ((target - cur).sqrMagnitude > 20f * 20f)
+                                {
+                                    if ((object)rb2 != null) { rb2.position = target; rb2.velocity = Vector3.zero; }
+                                    else npComp2.transform.position = target;
+                                }
                                 break;
                             }
                         }
