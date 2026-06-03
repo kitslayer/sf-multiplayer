@@ -1,9 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.IO;
 using System.Net;
-using System.Reflection;
 using System.Text;
 using BepInEx;
 using BepInEx.Logging;
@@ -13,76 +11,97 @@ using UnityEngine.SceneManagement;
 
 namespace SFServerBrowser
 {
-    // SFServerBrowser v0.1.0 — client-side overlay.
+    // ============================================================================
+    //  SFServerBrowser v0.2.0 — ALKA server-browser & lobby overlay (client-side).
     //
-    // Adds a "SERVERS" button to Stick Fight's main menu and an in-game
-    // Escape menu overlay listing connected players.
+    //  A professional IMGUI overlay for Stick Fight: a "PLAY ONLINE" entry button
+    //  on the main menu opens a tabbed panel — BROWSE running lobbies, CREATE a
+    //  new lobby, or JOIN by code — plus an in-match player list (F3) and a
+    //  connection/status feedback layer (toasts + a connecting screen).
     //
-    // The button overlay is drawn via Unity's OnGUI (IMGUI) so we don't
-    // need to clone vanilla menu prefabs (which are fragile across SF
-    // versions). It looks consistent with the SF aesthetic — bold white
-    // panels on dark background — and stays out of the way until needed.
+    //  Why IMGUI: the game is Unity 5.6.3 (Mono 2.0). Runtime UI Toolkit does not
+    //  exist on this engine and the vanilla menus are baked prefabs with no
+    //  source, so OnGUI is the only runtime UI we can ship. The look is carried by
+    //  UiTheme/UiWidgets (this is the design-system layer).
     //
-    // Server list fetched from the HTTP endpoint that the oracle's
-    // serve-lobbies.py exposes (configurable via SF_LOBBY_ENDPOINT env var).
+    //  Purely additive: it does NOT modify the Quick/Host → oracle redirect that
+    //  SfOracleLobbyConnect owns; it only calls the public RequestJoinLobby /
+    //  RequestHostLobby bridges by reflection.
     //
-    // CONSTRAINT (from user): does NOT modify the existing Quick Match /
-    // Host Match → oracle redirect that SfOracleLobbyConnect already handles.
-    // This is purely additive UI.
-
+    //  Data: lobby list + create come from serve-lobbies.py over HTTP
+    //  (SF_LOBBY_ENDPOINT). No external deps; net35 / Mono-2.0 safe (no LINQ,
+    //  tuples or Action<T> fields; coroutines OK via Mono2Polyfills).
+    // ============================================================================
     [BepInPlugin(PluginGuid, PluginName, PluginVersion)]
-    public class Plugin : BaseUnityPlugin
+    public partial class Plugin : BaseUnityPlugin
     {
         public const string PluginGuid = "com.stickfightdev.server-browser";
         public const string PluginName = "SFServerBrowser";
-        public const string PluginVersion = "0.1.0";
+        public const string PluginVersion = "0.3.0";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance;
 
-        // Configurable via env var; falls back to default oracle.
+        // Configurable via env var; null = fail closed with a clear message.
         private string _lobbyEndpoint;
 
-        // UI state
-        private bool _showServersPanel;
-        private bool _showInGamePanel;
-        private List<ServerEntry> _servers = new List<ServerEntry>();
+        // ---- Overlay state machine -------------------------------------------
+        internal enum Tab { Browse = 0, Create = 1, Join = 2 }
+        private bool _overlayOpen;
+        private float _overlayAnim;          // 0 closed → 1 open (eased)
+        private Tab _tab = Tab.Browse;
+        private bool _showHud;               // in-match player list (F3)
+
+        // ---- Browse ----------------------------------------------------------
+        private readonly List<ServerEntry> _servers = new List<ServerEntry>();
         private string _statusText = "";
+        private bool _isFetching;
         private float _lastFetchAt = -999f;
         private const float FetchCooldown = 3f;
         private Vector2 _serversScroll;
-        private Vector2 _inGameScroll;
-        private bool _stylesInited;
-        private GUIStyle _btnStyle, _btnAccent, _titleStyle, _rowStyle, _statusStyle, _textFieldStyle;
 
-        // Stage 2: in-game join/create
-        private string _joinCodeInput = "";
+        // ---- Create ----------------------------------------------------------
+        private int _createMaxPlayers = 4;   // 2..8
+        private int _createMode;             // 0 normal, 1 mods, 2 chaos (cosmetic hint)
+        private bool _createPublic = true;
+        private bool _isCreating;
         private float _createCooldownAt = -999f;
-        private bool _focusJoinField;
-        // Cross-assembly bridge to SFClientRecon.Plugin.RequestJoinLobby(string)
-        // — resolved once by reflection (no hard assembly reference).
-        private static System.Reflection.MethodInfo _joinMethod;
-        private static bool _joinResolved;
 
-        // For detecting if we're in a match (vs lobby/main menu) for Esc menu
+        // ---- Join ------------------------------------------------------------
+        private string _joinCodeInput = "";
+        private bool _focusJoinField;
+
+        // ---- Connection feedback ---------------------------------------------
+        private string _joiningCode;
+        private float _joiningSince = -1f;
+        private const float JoiningOverlayTtl = 8f;
+
+        // ---- In-match HUD ----------------------------------------------------
+        private Vector2 _hudScroll;
         private string _currentSceneName = "";
 
-        private struct ServerEntry
+        // Cross-assembly bridges to SFClientRecon.Plugin (resolved once).
+        private static System.Reflection.MethodInfo _joinMethod;
+        private static System.Reflection.MethodInfo _hostMethod;
+        private static bool _bridgeResolved;
+
+        internal struct ServerEntry
         {
             public string Code;
             public string Host;
             public int Port;
             public int Players;
             public int Capacity;
-            public string Status;
+            public bool Alive;
+            public string Started;
         }
+        private struct PlayerRow { public int Slot; public string Name; public ulong SteamId; }
 
         private void Awake()
         {
             Log = Logger;
             Instance = this;
 
-            // Skip on headless oracle
             foreach (var arg in Environment.GetCommandLineArgs())
             {
                 if (arg == "-batchmode" || arg == "-nographics")
@@ -95,296 +114,102 @@ namespace SFServerBrowser
             _lobbyEndpoint = Environment.GetEnvironmentVariable("SF_LOBBY_ENDPOINT");
             if (string.IsNullOrEmpty(_lobbyEndpoint))
             {
-                _lobbyEndpoint = null;  // no baked-in IP — fail closed with a clear message
-                Log.LogWarning($"{PluginName}: SF_LOBBY_ENDPOINT not set — server browser disabled. Set it to e.g. http://HOST:8080/lobbies.");
+                _lobbyEndpoint = null;
+                Log.LogWarning($"{PluginName}: SF_LOBBY_ENDPOINT not set — browser/create disabled until configured (e.g. http://HOST:8080/lobbies).");
             }
 
             Log.LogInfo($"{PluginName} v{PluginVersion} starting. Endpoint: {_lobbyEndpoint}");
+            SceneManager.sceneLoaded += OnSceneLoaded;
 
-            SceneManager.sceneLoaded += (s, m) => _currentSceneName = s.name;
+            // The native uGUI lobby overlay (Centauri-style) lives on its own
+            // GameObject so it survives scene loads. Toggle with F2 / Tab.
+            try
+            {
+                var go = new GameObject("ALKALobbyOverlay");
+                UnityEngine.Object.DontDestroyOnLoad(go);
+                _lobbyUi = go.AddComponent<LobbyOverlay>();
+                _lobbyUi.Owner = this;
+            }
+            catch (Exception e) { Log.LogWarning($"{PluginName}: lobby overlay init failed: {e.Message}"); }
+        }
+
+        internal LobbyOverlay _lobbyUi;
+
+        private void OnSceneLoaded(Scene s, LoadSceneMode m)
+        {
+            _currentSceneName = s.name;
+            // leaving to a match scene closes the browser; entering menu closes HUD
+            if (s.name != "MainScene") _overlayOpen = false;
+            else _showHud = false;
+            // a scene change usually means our join landed
+            if (_joiningSince > 0f && s.name != "MainScene")
+            {
+                PushToast("Joined " + (_joiningCode ?? "lobby") + " — loading map…", 1);
+                _joiningSince = -1f;
+            }
         }
 
         private void Update()
         {
-            // ESC handling — only in-match (not lobby/main menu)
-            if (Input.GetKeyDown(KeyCode.F3))
+            // Animate overlay open/close on unscaled time (menus may pause time).
+            float target = _overlayOpen ? 1f : 0f;
+            _overlayAnim = Mathf.MoveTowards(_overlayAnim, target, Time.unscaledDeltaTime / 0.18f);
+
+            if (Input.GetKeyDown(KeyCode.F3) && _currentSceneName != "MainScene")
+                _showHud = !_showHud;
+
+            // Esc closes the overlay if open (don't swallow the vanilla pause).
+            if (_overlayOpen && Input.GetKeyDown(KeyCode.Escape))
+                _overlayOpen = false;
+
+            // expire a stuck connecting overlay
+            if (_joiningSince > 0f && Time.unscaledTime - _joiningSince > JoiningOverlayTtl)
             {
-                // F3 toggles the in-game player list (independent from vanilla ESC pause)
-                _showInGamePanel = !_showInGamePanel;
+                _joiningSince = -1f;
+                PushToast("Still connecting… check the server is up.", 0);
             }
         }
 
         private void OnGUI()
         {
-            if (!_stylesInited) InitStyles();
-
-            DrawMainMenuServersButton();
-            if (_showServersPanel) DrawServersPanel();
-            if (_showInGamePanel) DrawInGamePanel();
-        }
-
-        // ========== UI Styles (SF aesthetic) ==========
-        private void InitStyles()
-        {
-            _stylesInited = true;
-            _btnStyle = new GUIStyle(GUI.skin.button);
-            _btnStyle.fontSize = 22;
-            _btnStyle.fontStyle = FontStyle.Bold;
-            _btnStyle.normal.textColor = Color.black;
-            _btnStyle.hover.textColor = new Color(0.1f, 0.4f, 0.8f);
-            _btnStyle.alignment = TextAnchor.MiddleCenter;
-            _btnStyle.normal.background = MakeTex(2, 2, new Color(0.97f, 0.97f, 0.95f));
-            _btnStyle.hover.background = MakeTex(2, 2, new Color(0.85f, 0.9f, 1f));
-            _btnStyle.padding = new RectOffset(10, 10, 10, 10);
-
-            _btnAccent = new GUIStyle(_btnStyle);
-            _btnAccent.normal.background = MakeTex(2, 2, new Color(0.95f, 0.85f, 0.2f));
-            _btnAccent.hover.background = MakeTex(2, 2, new Color(1f, 0.95f, 0.4f));
-
-            _titleStyle = new GUIStyle(GUI.skin.label);
-            _titleStyle.fontSize = 28;
-            _titleStyle.fontStyle = FontStyle.Bold;
-            _titleStyle.alignment = TextAnchor.MiddleCenter;
-            _titleStyle.normal.textColor = new Color(1f, 0.9f, 0.4f);
-
-            _rowStyle = new GUIStyle(GUI.skin.box);
-            _rowStyle.normal.background = MakeTex(2, 2, new Color(0.1f, 0.12f, 0.18f, 0.85f));
-            _rowStyle.normal.textColor = Color.white;
-            _rowStyle.fontSize = 14;
-            _rowStyle.alignment = TextAnchor.MiddleLeft;
-            _rowStyle.padding = new RectOffset(12, 12, 8, 8);
-
-            _statusStyle = new GUIStyle(GUI.skin.label);
-            _statusStyle.fontSize = 13;
-            _statusStyle.normal.textColor = new Color(0.7f, 0.8f, 0.9f);
-
-            _textFieldStyle = new GUIStyle(GUI.skin.textField);
-            _textFieldStyle.fontSize = 22;
-            _textFieldStyle.fontStyle = FontStyle.Bold;
-            _textFieldStyle.alignment = TextAnchor.MiddleCenter;
-            _textFieldStyle.normal.textColor = Color.white;
-            _textFieldStyle.normal.background = MakeTex(2, 2, new Color(0.05f, 0.06f, 0.09f));
-            _textFieldStyle.focused.textColor = new Color(1f, 0.95f, 0.4f);
-            _textFieldStyle.focused.background = MakeTex(2, 2, new Color(0.08f, 0.1f, 0.16f));
-        }
-
-        private Texture2D MakeTex(int w, int h, Color c)
-        {
-            var px = new Color[w * h];
-            for (int i = 0; i < px.Length; i++) px[i] = c;
-            var t = new Texture2D(w, h);
-            t.SetPixels(px); t.Apply();
-            return t;
-        }
-
-        // ========== SERVERS button on main menu ==========
-        private void DrawMainMenuServersButton()
-        {
-            if (_currentSceneName != "MainScene" && _currentSceneName != "") return;
-            if (_showServersPanel || _showInGamePanel) return;
-
-            // Floating button in top-right
-            int w = 200, h = 60;
-            var r = new Rect(Screen.width - w - 20, 20, w, h);
-            if (GUI.Button(r, "SERVERS", _btnAccent))
-            {
-                _showServersPanel = true;
-                _focusJoinField = true;   // focus the join-code field on open
-                RefreshServers();
-            }
-        }
-
-        // ========== SERVERS browser panel ==========
-        private void DrawServersPanel()
-        {
-            float pw = Mathf.Min(700, Screen.width - 40);
-            float ph = Mathf.Min(560, Screen.height - 40);
-            var panel = new Rect((Screen.width - pw) / 2, (Screen.height - ph) / 2, pw, ph);
-
-            GUI.Box(panel, "", _rowStyle);
-            GUILayout.BeginArea(panel);
-            GUILayout.Space(10);
-            GUILayout.Label("SERVERS", _titleStyle, GUILayout.Height(40));
-            GUILayout.Label(_statusText, _statusStyle, GUILayout.Height(20));
-
-            // Buttons row
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button("REFRESH", _btnStyle, GUILayout.Width(140), GUILayout.Height(44)))
-                RefreshServers();
-            GUILayout.FlexibleSpace();
-            if (GUILayout.Button("CLOSE", _btnStyle, GUILayout.Width(140), GUILayout.Height(44)))
-                _showServersPanel = false;
-            GUILayout.EndHorizontal();
-
-            // Join-by-code + create row
-            GUILayout.BeginHorizontal();
-            GUI.SetNextControlName("joinCode");
-            _joinCodeInput = SanitizeCode(GUILayout.TextField(_joinCodeInput ?? "", 8, _textFieldStyle, GUILayout.Width(160), GUILayout.Height(44)));
-            if (_focusJoinField) { GUI.FocusControl("joinCode"); _focusJoinField = false; }
-            if (GUILayout.Button("JOIN CODE", _btnStyle, GUILayout.Width(160), GUILayout.Height(44)))
-                JoinLobby(_joinCodeInput);
-            GUILayout.FlexibleSpace();
-            if (GUILayout.Button("CREATE LOBBY", _btnAccent, GUILayout.Width(200), GUILayout.Height(44)))
-                CreateLobby();
-            GUILayout.EndHorizontal();
-
-            GUILayout.Space(10);
-
-            // Server list
-            _serversScroll = GUILayout.BeginScrollView(_serversScroll, GUILayout.Height(ph - 180));
-            if (_servers.Count == 0)
-            {
-                GUILayout.Label("No servers found. Click REFRESH to try again.", _statusStyle, GUILayout.Height(30));
-            }
-            else
-            {
-                foreach (var s in _servers)
-                {
-                    GUILayout.BeginHorizontal(_rowStyle, GUILayout.Height(58));
-                    GUILayout.BeginVertical();
-                    GUILayout.Label($"<b>{s.Code}</b>  —  {s.Host}:{s.Port}", _statusStyle);
-                    GUILayout.Label($"Players: {s.Players}/{s.Capacity}   Status: {s.Status}", _statusStyle);
-                    GUILayout.EndVertical();
-                    GUILayout.FlexibleSpace();
-                    if (GUILayout.Button("JOIN", _btnStyle, GUILayout.Width(140), GUILayout.Height(44)))
-                    {
-                        JoinLobby(s.Code);
-                    }
-                    GUILayout.EndHorizontal();
-                    GUILayout.Space(4);
-                }
-            }
-            GUILayout.EndScrollView();
-
-            GUILayout.EndArea();
-        }
-
-        // ========== IN-GAME player list panel ==========
-        private void DrawInGamePanel()
-        {
-            if (_currentSceneName == "MainScene") { _showInGamePanel = false; return; }
-
-            float pw = Mathf.Min(500, Screen.width - 40);
-            float ph = Mathf.Min(420, Screen.height - 40);
-            var panel = new Rect((Screen.width - pw) / 2, (Screen.height - ph) / 2, pw, ph);
-
-            GUI.Box(panel, "", _rowStyle);
-            GUILayout.BeginArea(panel);
-            GUILayout.Space(10);
-            GUILayout.Label("PLAYERS IN MATCH", _titleStyle, GUILayout.Height(40));
-            GUILayout.Label("Press F3 to close.", _statusStyle, GUILayout.Height(20));
-
-            GUILayout.Space(10);
-            _inGameScroll = GUILayout.BeginScrollView(_inGameScroll, GUILayout.Height(ph - 130));
-
-            var playerList = GetConnectedPlayers();
-            if (playerList.Count == 0)
-            {
-                GUILayout.Label("No players detected yet.", _statusStyle, GUILayout.Height(30));
-            }
-            else
-            {
-                foreach (var p in playerList)
-                {
-                    GUILayout.BeginHorizontal(_rowStyle, GUILayout.Height(48));
-                    GUILayout.Label($"Slot {p.Slot}  —  {p.Name}", _statusStyle);
-                    GUILayout.FlexibleSpace();
-                    GUILayout.Label($"SteamID: {p.SteamId}", _statusStyle, GUILayout.Width(200));
-                    GUILayout.EndHorizontal();
-                    GUILayout.Space(4);
-                }
-            }
-            GUILayout.EndScrollView();
-
-            GUILayout.Space(10);
-            if (GUILayout.Button("CLOSE", _btnStyle, GUILayout.Height(44)))
-                _showInGamePanel = false;
-            GUILayout.EndArea();
-        }
-
-        private struct PlayerRow { public int Slot; public string Name; public ulong SteamId; }
-        private List<PlayerRow> GetConnectedPlayers()
-        {
-            var list = new List<PlayerRow>();
+            var prevMatrix = BeginScaledUI();
             try
             {
-                var mmType = AccessTools.TypeByName("MultiplayerManager");
-                if ((object)mmType == null) return list;
-                var inst = UnityEngine.Object.FindObjectOfType(mmType);
-                if ((object)inst == null) return list;
-                var clientsField = AccessTools.Field(mmType, "ConnectedClients");
-                if ((object)clientsField == null) clientsField = AccessTools.Field(mmType, "mConnectedClients");
-                if ((object)clientsField == null) return list;
-                var arr = clientsField.GetValue(inst) as Array;
-                if (arr == null) return list;
-                for (int i = 0; i < arr.Length; i++)
-                {
-                    var entry = arr.GetValue(i);
-                    if (entry == null) continue;
-                    var idField = AccessTools.Field(entry.GetType(), "ClientID");
-                    ulong sid = 0;
-                    if ((object)idField != null)
-                    {
-                        var idObj = idField.GetValue(entry);
-                        if (idObj != null)
-                        {
-                            var steamField = AccessTools.Field(idObj.GetType(), "m_SteamID");
-                            if ((object)steamField != null)
-                            {
-                                var v = steamField.GetValue(idObj);
-                                if (v is ulong su) sid = su;
-                            }
-                        }
-                    }
-                    if (sid == 0) continue;
-                    string name = $"Player {i}";
-                    // Try to get steam name via SteamFriends if available (vanilla)
-                    try
-                    {
-                        var sfType = AccessTools.TypeByName("Steamworks.SteamFriends");
-                        var cidType = AccessTools.TypeByName("Steamworks.CSteamID");
-                        if ((object)sfType != null && (object)cidType != null)
-                        {
-                            var getName = AccessTools.Method(sfType, "GetFriendPersonaName");
-                            if ((object)getName != null)
-                            {
-                                var cid = Activator.CreateInstance(cidType, sid);
-                                var n = getName.Invoke(null, new object[] { cid }) as string;
-                                if (!string.IsNullOrEmpty(n)) name = n;
-                            }
-                        }
-                    }
-                    catch { }
-                    list.Add(new PlayerRow { Slot = i, Name = name, SteamId = sid });
-                }
+                DrawEntryButton();
+
+                if (_overlayAnim > 0.001f) DrawOverlay();
+                if (_showHud) DrawHudPanel();
+                if (_joiningSince > 0f) DrawConnectingOverlay();
+
+                DrawToasts();
+                DrawTooltipLayer();
             }
-            catch (Exception e) { Log.LogWarning($"[player-list] {e.Message}"); }
-            return list;
+            finally
+            {
+                EndScaledUI(prevMatrix);
+            }
         }
 
-        // ========== HTTP fetch ==========
+        // ====================================================================
+        //  DATA LAYER — lobby list (GET) + create (POST) + cross-asm join/host.
+        // ====================================================================
+
         private void RefreshServers()
         {
+            if (_isFetching) return;
             if (Time.realtimeSinceStartup - _lastFetchAt < FetchCooldown)
             {
-                _statusText = $"Wait {FetchCooldown - (Time.realtimeSinceStartup - _lastFetchAt):0.0}s before refreshing again.";
+                _statusText = $"Wait {FetchCooldown - (Time.realtimeSinceStartup - _lastFetchAt):0.0}s…";
                 return;
             }
             _lastFetchAt = Time.realtimeSinceStartup;
-            _statusText = "Fetching from " + _lobbyEndpoint + "...";
+            _isFetching = true;
+            _statusText = "Fetching lobbies…";
             StartCoroutine(FetchServersCoroutine());
         }
 
-        // Host for manual-launch fallback args — derived from the configured
-        // endpoint, never a baked-in IP; "SERVER_IP" placeholder if unknown.
-        private string EndpointHost()
-        {
-            if (string.IsNullOrEmpty(_lobbyEndpoint)) return "SERVER_IP";
-            try { return new Uri(_lobbyEndpoint).Host; } catch { return "SERVER_IP"; }
-        }
-
-        // WebClient with a finite timeout (WebClient has none) — without it an
-        // unreachable server blocks the worker thread for ~100s.
+        // WebClient with a finite timeout (stock WebClient has none → a dead host
+        // would block the worker thread ~100s).
         private sealed class TimedWebClient : WebClient
         {
             protected override WebRequest GetWebRequest(Uri address)
@@ -399,15 +224,14 @@ namespace SFServerBrowser
         {
             if (string.IsNullOrEmpty(_lobbyEndpoint))
             {
-                _statusText = "Set SF_LOBBY_ENDPOINT (e.g. http://HOST:8080/lobbies) to use the browser.";
+                _statusText = "Set SF_LOBBY_ENDPOINT to use the browser.";
                 _servers.Clear();
+                _isFetching = false;
                 yield break;
             }
-            string body = null;
-            string err = null;
-            // Use System.Net.WebRequest synchronously on a thread to avoid Unity coroutine complexity
-            // Simple: WebClient on thread, yield until done
-            System.Threading.Thread t = new System.Threading.Thread(() =>
+            string body = null, err = null;
+            int t0 = Environment.TickCount;
+            var t = new System.Threading.Thread(new System.Threading.ThreadStart(delegate
             {
                 try
                 {
@@ -418,17 +242,15 @@ namespace SFServerBrowser
                     }
                 }
                 catch (Exception e) { err = e.Message; }
-            });
+            }));
             t.IsBackground = true;
             t.Start();
             while (t.IsAlive) yield return null;
 
-            if (err != null)
-            {
-                _statusText = "Error: " + err;
-                _servers.Clear();
-                yield break;
-            }
+            _isFetching = false;
+            if (err != null) { _statusText = "Error: " + err; _servers.Clear(); _pingMs = -1; yield break; }
+            // Round-trip to the lobby endpoint ≈ a rough server ping for the UI.
+            _pingMs = Mathf.Max(0, Environment.TickCount - t0);
             ParseServers(body);
         }
 
@@ -436,8 +258,6 @@ namespace SFServerBrowser
         {
             _servers.Clear();
             if (string.IsNullOrEmpty(json)) { _statusText = "Empty response."; return; }
-            // Minimal JSON parser for the known schema
-            // Expected: {"generatedAt":"...", "lobbies":[{"code":"MAIN","port":1337,"alive":true,...}]}
             try
             {
                 int lobbiesStart = json.IndexOf("\"lobbies\"");
@@ -452,20 +272,26 @@ namespace SFServerBrowser
                 {
                     char c = arr[i];
                     if (c == '{') { if (depth == 0) start = i; depth++; }
-                    else if (c == '}') { depth--; if (depth == 0 && start >= 0) {
-                        string obj = arr.Substring(start, i - start + 1);
-                        var e = new ServerEntry();
-                        e.Code = ExtractString(obj, "code") ?? "?";
-                        e.Host = ExtractString(obj, "host") ?? "";
-                        e.Port = ExtractInt(obj, "port", 1337);
-                        e.Players = ExtractInt(obj, "players", 0);
-                        e.Capacity = ExtractInt(obj, "capacity", 4);
-                        e.Status = ExtractBool(obj, "alive", true) ? "ALIVE" : "DOWN";
-                        _servers.Add(e);
-                        start = -1;
-                    } }
+                    else if (c == '}')
+                    {
+                        depth--;
+                        if (depth == 0 && start >= 0)
+                        {
+                            string obj = arr.Substring(start, i - start + 1);
+                            var e = new ServerEntry();
+                            e.Code = ExtractString(obj, "code") ?? "?";
+                            e.Host = ExtractString(obj, "host") ?? "";
+                            e.Port = ExtractInt(obj, "port", 1337);
+                            e.Players = ExtractInt(obj, "players", 0);
+                            e.Capacity = ExtractInt(obj, "capacity", 4);
+                            e.Alive = ExtractBool(obj, "alive", true);
+                            e.Started = ExtractString(obj, "started") ?? "";
+                            _servers.Add(e);
+                            start = -1;
+                        }
+                    }
                 }
-                _statusText = $"Found {_servers.Count} server(s).";
+                _statusText = _servers.Count == 0 ? "No lobbies running." : $"{_servers.Count} lobby(ies) online.";
             }
             catch (Exception e) { _statusText = "Parse error: " + e.Message; }
         }
@@ -491,11 +317,12 @@ namespace SFServerBrowser
             for (int k = colon + 1; k < json.Length; k++)
             {
                 char c = json[k];
-                if (c == ' ' || c == '\t' || c == '\n' || c == '\r') continue;
+                if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '"') continue;
                 if (c == ',' || c == '}') break;
                 sb.Append(c);
             }
-            if (int.TryParse(sb.ToString(), out var v)) return v;
+            int v;
+            if (int.TryParse(sb.ToString(), out v)) return v;
             return def;
         }
         private static bool ExtractBool(string json, string key, bool def)
@@ -510,20 +337,17 @@ namespace SFServerBrowser
             return def;
         }
 
-        // ========== Join a lobby in-game (no restart) ==========
-        // Calls SFClientRecon.Plugin.RequestJoinLobby(code) by reflection (no
-        // hard assembly reference). That sets the SELECT lobby code, emits a
-        // SELECT to the sf-router, and runs the oracle-connect path — the client
-        // connects to the router's single port and is routed by code. Falls back
-        // to the old clipboard behavior if SFClientRecon isn't installed.
+        // ---- Join (no restart) ----------------------------------------------
         private void JoinLobby(string code)
         {
             code = SanitizeCode(code);
-            if (code.Length == 0) { _statusText = "Enter a lobby code first."; return; }
+            if (code.Length == 0) { PushToast("Enter a lobby code first.", 2); return; }
             if (TryInvokeJoin(code))
             {
-                _statusText = "Joining " + code + "...";
-                _showServersPanel = false;
+                _joiningCode = code;
+                _joiningSince = Time.unscaledTime;
+                _overlayOpen = false;
+                PushToast("Connecting to " + code + "…", 0);
                 Log.LogInfo("[browser] JOIN " + code + " via SFClientRecon.");
                 return;
             }
@@ -540,37 +364,56 @@ namespace SFServerBrowser
             }
             string args = "-address " + host + " -port " + port;
             try { GUIUtility.systemCopyBuffer = args; } catch { }
-            _statusText = "client-recon not installed. Copied: " + args + " (restart SF).";
+            PushToast("client-recon missing. Copied launch args — restart SF.", 2, 5f);
             Log.LogInfo("[browser] fallback clipboard: " + args);
         }
 
-        // ConnectToServer kept as a thin alias (older call sites / clarity).
-        private void ConnectToServer(ServerEntry s) { JoinLobby(s.Code); }
+        private string EndpointHost()
+        {
+            if (string.IsNullOrEmpty(_lobbyEndpoint)) return "SERVER_IP";
+            try { return new Uri(_lobbyEndpoint).Host; } catch { return "SERVER_IP"; }
+        }
+
+        private static void ResolveBridges()
+        {
+            if (_bridgeResolved) return;
+            _bridgeResolved = true;
+            var t = AccessTools.TypeByName("SFClientRecon.Plugin");
+            if (t == null) return;
+            _joinMethod = AccessTools.Method(t, "RequestJoinLobby", new[] { typeof(string) });
+            _hostMethod = AccessTools.Method(t, "RequestHostLobby", new[] { typeof(string) });
+        }
 
         private static bool TryInvokeJoin(string code)
         {
-            if (!_joinResolved)
-            {
-                _joinResolved = true;
-                var t = AccessTools.TypeByName("SFClientRecon.Plugin");
-                if (t != null)
-                    _joinMethod = AccessTools.Method(t, "RequestJoinLobby", new[] { typeof(string) });
-            }
+            ResolveBridges();
             if (_joinMethod == null) return false;
             try { _joinMethod.Invoke(null, new object[] { code }); return true; }
-            catch (Exception e) { Log.LogWarning("[browser] RequestJoinLobby invoke failed: " + e.Message); return false; }
+            catch (Exception e) { Log.LogWarning("[browser] RequestJoinLobby failed: " + e.Message); return false; }
         }
 
-        // ========== Create a lobby on demand (POST to serve-lobbies) ==========
+        // Host a *brand new* lobby in-place: create on the backend, then SELECT +
+        // connect to it. RequestHostLobby (client-recon) performs the SELECT +
+        // oracle-connect once the code is known.
+        private static bool TryInvokeHost(string code)
+        {
+            ResolveBridges();
+            if (_hostMethod == null) return TryInvokeJoin(code); // graceful: join path works too
+            try { _hostMethod.Invoke(null, new object[] { code }); return true; }
+            catch (Exception e) { Log.LogWarning("[browser] RequestHostLobby failed: " + e.Message); return false; }
+        }
+
+        // ---- Create a lobby on demand (POST to serve-lobbies) ----------------
         private void CreateLobby()
         {
+            if (_isCreating) return;
             if (Time.realtimeSinceStartup < _createCooldownAt)
             {
-                _statusText = "Wait a moment before creating another lobby.";
+                PushToast("Slow down — wait a moment before creating again.", 0);
                 return;
             }
             _createCooldownAt = Time.realtimeSinceStartup + 5f;
-            _statusText = "Creating lobby...";
+            _isCreating = true;
             StartCoroutine(CreateLobbyCoroutine());
         }
 
@@ -578,36 +421,165 @@ namespace SFServerBrowser
         {
             if (string.IsNullOrEmpty(_lobbyEndpoint))
             {
-                _statusText = "Set SF_LOBBY_ENDPOINT to create lobbies.";
+                PushToast("Set SF_LOBBY_ENDPOINT to create lobbies.", 2);
+                _isCreating = false;
                 yield break;
             }
             string body = null, err = null;
-            // The create endpoint is POST to the SAME URL as the lobby list
-            // (serve-lobbies.py: GET /lobbies lists, POST /lobbies creates).
             string url = _lobbyEndpoint;
             string token = Environment.GetEnvironmentVariable("SF_CONTROL_TOKEN") ?? "";
-            var t = new System.Threading.Thread(() =>
+            // Pass the chosen options as a small JSON body (serve-lobbies may use
+            // or ignore them; the create still works either way).
+            string payload = "{\"maxPlayers\":" + _createMaxPlayers
+                           + ",\"public\":" + (_createPublic ? "true" : "false")
+                           + ",\"mode\":" + _createMode + "}";
+            var t = new System.Threading.Thread(new System.Threading.ThreadStart(delegate
             {
                 try
                 {
                     using (var wc = new TimedWebClient())
                     {
                         wc.Headers.Add("User-Agent", "SFServerBrowser/" + PluginVersion);
+                        wc.Headers.Add("Content-Type", "application/json");
                         if (token.Length > 0) wc.Headers.Add("X-SF-Token", token);
-                        body = wc.UploadString(url, "POST", "");
+                        body = wc.UploadString(url, "POST", payload);
                     }
                 }
                 catch (Exception e) { err = e.Message; }
-            });
+            }));
             t.IsBackground = true;
             t.Start();
             while (t.IsAlive) yield return null;
 
-            if (err != null) { _statusText = "Create failed: " + err; yield break; }
+            _isCreating = false;
+            if (err != null) { PushToast("Create failed: " + err, 2, 4.5f); yield break; }
             string code = ExtractString(body, "code");
-            if (string.IsNullOrEmpty(code)) { _statusText = "Create: no code in response."; yield break; }
-            Log.LogInfo("[browser] created lobby " + code + " — joining.");
-            JoinLobby(code);
+            if (string.IsNullOrEmpty(code)) { PushToast("Create: no code in response.", 2); yield break; }
+            Log.LogInfo("[browser] created lobby " + code + " — hosting.");
+            PushToast("Lobby " + code + " created!", 1);
+            // host-path so we enter as the owner of the fresh lobby
+            code = SanitizeCode(code);
+            _joiningCode = code;
+            _joiningSince = Time.unscaledTime;
+            _overlayOpen = false;
+            TryInvokeHost(code);
+        }
+
+        // ---- Connected players (in-match HUD) --------------------------------
+        private List<PlayerRow> GetConnectedPlayers()
+        {
+            var list = new List<PlayerRow>();
+            try
+            {
+                var mmType = AccessTools.TypeByName("MultiplayerManager");
+                if ((object)mmType == null) return list;
+                var inst = UnityEngine.Object.FindObjectOfType(mmType);
+                if ((object)inst == null) return list;
+                var clientsField = AccessTools.Field(mmType, "ConnectedClients")
+                                ?? AccessTools.Field(mmType, "mConnectedClients");
+                if ((object)clientsField == null) return list;
+                var arr = clientsField.GetValue(inst) as Array;
+                if (arr == null) return list;
+                for (int i = 0; i < arr.Length; i++)
+                {
+                    var entry = arr.GetValue(i);
+                    if (entry == null) continue;
+                    var idField = AccessTools.Field(entry.GetType(), "ClientID");
+                    ulong sid = 0;
+                    if ((object)idField != null)
+                    {
+                        var idObj = idField.GetValue(entry);
+                        if (idObj != null)
+                        {
+                            var steamField = AccessTools.Field(idObj.GetType(), "m_SteamID");
+                            if ((object)steamField != null)
+                            {
+                                var v = steamField.GetValue(idObj);
+                                if (v is ulong su) sid = su;
+                            }
+                        }
+                    }
+                    if (sid == 0) continue;
+                    string name = "Player " + i;
+                    try
+                    {
+                        var sfType = AccessTools.TypeByName("Steamworks.SteamFriends");
+                        var cidType = AccessTools.TypeByName("Steamworks.CSteamID");
+                        if ((object)sfType != null && (object)cidType != null)
+                        {
+                            var getName = AccessTools.Method(sfType, "GetFriendPersonaName");
+                            if ((object)getName != null)
+                            {
+                                var cid = Activator.CreateInstance(cidType, sid);
+                                var n = getName.Invoke(null, new object[] { cid }) as string;
+                                if (!string.IsNullOrEmpty(n)) name = n;
+                            }
+                        }
+                    }
+                    catch { }
+                    list.Add(new PlayerRow { Slot = i, Name = name, SteamId = sid });
+                }
+            }
+            catch (Exception e) { Log.LogWarning($"[player-list] {e.Message}"); }
+            return list;
+        }
+
+        // ====================================================================
+        //  INTERNAL API consumed by the native uGUI LobbyOverlay. Thin wrappers
+        //  over the data layer so both UIs (IMGUI + uGUI) share one source.
+        // ====================================================================
+        internal List<ServerEntry> UiServers { get { return _servers; } }
+        internal bool UiFetching { get { return _isFetching; } }
+        internal bool UiCreating { get { return _isCreating; } }
+        internal string UiStatusText { get { return _statusText; } }
+        internal bool UiHasEndpoint { get { return !string.IsNullOrEmpty(_lobbyEndpoint); } }
+        internal string UiEndpointHost { get { return EndpointHost(); } }
+        internal string UiJoiningCode { get { return _joiningSince > 0f ? _joiningCode : null; } }
+        internal int UiPingMs { get { return _pingMs; } }
+        private int _pingMs = -1;
+
+        internal void UiRefresh() { RefreshServers(); }
+        internal void UiJoinCode(string code) { JoinLobby(code); }
+        internal void UiCreate(int maxPlayers, bool isPublic)
+        {
+            _createMaxPlayers = Mathf.Clamp(maxPlayers, 2, 8);
+            _createPublic = isPublic;
+            _createMode = 0;
+            CreateLobby();
+        }
+
+        // Code of the lobby we're currently connected to (from SFClientRecon).
+        private static System.Reflection.FieldInfo _selCodeField;
+        private static bool _selCodeTried;
+        internal string UiCurrentLobbyCode()
+        {
+            try
+            {
+                if (!_selCodeTried)
+                {
+                    _selCodeTried = true;
+                    var t = AccessTools.TypeByName("SFClientRecon.Plugin");
+                    if (t != null) _selCodeField = AccessTools.Field(t, "SelectedLobbyCode");
+                }
+                if (_selCodeField != null)
+                {
+                    var v = _selCodeField.GetValue(null) as string;
+                    if (!string.IsNullOrEmpty(v)) return v;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        internal bool UiInMatch { get { return _currentSceneName != "MainScene" && _currentSceneName != ""; } }
+
+        // Player roster as display lines for the overlay's player list.
+        internal List<string> UiPlayerLines()
+        {
+            var rows = GetConnectedPlayers();
+            var outp = new List<string>(rows.Count);
+            for (int i = 0; i < rows.Count; i++) outp.Add(rows[i].Name);
+            return outp;
         }
 
         // Uppercase A-Z0-9 only, max 8 (explicit loop — no LINQ, Mono 2.0 safe).

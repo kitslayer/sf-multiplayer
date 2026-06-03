@@ -23,10 +23,27 @@ namespace SFClientRecon
         private const float PushRelayInterval = 0.2f;
         private const float PushRelayMinDelta = 0.04f;
 
+        // Client LOCAL crate physics is the DEFAULT again. On this 30Hz netcode,
+        // pure server-follow renders steppy/slow ("se ve lageada"); local physics
+        // runs at full framerate so crates feel smooth and instant, while the
+        // server stays the source of truth via the outgoing relay. Set
+        // SF_CRATES_SERVER_AUTHORITATIVE=1 to force pure server-follow instead.
+        private static bool ServerAuthoritativeCrates()
+        {
+            string v = Environment.GetEnvironmentVariable("SF_CRATES_SERVER_AUTHORITATIVE");
+            return !string.IsNullOrEmpty(v) && (v == "1" || v.ToLowerInvariant() == "true");
+        }
+
         private void InstallNsoClientPushPatches()
         {
             DetectOracleConnectMode();
             if (!_oracleConnectMode) return;
+            if (ServerAuthoritativeCrates())
+            {
+                Log.LogInfo("[nso-push] SERVER-AUTHORITATIVE crates forced (SF_CRATES_SERVER_AUTHORITATIVE=1) — "
+                          + "client local physics OFF; crates follow server snapshots.");
+                return;
+            }
             _oraclePushMode = true;
             try
             {

@@ -22,6 +22,10 @@
       <HintPath>..\sf-headless-host\refs\UnityEngine.dll</HintPath>
       <Private>False</Private>
     </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>..\sf-headless-host\refs\UnityEngine.UI.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
     <Reference Include="Assembly-CSharp">
       <HintPath>..\sf-headless-host\refs\Assembly-CSharp.dll</HintPath>
       <Private>False</Private>

@@ -245,7 +245,10 @@ namespace SFClientRecon
         internal static bool CreateSteamLobby_OraclePrefix(int maxPlayers, bool privateLobby)
         {
             if (!_oracleConnectMode) return true;
-            BeginOracleLobbyConnect(privateLobby ? "HostMatch-private" : "HostMatch");
+            // Host Match now spins up a brand-new backend lobby (visible in the
+            // browser list) and hosts it, instead of silently joining MAIN. If no
+            // create endpoint is configured CreateAndHostLobby falls back to MAIN.
+            CreateAndHostLobby();
             return false;
         }
 

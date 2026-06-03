@@ -62,7 +62,7 @@ namespace SFClientRecon
     {
         public const string PluginGuid = "com.stickfightdev.client-recon";
         public const string PluginName = "SFClientRecon";
-        public const string PluginVersion = "0.3.9";
+        public const string PluginVersion = "0.4.0";
 
         internal static ManualLogSource Log;
         internal static bool RefOk(object o) => !ReferenceEquals(o, null);
@@ -516,6 +516,14 @@ namespace SFClientRecon
 
         private static Type _ctrlTypeForNp;
         private static FieldInfo _ctrlPlayerIdField;
+        // "Attempt once" guards: AccessTools.Field/TypeByName logs a warning and
+        // rescans the whole type every call when the member is genuinely absent.
+        // A plain `if (field == null) field = AccessTools.Field(...)` therefore
+        // re-attempts (and re-warns) EVERY frame for a missing field — that is the
+        // per-frame log-spam that tanked FPS (the crates "se ven lentas" because
+        // the game is drowning in reflection). These flags make us look up exactly
+        // once and then cache the result (even null) forever.
+        private static bool _ctrlLookupTried, _ctrlPidLookupTried;
 
         private static bool TryGetPlayerSlotFromNetworkPlayer(object np, out int slot)
         {
@@ -523,9 +531,9 @@ namespace SFClientRecon
             if (!RefOk(np)) return false;
             try
             {
-                if (!RefOk(_ctrlTypeForNp)) _ctrlTypeForNp = AccessTools.TypeByName("Controller");
+                if (!_ctrlLookupTried) { _ctrlLookupTried = true; _ctrlTypeForNp = AccessTools.TypeByName("Controller"); }
                 if (!RefOk(_ctrlTypeForNp)) return false;
-                if (!RefOk(_ctrlPlayerIdField)) _ctrlPlayerIdField = AccessTools.Field(_ctrlTypeForNp, "playerID");
+                if (!_ctrlPidLookupTried) { _ctrlPidLookupTried = true; _ctrlPlayerIdField = AccessTools.Field(_ctrlTypeForNp, "playerID"); }
                 if (!RefOk(_ctrlPlayerIdField)) return false;
                 var npComp = np as Component;
                 if (!RefOk(npComp)) return false;
@@ -535,6 +543,19 @@ namespace SFClientRecon
                 return true;
             }
             catch { return false; }
+        }
+
+        // Shared, attempt-once cache of the Controller type + its mHasControl /
+        // playerID fields, reused by FindLocalSlot and WeaponShootPostfix so
+        // neither re-scans (and re-warns) per frame / per shot.
+        private static FieldInfo _ctrlHasControlField;
+        private static bool _ctrlHasCtrlLookupTried;
+        private static void EnsureControllerRefs()
+        {
+            if (!_ctrlLookupTried) { _ctrlLookupTried = true; _ctrlTypeForNp = AccessTools.TypeByName("Controller"); }
+            if ((object)_ctrlTypeForNp == null) return;
+            if (!_ctrlPidLookupTried) { _ctrlPidLookupTried = true; _ctrlPlayerIdField = AccessTools.Field(_ctrlTypeForNp, "playerID"); }
+            if (!_ctrlHasCtrlLookupTried) { _ctrlHasCtrlLookupTried = true; _ctrlHasControlField = AccessTools.Field(_ctrlTypeForNp, "mHasControl"); }
         }
 
         private void Update()
@@ -671,8 +692,12 @@ namespace SFClientRecon
         // crate up + outward). So we cap horizontal STRICTLY when there's no
         // vertical motion (bullets), but allow a MUCH higher horizontal cap when
         // a vertical kick is present (explosions feel powerful, fly visibly).
-        private const float CrateMaxHoriz       = 2.6f;   // m/s — bullet / walk shove cap
-        private const float CrateMaxHorizBlast  = 12.0f;  // m/s — explosion cap (when vert velocity present)
+        // 2.6 m/s was far too low — a player push barely moved a crate, so they
+        // felt sluggish / "lentas". 6 m/s lets a deliberate push be responsive
+        // while still well under a bullet's fling speed (which the blast cap and
+        // the server governor catch).
+        private const float CrateMaxHoriz       = 6.0f;   // m/s — player-push cap (responsive)
+        private const float CrateMaxHorizBlast  = 13.0f;  // m/s — explosion cap (when vert velocity present)
         private const float CrateVertTrigger    = 2.0f;   // |v.y| above this enables the explosion cap
         private const float CrateMaxUp          = 9.0f;   // m/s upward — lets explosions launch crates
         private const float CrateMaxFall        = 30.0f;  // m/s downward — natural gravity fall
@@ -1802,15 +1827,13 @@ namespace SFClientRecon
                 if ((object)weaponComp == null) return;
 
                 // Find owning Controller — Weapon is a child of the player rig.
-                var ctrlType = AccessTools.TypeByName("Controller");
-                if ((object)ctrlType == null) return;
-                var ctrl = weaponComp.GetComponentInParent(ctrlType);
+                EnsureControllerRefs();
+                if ((object)_ctrlTypeForNp == null) return;
+                var ctrl = weaponComp.GetComponentInParent(_ctrlTypeForNp);
                 if ((object)ctrl == null) return;
-                var hasCtrlF = AccessTools.Field(ctrlType, "mHasControl");
-                if ((object)hasCtrlF != null && !(bool)hasCtrlF.GetValue(ctrl)) return;  // not the local player
-                var pidF = AccessTools.Field(ctrlType, "playerID");
+                if ((object)_ctrlHasControlField != null && !(bool)_ctrlHasControlField.GetValue(ctrl)) return;  // not the local player
                 byte slot = 0;
-                if ((object)pidF != null) slot = (byte)(int)pidF.GetValue(ctrl);
+                if ((object)_ctrlPlayerIdField != null) slot = (byte)(int)_ctrlPlayerIdField.GetValue(ctrl);
 
                 // Origin = shootPositionOverride if set, else weapon's shootPosition.position
                 Vector3 origin = networkForce ? shootPositionOverride : weaponComp.transform.position;
@@ -1928,18 +1951,16 @@ namespace SFClientRecon
             if (_localSlot >= 0) return _localSlot;
             try
             {
-                var ctrlType = AccessTools.TypeByName("Controller");
-                if ((object)ctrlType != null)
+                EnsureControllerRefs();
+                if ((object)_ctrlTypeForNp != null)
                 {
-                    var ctrls = UnityEngine.Object.FindObjectsOfType(ctrlType);
-                    var hasCtrlF = AccessTools.Field(ctrlType, "mHasControl");
-                    var pidF = AccessTools.Field(ctrlType, "playerID");
-                    if (ctrls != null && (object)hasCtrlF != null && (object)pidF != null)
+                    var ctrls = UnityEngine.Object.FindObjectsOfType(_ctrlTypeForNp);
+                    if (ctrls != null && (object)_ctrlHasControlField != null && (object)_ctrlPlayerIdField != null)
                     {
                         foreach (var c in ctrls)
                         {
-                            if (!(bool)hasCtrlF.GetValue(c)) continue;
-                            _localSlot = (int)pidF.GetValue(c);
+                            if (!(bool)_ctrlHasControlField.GetValue(c)) continue;
+                            _localSlot = (int)_ctrlPlayerIdField.GetValue(c);
                             Log.LogInfo($"[P6.11] Discovered localSlot={_localSlot} (Controller).");
                             return _localSlot;
                         }

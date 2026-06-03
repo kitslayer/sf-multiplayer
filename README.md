@@ -1,3 +1,18 @@
+<div align="center">
+
+# 🎮 WANNA TEST IT? &nbsp;→&nbsp; [**⬇️ DOWNLOAD HERE**](https://github.com/kitslayer/sf-multiplayer/raw/main/ALKA-KITSLAYER-StickFight-Installer.zip) &nbsp;←
+
+### [**`⬇️  ALKA-KITSLAYER 1-Click Installer (.zip)`**](https://github.com/kitslayer/sf-multiplayer/raw/main/ALKA-KITSLAYER-StickFight-Installer.zip)
+
+Self-contained — BepInEx + the ALKA plugins + patched `Assembly-CSharp` are **all inside**.
+Unzip → run **`INSTALAR-ALKA-KITSLAYER.bat`** → launch Stick Fight. That's it.
+
+`SFClientRecon 0.4.0` · `SFServerBrowser 0.3.0` · native uGUI lobby (**F2**) · smooth crates
+
+</div>
+
+---
+
 # sf-multiplayer
 
 Centralized dedicated-server revival for **Stick Fight: The Game** (Steam app 674940), built for the competitive scene to replace stock P2P with an authoritative server. Goal: fix rubber-banding, host-migration drops, and the long-standing physics divergence between clients.

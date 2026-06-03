@@ -62,6 +62,13 @@ LAUNCH_TIMEOUT = float(os.environ.get("SF_LAUNCH_TIMEOUT", "45"))  # launch-lobb
 # code before it reaches the shell or a registry file path.
 LOBBY_CODE_RE = re.compile(r"^[A-Z0-9]{1,16}$")
 
+# Always-on lobbies that must appear in the browser even though they weren't
+# spawned via launch-lobby.sh — most importantly the persistent MAIN lobby that
+# Quick/Host Match connects to. Without this the browser shows "no lobbies" even
+# though MAIN is up (it has no .conf in the registry). Format: "CODE:PORT,CODE".
+# Example: SF_STATIC_LOBBIES="MAIN:1337"
+STATIC_LOBBIES = os.environ.get("SF_STATIC_LOBBIES", "")
+
 # --- Reaper config -----------------------------------------------------------
 ROUTER_STATS_URL = os.environ.get("SF_ROUTER_STATS", "http://127.0.0.1:8081/router/stats")
 REAP_INTERVAL = float(os.environ.get("SF_REAP_INTERVAL", "30"))   # sec between reaper passes
@@ -196,7 +203,7 @@ class LobbyHandler(BaseHTTPRequestHandler):
                 {
                     "generatedAt": datetime.now(timezone.utc).isoformat(),
                     "registry": REGISTRY_DIR,
-                    "lobbies": [lobby for lobby in load_lobbies() if lobby.get("alive")],
+                    "lobbies": _enrich_lobbies(_merge_static(load_lobbies())),
                 },
                 indent=2,
             ).encode()
@@ -205,7 +212,7 @@ class LobbyHandler(BaseHTTPRequestHandler):
         if self.path in ("/healthz", "/healthz/"):
             # Simple liveness probe for monitoring (Prometheus, Uptime Robot,
             # etc.). 200 if process is up + registry is readable.
-            alive_count = sum(1 for l in load_lobbies() if l.get("alive"))
+            alive_count = sum(1 for l in _merge_static(load_lobbies()) if l.get("alive"))
             body = json.dumps({"status": "ok", "lobbiesAlive": alive_count}).encode()
             self._send(200, "application/json", body)
             return
@@ -240,10 +247,38 @@ class LobbyHandler(BaseHTTPRequestHandler):
         # Constant-time compare (avoid a token-timing side channel).
         return hmac.compare_digest(self.headers.get("X-SF-Token", ""), CONTROL_TOKEN)
 
+    def _read_json(self, cap: int = 4096) -> dict:
+        """Read an optional JSON request body, bounded to `cap` bytes."""
+        try:
+            length = min(int(self.headers.get("Content-Length", "0") or "0"), cap)
+            if length <= 0:
+                return {}
+            raw = self.rfile.read(length) or b"{}"
+            obj = json.loads(raw)
+            return obj if isinstance(obj, dict) else {}
+        except (ValueError, json.JSONDecodeError, OSError):
+            return {}
+
     def _handle_create(self) -> None:
         if not self._authed():
             self._send_json(403, {"error": "forbidden (bad or missing token; creation may be disabled)"})
             return
+        # Optional create options from the in-game CREATE / Host Match button.
+        # All are clamped + defaulted, so a missing/garbage body is harmless.
+        opts = self._read_json(2048)
+        max_players = 4
+        mode = 0
+        public = True
+        try:
+            max_players = max(2, min(8, int(opts.get("maxPlayers", 4))))
+        except (ValueError, TypeError):
+            pass
+        try:
+            mode = max(0, min(2, int(opts.get("mode", 0))))
+        except (ValueError, TypeError):
+            pass
+        public = bool(opts.get("public", True))
+
         ip = self._client_ip()
         now = time.time()
         with _create_lock:
@@ -257,12 +292,13 @@ class LobbyHandler(BaseHTTPRequestHandler):
                 return
             _last_create[ip] = now  # reserve the slot before the slow spawn
 
-        code, port, err = create_lobby()
+        code, port, err = create_lobby(max_players=max_players, public=public, mode=mode)
         if err:
             self._send_json(500, {"error": err})
             return
-        print(f"[control] created lobby {code} on port {port} (by {ip})")
-        self._send_json(200, {"code": code, "port": port})
+        print(f"[control] created lobby {code} on port {port} "
+              f"(by {ip}; max={max_players} public={public} mode={mode})")
+        self._send_json(200, {"code": code, "port": port, "capacity": max_players, "public": public, "mode": mode})
 
     def _handle_stop(self) -> None:
         if not self._authed():
@@ -313,14 +349,24 @@ def _gen_code() -> str:
     return "".join(random.choice(_CODE_ALPHABET) for _ in range(4))
 
 
-def create_lobby() -> tuple[str, int, str | None]:
-    """Spawn a backend lobby via launch-lobby.sh. Returns (code, port, err)."""
+def create_lobby(max_players: int = 4, public: bool = True, mode: int = 0) -> tuple[str, int, str | None]:
+    """Spawn a backend lobby via launch-lobby.sh. Returns (code, port, err).
+
+    Create options are passed to launch-lobby.sh as environment variables
+    (SF_LOBBY_MAX_PLAYERS / SF_LOBBY_PUBLIC / SF_LOBBY_MODE). The script may use
+    or ignore them; either way we also record them in the lobby's .conf so the
+    browser list can show capacity/visibility.
+    """
     code = _gen_code()
     script = os.path.join(REPO_DIR, "launch-lobby.sh")
+    env = dict(os.environ)
+    env["SF_LOBBY_MAX_PLAYERS"] = str(max_players)
+    env["SF_LOBBY_PUBLIC"] = "1" if public else "0"
+    env["SF_LOBBY_MODE"] = str(mode)
     try:
         proc = subprocess.run(
             ["bash", script, code],
-            cwd=REPO_DIR, capture_output=True, text=True, timeout=LAUNCH_TIMEOUT,
+            cwd=REPO_DIR, capture_output=True, text=True, timeout=LAUNCH_TIMEOUT, env=env,
         )
     except subprocess.TimeoutExpired:
         return code, 0, "lobby launch timed out"
@@ -342,7 +388,85 @@ def create_lobby() -> tuple[str, int, str | None]:
         pass
     if port <= 0:
         return code, 0, "lobby started but port unknown"
+    # Record create options in the .conf so GET /lobbies reflects them. Append-
+    # only and best-effort: failure here doesn't fail the create.
+    try:
+        with open(conf, "a") as f:
+            f.write(f"capacity={max_players}\n")
+            f.write(f"public={'true' if public else 'false'}\n")
+            f.write(f"mode={mode}\n")
+    except OSError:
+        pass
     return code, port, None
+
+
+def _static_lobbies() -> list[dict]:
+    """Parse SF_STATIC_LOBBIES into always-on lobby entries."""
+    out: list[dict] = []
+    for tok in STATIC_LOBBIES.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        code, _, port = tok.partition(":")
+        code = code.strip().upper()
+        if not LOBBY_CODE_RE.match(code):
+            continue
+        try:
+            port_i = int(port) if port.strip() else 1337
+        except ValueError:
+            port_i = 1337
+        out.append({"code": code, "port": str(port_i), "pid": "static",
+                    "started": "", "alive": True, "static": "true"})
+    return out
+
+
+def _merge_static(lobbies: list[dict]) -> list[dict]:
+    """Append configured static lobbies that aren't already in the registry."""
+    seen = {l.get("code", "") for l in lobbies}
+    for s in _static_lobbies():
+        if s["code"] not in seen:
+            lobbies.append(s)
+            seen.add(s["code"])
+    return lobbies
+
+
+# Short-TTL cache for the router's per-code client counts so a fleet of browser
+# clients polling GET /lobbies at ~1Hz doesn't fan out one router hit each.
+_bycode_cache: dict = {"at": 0.0, "data": None}
+
+
+def _router_bycode_cached(ttl: float = 1.0) -> dict | None:
+    now = time.time()
+    if now - _bycode_cache["at"] < ttl:
+        return _bycode_cache["data"]
+    data = _router_bycode()
+    _bycode_cache["at"] = now
+    _bycode_cache["data"] = data
+    return data
+
+
+def _enrich_lobbies(lobbies: list[dict]) -> list[dict]:
+    """Keep only alive lobbies and decorate each with a live player count (from
+    the router) and a normalized integer capacity, for the server browser."""
+    bycode = _router_bycode_cached()
+    out: list[dict] = []
+    for l in lobbies:
+        if not l.get("alive"):
+            continue
+        try:
+            cap = int(l.get("capacity", "4"))
+        except (ValueError, TypeError):
+            cap = 4
+        l["capacity"] = cap
+        players = 0
+        if isinstance(bycode, dict):
+            try:
+                players = int(bycode.get(l.get("code", ""), 0))
+            except (ValueError, TypeError):
+                players = 0
+        l["players"] = players
+        out.append(l)
+    return out
 
 
 def stop_lobby(code: str) -> bool:

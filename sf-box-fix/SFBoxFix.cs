@@ -60,7 +60,6 @@ namespace SFBoxFix
             try { ApplyFastRoundAdvance();       } catch (Exception e) { Log.LogError($"[DEATH-1] {e.Message}"); }
             try { ApplyInstantDeathDetection();  } catch (Exception e) { Log.LogError($"[DEATH-2] {e.Message}"); }
             try { ApplyMoreDeathPaths();         } catch (Exception e) { Log.LogError($"[DEATH-3] {e.Message}"); }
-            try { ApplyBoxRotationFreeze();      } catch (Exception e) { Log.LogError($"[BOX-ROT] {e.Message}"); }
 
             // Scene-level pass via SceneManager event — no coroutine, just a
             // deferred timer in Update() to wait for settle.
@@ -448,24 +447,11 @@ namespace SFBoxFix
             catch { /* silent */ }
         }
 
-        // ========== BOX-ROT: Freeze box rotation to X/Y axes ==========
-        // v0.3.9's NSO snapshot wire format only syncs rotZ (the camera-facing
-        // axis). When server physics tumbles a box around X or Y (e.g., from
-        // off-center collision impulse), the rotation is NEVER sent to clients
-        // — they only see the Z component, which makes the box appear to spin
-        // randomly. User reported: "cajas giran porque si".
-        //
-        // Fix: freeze rotation on X+Y axes for pushable crates' rigidbodies
-        // immediately after settle, so server physics only produces Z rotation
-        // — which IS sync'd. Net: box rotation matches between server and clients.
-        private static Type _rbConstraintsType;
-        private void ApplyBoxRotationFreeze()
-        {
-            // Frame-driven on scene load instead of patching every NSO Awake
-            // (would be expensive). Triggered via Update() timer like unfreeze.
-            // Implemented inside UnfreezeAllPushableNsos — see below.
-            Log.LogInfo("[BOX-ROT] Will freeze X/Y rotation on pushable crates post-settle (4s).");
-        }
+        // BOX-ROT note: the NSO snapshot wire format only syncs rotZ (the
+        // camera-facing axis). If server physics tumbled a box around X/Y the
+        // clients would never see it ("cajas giran porque sí"). ApplyCrateConstraints
+        // (in the crate engine below) freezes X/Y rotation and forces Z free, so
+        // server physics only rotates in the synced plane.
 
         // ========== CAJAS-3 + MAPA-AZUL: Unfreeze Christmas/Halloween kinematic NSOs ==========
         // Some level prefabs ship NSO rigidbodies as kinematic by default. Vanilla
@@ -489,228 +475,273 @@ namespace SFBoxFix
         {
             if (_pendingUnfreezeAt > 0f && Time.realtimeSinceStartup >= _pendingUnfreezeAt)
             {
-                float fireAt = _pendingUnfreezeAt;
                 _pendingUnfreezeAt = -1f;
-                try { UnfreezeAllPushableNsos(_pendingUnfreezeScene); }
-                catch (Exception e) { Log.LogWarning($"[CAJAS-3 unfreeze] {e.Message}"); }
+                try { ConfigureSceneCrates(_pendingUnfreezeScene); }
+                catch (Exception e) { Log.LogWarning($"[CRATES] scene config failed: {e.Message}"); }
             }
         }
 
-        // Server-authoritative crate velocity cap. SF bullets impart a big
-        // (mass-independent) impulse on hit → the server crate launches and every
-        // client (which just follows the server) sees it "salir volando". Capping
-        // the crate's velocity each physics step on the SERVER stops the launch at
-        // the source. A deliberate push stays under the cap; explosions stay near
-        // it. Runs in FixedUpdate so it catches the impulse the same step.
-        // Axis-aware caps (Y = vertical in SF). Cap HORIZONTAL (X/Z — bullet fling
-        // direction) and UPWARD impulse, but allow a natural downward fall so
-        // crates don't descend in slow motion. (A single magnitude cap throttled
-        // the fall speed → "caen en camara lenta".)
-        // Two horizontal caps: STRICT for bullets (pure horizontal velocity), HIGH
-        // for explosions (detected by vertical velocity component). Lets blasts
-        // throw crates while still killing bullet fling.
-        private const float CrateMaxHorizSrv      = 4.0f;
-        private const float CrateMaxHorizBlastSrv = 14.0f;
-        private const float CrateVertTriggerSrv   = 2.0f;
-        private const float CrateMaxUpSrv         = 9.0f;
-        private const float CrateMaxFallSrv       = 30.0f;
+        // ====================================================================
+        //  SERVER-AUTHORITATIVE CRATE ENGINE (vanilla-feel, single source of truth)
+        //
+        //  The oracle/host simulates every pushable crate; clients just render the
+        //  NSO snapshots. So ALL crate physics lives HERE: body configuration at
+        //  map load, then per-FixedUpdate velocity governance + edge tipping. No
+        //  client-side crate physics is required for this to be correct (the
+        //  client push-mode is a separate, optional smoothing layer).
+        //
+        //  Design goals (per user): keep it VANILLA-simple — trust PhysX for the
+        //  motion, and only (a) configure bodies so they tip/stack naturally and
+        //  (b) cap pathological velocities (bullet fling) that the snapshot wire
+        //  format would otherwise broadcast to everyone as "cajas volando".
+        // ====================================================================
+
+        // ── Velocity governance (axis-aware; Y is vertical in SF) ──────────────
+        // Horizontal: STRICT cap for pure-horizontal motion (bullet fling), a
+        // higher cap when there's a vertical component (explosions throw crates).
+        // Vertical: cap upward impulse but allow a natural downward fall.
+        private const float CrateMaxHoriz      = 6.0f;   // player-push cap (m/s) — aligned with client
+        private const float CrateMaxHorizBlast = 14.0f;  // explosion cap (m/s)
+        private const float CrateVertTrigger   = 2.0f;   // |v.y| above this ⇒ treat as blast
+        private const float CrateMaxUp         = 9.0f;   // upward impulse cap
+        private const float CrateMaxFall       = 30.0f;  // terminal fall cap
+
+        // ── Body configuration (vanilla-like) ─────────────────────────────────
+        private const float CrateMass          = 45f;    // heavy enough not to fling, light enough to topple
+        private const float CrateDrag          = 0.12f;
+        private const float CrateAngularDrag   = 0.35f;
+        private const float CrateMaxAngular    = 10f;    // visible tumble, still bounded
+        private const float CrateSleepThresh   = 0.012f;
+        private const float CrateCoMHeight     = 0.55f;  // high centre of mass ⇒ gravity tips it over an edge
+        private const int   CrateSolverIters   = 10;
+        private const int   CrateSolverVelIters = 6;
+        private const float CrateMinConfigMass = 1f;     // only skip massless markers; configure real crates
+
+        // ── Edge tipping (compensates PhysX contact-persistence bias) ──────────
+        private const float OverhangProbeDist  = 0.20f;
+        private const float OverhangProbeFrac  = 0.85f;  // sample at ±frac of the half-extent
+        private const float OverhangTorqueMul  = 0.5f;
+        private const float OverhangRestSpeed  = 1.0f;   // only assist near-rest crates
+        private const float OverhangRestAngular = 0.3f;
+
+        // The set of crate rigidbodies the governor manages this scene.
         private static readonly List<Rigidbody> _crateRbs = new List<Rigidbody>();
+        // The whole crate authority is two cheap passes per managed body: clamp
+        // the velocity (so the snapshot never broadcasts a bullet-fling launch)
+        // and, when near rest, nudge an overhanging crate so it actually topples.
         private void FixedUpdate()
         {
             if (_crateRbs.Count == 0) return;
-            float hSqrBullet = CrateMaxHorizSrv      * CrateMaxHorizSrv;
-            float hSqrBlast  = CrateMaxHorizBlastSrv * CrateMaxHorizBlastSrv;
             for (int i = _crateRbs.Count - 1; i >= 0; i--)
             {
                 var rb = _crateRbs[i];
-                if ((object)rb == null) { _crateRbs.RemoveAt(i); continue; }
-                if (rb.isKinematic) continue;
-                var v = rb.velocity;
-                bool changed = false;
-                bool isBlast = Mathf.Abs(v.y) > CrateVertTriggerSrv;
-                float hSqr   = isBlast ? hSqrBlast : hSqrBullet;
-                float hCap   = isBlast ? CrateMaxHorizBlastSrv : CrateMaxHorizSrv;
-                float hMagSqr = v.x * v.x + v.z * v.z;
-                if (hMagSqr > hSqr) { float s = hCap / Mathf.Sqrt(hMagSqr); v.x *= s; v.z *= s; changed = true; }
-                if (v.y > CrateMaxUpSrv) { v.y = CrateMaxUpSrv; changed = true; }
-                else if (v.y < -CrateMaxFallSrv) { v.y = -CrateMaxFallSrv; changed = true; }
-                if (changed) rb.velocity = v;
-                // Overhang torque assist (server): same algorithm as client so the
-                // two stay in sync. Compensates PhysX's contact-persistence bias so
-                // a crate overhanging an edge actually pivots.
-                if (rb.velocity.sqrMagnitude < 1.0f && rb.angularVelocity.sqrMagnitude < 0.3f)
-                    OverhangAssistOne(rb);
+                if ((object)rb == null) { _crateRbs.RemoveAt(i); continue; }   // prune destroyed
+                if (rb.isKinematic) continue;                                  // floating/parked crate
+                GovernCrateVelocity(rb);
+                if (rb.velocity.sqrMagnitude < OverhangRestSpeed * OverhangRestSpeed
+                    && rb.angularVelocity.sqrMagnitude < OverhangRestAngular * OverhangRestAngular)
+                    OverhangAssist(rb);
             }
         }
 
-        private static void OverhangAssistOne(Rigidbody rb)
+        // Axis-aware velocity cap. Horizontal motion is capped strictly unless the
+        // crate is clearly in a blast (vertical component present), in which case a
+        // higher cap lets explosions throw it. Downward fall is left near-natural.
+        private static void GovernCrateVelocity(Rigidbody rb)
         {
-            var col = rb.GetComponent<Collider>();
-            if ((object)col == null) col = rb.GetComponentInChildren<Collider>();
+            Vector3 v = rb.velocity;
+            bool isBlast = Mathf.Abs(v.y) > CrateVertTrigger;
+            float hCap   = isBlast ? CrateMaxHorizBlast : CrateMaxHoriz;
+            bool changed = false;
+
+            float hMagSqr = v.x * v.x + v.z * v.z;
+            if (hMagSqr > hCap * hCap)
+            {
+                float s = hCap / Mathf.Sqrt(hMagSqr);
+                v.x *= s; v.z *= s; changed = true;
+            }
+            if (v.y > CrateMaxUp) { v.y = CrateMaxUp; changed = true; }
+            else if (v.y < -CrateMaxFall) { v.y = -CrateMaxFall; changed = true; }
+
+            if (changed) rb.velocity = v;
+        }
+
+        // Edge tipping: PhysX averages box-on-box / box-on-ground contacts across
+        // the whole bottom face, which fakes stability and leaves a crate perched
+        // on a ledge. We sample two points near the left/right edges; if exactly
+        // one is unsupported, add a gravity-aligned torque about that edge so the
+        // crate pivots and falls — natural, vanilla-looking toppling.
+        private static void OverhangAssist(Rigidbody rb)
+        {
+            var col = rb.GetComponent<Collider>() ?? rb.GetComponentInChildren<Collider>();
             if ((object)col == null || col.isTrigger) return;
             Bounds b = col.bounds;
-            Vector3 c = b.center;
-            Vector3 e = b.extents;
+            Vector3 c = b.center, e = b.extents;
             if (e.x < 0.05f || e.y < 0.05f) return;
+
             float probeY = c.y - e.y + 0.05f;
-            float probeX = e.x * 0.85f;
-            bool leftSup  = Physics.Raycast(new Vector3(c.x - probeX, probeY, c.z), Vector3.down, 0.20f);
-            bool rightSup = Physics.Raycast(new Vector3(c.x + probeX, probeY, c.z), Vector3.down, 0.20f);
-            if (leftSup == rightSup) return;
+            float probeX = e.x * OverhangProbeFrac;
+            bool leftSup  = Physics.Raycast(new Vector3(c.x - probeX, probeY, c.z), Vector3.down, OverhangProbeDist);
+            bool rightSup = Physics.Raycast(new Vector3(c.x + probeX, probeY, c.z), Vector3.down, OverhangProbeDist);
+            if (leftSup == rightSup) return;   // fully supported or fully airborne ⇒ leave it
+
             Vector3 tipDir = leftSup ? Vector3.right : Vector3.left;
-            Vector3 torque = Vector3.Cross(tipDir, Physics.gravity) * rb.mass * 0.4f;
+            Vector3 torque = Vector3.Cross(tipDir, Physics.gravity) * rb.mass * OverhangTorqueMul;
             rb.AddTorque(torque, ForceMode.Force);
         }
 
-        // High-friction, no-bounce material so stacked crates grip instead of
-        // sliding off each other. Shared single instance (don't leak per-collider).
-        private static PhysicMaterial _gripMaterial;
-        private static PhysicMaterial GripMaterial
+        // ── One shared crate material (cached — never per-collider) ────────────
+        // Most crates are a single box collider, so a per-face split can't apply.
+        // A single MODERATE-grip, near-zero-bounce material is the vanilla-simple
+        // choice: enough friction to pivot on an edge and not slide on the floor,
+        // low enough that stacked crates still topple/disassemble on a hit instead
+        // of welding into one rigid block. sharedMaterial only (never .material,
+        // which clones a fresh PhysicMaterial per collider per round → leak).
+        private static PhysicMaterial _crateMat;
+        private static PhysicMaterial CrateMaterial
         {
             get
             {
-                if ((object)_gripMaterial == null)
-                {
-                    _gripMaterial = new PhysicMaterial("CrateGrip")
+                if ((object)_crateMat == null)
+                    _crateMat = new PhysicMaterial("CrateVanilla")
                     {
-                        staticFriction = 0.55f,
-                        dynamicFriction = 0.5f,
+                        staticFriction = 0.40f,
+                        dynamicFriction = 0.34f,
                         bounciness = 0.05f,
-                        frictionCombine = PhysicMaterialCombine.Multiply,
+                        frictionCombine = PhysicMaterialCombine.Average,
                         bounceCombine = PhysicMaterialCombine.Minimum
                     };
-                }
-                return _gripMaterial;
+                return _crateMat;
             }
         }
 
-        private static void UnfreezeAllPushableNsos(Scene scene)
+        // Walk every NSO in the freshly-loaded scene, find the pushable crates and
+        // hand each rigidbody to ConfigureCrateBody. Rebuilds the governed set so
+        // FixedUpdate only iterates this scene's crates. Called ~2s after load
+        // (post-settle) from Update(); MainScene is already excluded by the caller.
+        private static void ConfigureSceneCrates(Scene scene)
         {
             var nsoType = AccessTools.TypeByName("NetworkSyncableObject");
             if ((object)nsoType == null) return;
             var all = UnityEngine.Object.FindObjectsOfType(nsoType);
             if (all == null) return;
-            _crateRbs.Clear();   // rebuild the velocity-clamp set for this scene
 
-            // BOX-ROT applies to ALL maps. Unfreeze (CAJAS-3) only to Xmas-style.
-            string lower = scene.name.ToLowerInvariant();
-            bool doUnfreeze = lower.Contains("xmas") || lower.Contains("christmas")
-                           || lower.Contains("halloween") || lower.Contains("winter");
-
-            int flipped = 0, rotFrozen = 0;
+            _crateRbs.Clear();
+            int configured = 0;
             foreach (var nso in all)
             {
                 var comp = nso as Component;
                 if ((object)comp == null) continue;
                 if (comp.gameObject.scene.buildIndex != scene.buildIndex) continue;
-
-                if ((object)_dpType == null) continue;
-                var dps = comp.GetComponentsInChildren(_dpType);
-                if (dps == null || dps.Length == 0) continue;
-
-                bool anyPushable = false;
-                foreach (var dp in dps)
-                {
-                    bool simple = (object)_dpSimpleField != null && (bool)_dpSimpleField.GetValue(dp);
-                    bool ev = (object)_dpEventField != null && (bool)_dpEventField.GetValue(dp);
-                    if (simple && !ev) { anyPushable = true; break; }
-                }
-                if (!anyPushable) continue;
+                if (!IsPushableCrate(comp)) continue;
 
                 var rbs = comp.GetComponentsInChildren<Rigidbody>();
                 if (rbs == null) continue;
                 foreach (var rb in rbs)
-                {
-                    if ((object)rb == null) continue;
-
-                    // Skip jointed (preserves barrels on chains etc).
-                    if ((object)rb.GetComponent<Joint>() != null) continue;
-                    if ((object)rb.GetComponent<ConfigurableJoint>() != null) continue;
-                    if ((object)rb.GetComponent<HingeJoint>() != null) continue;
-
-                    // Register EVERY crate rigidbody (incl. light sub-pieces) for
-                    // the velocity clamp — a bullet's force lands on whichever piece
-                    // it hits, and the light ones were the ones still flying.
-                    if (!_crateRbs.Contains(rb)) _crateRbs.Add(rb);
-
-                    // Weight/grip only for the main heavy bodies (mass>=50). Light
-                    // sub-pieces keep their mass but are still velocity-capped above.
-                    if (rb.mass < 50f) continue;
-
-                    // BOX-ROT: freeze X+Y rotation. Server NSO snapshot only
-                    // sends rotZ; without this freeze, server physics tumbles
-                    // boxes around X/Y axes that clients never see → "cajas
-                    // giran porque si". Now server physics only rotates in Z,
-                    // which IS sync'd → boxes rotate consistently across clients.
-                    // (Do NOT freeze position Z here — locking a box's current
-                    // depth can trap two crates in different planes so they never
-                    // collide and visually overlap/vanish. Vanilla box physics
-                    // already keeps them coplanar; let it run.)
-                    // Freeze X/Y rotation but FORCE Z FREE — the prefab freezes Z
-                    // rotation, and a `|=` never unfroze it, so crates only slid
-                    // and never tipped/tumbled. Clear the Z-rotation bit.
-                    var prevConstraints = rb.constraints;
-                    var newConstraints = (prevConstraints
-                        | RigidbodyConstraints.FreezeRotationX
-                        | RigidbodyConstraints.FreezeRotationY)
-                        & ~RigidbodyConstraints.FreezeRotationZ;
-                    if (prevConstraints != newConstraints)
-                    {
-                        rb.constraints = newConstraints;
-                        rotFrozen++;
-                    }
-
-                    // BOX-GRIP: crates ship with near-zero friction → stacked
-                    // boxes slide off each other and a tower can't hold ("se van
-                    // empujando de a poquito"). Apply a high-friction material so
-                    // they grip and stack. Also raise the rigidbody's sleep
-                    // threshold so a settled stack actually goes to sleep instead
-                    // of micro-jittering itself apart.
-                    var cols = rb.GetComponentsInChildren<Collider>();
-                    if (cols != null)
-                        foreach (var col in cols)
-                            // sharedMaterial, not material — `.material` clones a new
-                            // PhysicMaterial per collider per round (memory leak).
-                            if ((object)col != null && !col.isTrigger) col.sharedMaterial = GripMaterial;
-                    // Very low sleep threshold + near-zero angular drag so a crate
-                    // balanced on an edge keeps its tipping torque and TOPPLES /
-                    // tumbles instead of sitting perched (matches client).
-                    rb.sleepThreshold = 0.005f;
-                    // Lower mass = responsive rotation/tipping (fling still bounded
-                    // by the velocity clamp, not mass). Matches client.
-                    rb.mass = 80f;
-                    rb.drag = 0.3f;
-                    rb.angularDrag = 0.8f;
-                    rb.maxAngularVelocity = 7f;
-                    // GRAVITY-TIP: high CoM + clean inertia tensor so a crate
-                    // overhanging an edge actually pivots (matches client).
-                    // Solver iterations up so PhysX resolves box-on-box edge
-                    // contacts correctly (the default averages contacts across the
-                    // bottom face and fakes stability — crate sat perched).
-                    rb.solverIterations         = 14;
-                    rb.solverVelocityIterations = 8;
-                    rb.ResetInertiaTensor();
-                    rb.centerOfMass             = new Vector3(0f, 0.45f, 0f);
-                    var it = rb.inertiaTensor;
-                    it.x *= 0.85f; it.z *= 0.85f;
-                    rb.inertiaTensor            = it;
-                    rb.useGravity               = true;
-
-                    // NOTE: the old CAJAS-3 "unfreeze" (flip kinematic→dynamic on
-                    // Xmas-style maps) is REMOVED. It fired ~2s after the scene
-                    // loaded — i.e. while the player was already fighting — and
-                    // dropped crates the map intentionally left floating/kinematic
-                    // ("cajas en el aire caen porque sí" + "anda 3s y explota").
-                    // We now NEVER force a crate dynamic: a kinematic/floating
-                    // crate only starts moving when the game itself activates it
-                    // (hit / destruction event). We only add grip + freeze X/Y rot.
-                    _ = doUnfreeze;
-                }
+                    if (ConfigureCrateBody(rb)) configured++;
             }
-            if (flipped > 0)
-                Log.LogInfo($"[CAJAS-3] Unfroze {flipped} kinematic pushable NSO rigidbodies in scene '{scene.name}'.");
-            if (rotFrozen > 0)
-                Log.LogInfo($"[BOX-ROT] Froze X/Y rotation on {rotFrozen} pushable crate rigidbodies in '{scene.name}' (sync stays in Z plane).");
+            if (configured > 0)
+                Log.LogInfo($"[CRATES] Configured {configured} server-authoritative crate bodies in '{scene.name}'.");
+        }
+
+        // A crate root is "pushable" when it carries a DestructiblePiece that is a
+        // SIMPLE (non-event) destruction — the same test the rest of the kit uses.
+        private static bool IsPushableCrate(Component comp)
+        {
+            if ((object)_dpType == null) return false;
+            var dps = comp.GetComponentsInChildren(_dpType);
+            if (dps == null || dps.Length == 0) return false;
+            foreach (var dp in dps)
+            {
+                bool simple = (object)_dpSimpleField != null && (bool)_dpSimpleField.GetValue(dp);
+                bool ev = (object)_dpEventField != null && (bool)_dpEventField.GetValue(dp);
+                if (simple && !ev) return true;
+            }
+            return false;
+        }
+
+        // Configure one crate rigidbody and register it for velocity governance.
+        // Returns true if it was a real crate body we configured. We DO NOT touch
+        // isKinematic: a floating/parked crate stays exactly as the map shipped it
+        // and only joins live physics when the game activates it (hit / event) —
+        // configuring it ahead of time means it then falls + tips naturally.
+        private static bool ConfigureCrateBody(Rigidbody rb)
+        {
+            if ((object)rb == null) return false;
+            // Preserve jointed props (barrels on chains, swinging crates, etc.).
+            if ((object)rb.GetComponent<Joint>() != null) return false;
+            if ((object)rb.GetComponent<ConfigurableJoint>() != null) return false;
+            if ((object)rb.GetComponent<HingeJoint>() != null) return false;
+
+            // Register EVERY rigidbody (incl. light sub-pieces) for the velocity
+            // clamp — a bullet's impulse lands on whichever piece it hits.
+            if (!_crateRbs.Contains(rb)) _crateRbs.Add(rb);
+
+            // Skip massless markers/sensors; configure everything with real mass.
+            if (rb.mass < CrateMinConfigMass) return false;
+
+            ApplyCrateConstraints(rb);
+            ApplyCrateMassAndSolver(rb);
+            ApplyCrateInertiaAndCoM(rb);
+            ApplyCrateDragLimits(rb);
+            ApplyCrateMaterials(rb);
+            return true;
+        }
+
+        // Rotation is freezable only in Z over the NSO wire (snapshot syncs rotZ).
+        // So freeze X+Y rotation (otherwise the server tumbles the box on axes the
+        // clients never receive → "cajas giran porque sí") and FORCE Z free (the
+        // prefab freezes Z; a plain |= would never re-open it, so the crate only
+        // slid and never tipped). Position stays fully free so crates stay coplanar.
+        private static void ApplyCrateConstraints(Rigidbody rb)
+        {
+            var c = (rb.constraints
+                     | RigidbodyConstraints.FreezeRotationX
+                     | RigidbodyConstraints.FreezeRotationY)
+                    & ~RigidbodyConstraints.FreezeRotationZ;
+            rb.constraints = c;
+        }
+
+        private static void ApplyCrateMassAndSolver(Rigidbody rb)
+        {
+            rb.mass = CrateMass;
+            rb.useGravity = true;
+            rb.sleepThreshold = CrateSleepThresh;
+            // Moderate solver iterations: enough to resolve box-on-box edge
+            // contacts, few enough that stacks don't "weld" (vanilla looseness).
+            rb.solverIterations = CrateSolverIters;
+            rb.solverVelocityIterations = CrateSolverVelIters;
+        }
+
+        // High centre of mass + slightly eased Z inertia ⇒ a crate overhanging an
+        // edge gets a real gravity torque and topples, while pitch/roll (frozen
+        // anyway) stay stiff. ResetInertiaTensor first so we scale from the box's
+        // true tensor, not an already-tweaked one (idempotent across re-configs).
+        private static void ApplyCrateInertiaAndCoM(Rigidbody rb)
+        {
+            rb.ResetInertiaTensor();
+            rb.centerOfMass = new Vector3(0f, CrateCoMHeight, 0f);
+            var it = rb.inertiaTensor;
+            it.x *= 0.85f;
+            it.z *= 0.70f;   // ease rotation in the 2.5D play plane (Z)
+            rb.inertiaTensor = it;
+        }
+
+        private static void ApplyCrateDragLimits(Rigidbody rb)
+        {
+            rb.drag = CrateDrag;
+            rb.angularDrag = CrateAngularDrag;
+            rb.maxAngularVelocity = CrateMaxAngular;
+        }
+
+        // Apply the shared crate material to every solid collider on the body.
+        private static void ApplyCrateMaterials(Rigidbody rb)
+        {
+            var cols = rb.GetComponentsInChildren<Collider>();
+            if (cols == null) return;
+            var mat = CrateMaterial;
+            foreach (var col in cols)
+                if ((object)col != null && !col.isTrigger) col.sharedMaterial = mat;
         }
     }
 }
