@@ -651,9 +651,17 @@ namespace SFBoxFix
                     rb.maxAngularVelocity = 7f;
                     // GRAVITY-TIP: high CoM + clean inertia tensor so a crate
                     // overhanging an edge actually pivots (matches client).
+                    // Solver iterations up so PhysX resolves box-on-box edge
+                    // contacts correctly (the default averages contacts across the
+                    // bottom face and fakes stability — crate sat perched).
+                    rb.solverIterations         = 32;
+                    rb.solverVelocityIterations = 20;
                     rb.ResetInertiaTensor();
-                    rb.centerOfMass = new Vector3(0f, 1.0f, 0f);
-                    rb.useGravity = true;
+                    rb.centerOfMass             = new Vector3(0f, 0.9f, 0f);
+                    var it = rb.inertiaTensor;
+                    it.x *= 0.6f; it.z *= 0.6f;
+                    rb.inertiaTensor            = it;
+                    rb.useGravity               = true;
 
                     // NOTE: the old CAJAS-3 "unfreeze" (flip kinematic→dynamic on
                     // Xmas-style maps) is REMOVED. It fired ~2s after the scene

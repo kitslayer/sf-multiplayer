@@ -219,12 +219,25 @@ namespace SFClientRecon
                 //   2) Reset the inertia tensor so Unity recomputes a clean one
                 //      from the collider (the prefab can ship a tensor that
                 //      resists Z rotation specifically).
+                // Solver iterations way up — PhysX needs more passes to resolve the
+                // box-on-box edge contact correctly; the default (~6) was averaging
+                // contacts across the bottom face and producing fake stability →
+                // crate sat perched. 32/20 gives the solver enough work to remove
+                // non-touching contacts and let gravity tip the body.
+                rb.solverIterations         = 32;
+                rb.solverVelocityIterations = 20;
                 rb.ResetInertiaTensor();
-                // Push CoM well ABOVE the top face of the crate. With CoM outside
-                // the box, the box becomes self-unstable: any overhang at all gives
-                // gravity a huge moment arm → the box pivots/topples on its own.
-                rb.centerOfMass        = new Vector3(0f, 1.0f, 0f);
-                rb.useGravity          = true;
+                // CoM just under the top face. Lower than 1.0 (which floated above
+                // the box) but still well above geometric center, so any overhang
+                // gives gravity a big moment arm.
+                rb.centerOfMass             = new Vector3(0f, 0.9f, 0f);
+                // Reduce inertia around tipping axes (X and Z) so the crate
+                // accelerates angularly with less torque → visible tip starts fast
+                // instead of being damped by inertia.
+                var it = rb.inertiaTensor;
+                it.x *= 0.6f; it.z *= 0.6f;
+                rb.inertiaTensor            = it;
+                rb.useGravity               = true;
                 // Very low sleep threshold so a crate balanced on the edge of
                 // another doesn't "fall asleep" while it still has a tipping torque
                 // — that was why it sat perched instead of toppling. It still
