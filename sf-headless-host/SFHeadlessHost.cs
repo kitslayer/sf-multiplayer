@@ -5137,25 +5137,22 @@ namespace SFHeadlessHost
             {
                 EnsureNsoSrvCache();
                 float now = Time.realtimeSinceStartup;
+                bool needRebuild = false;
                 foreach (var ent in _nsoSrvEntries)
                 {
                     var comp = ent.Comp;
-                    if ((object)comp == null) continue;
+                    if (!comp) { needRebuild = true; continue; }
                     if (ent.Weapon) continue;
 
                     ushort id = ent.Id;
-                    var p = comp.transform.position;
-                    var rb = ent.Rb;
+                    Vector3 p;
+                    try { p = comp.transform.position; }
+                    catch { needRebuild = true; continue; }
 
-                    // BOXES FIX (2nd pass): mirror the v25 forward-skip filter.
-                    // The server's own NSOs can fall through the floor on map
-                    // load (no settle phase, joints/constraints not yet
-                    // registered). Broadcasting those positions to clients
-                    // makes their local copies vanish off-screen.
+                    var rb = ent.Rb;
                     if (p.y < -30f) continue;
 
-                    bool dynamicBody = (object)rb != null && !rb.isKinematic;
-                    // Case 0: pushable crates only — every tick while dynamic (not all 90 NSOs).
+                    bool dynamicBody = rb && !rb.isKinematic;
                     if (dynamicBody && ent.Pushable)
                     {
                         _nsoLastMovedAt[id] = now;
@@ -5165,17 +5162,20 @@ namespace SFHeadlessHost
                         continue;
                     }
 
-                    // Case 1: non-kinematic w/ active motion.
-                    bool dynamicMoving = dynamicBody
-                        && (rb.velocity.sqrMagnitude > 0.0001f || rb.angularVelocity.sqrMagnitude > 0.0001f);
+                    bool dynamicMoving = false;
+                    if (dynamicBody)
+                    {
+                        try
+                        {
+                            dynamicMoving = rb.velocity.sqrMagnitude > 0.0001f
+                                || rb.angularVelocity.sqrMagnitude > 0.0001f;
+                        }
+                        catch { needRebuild = true; continue; }
+                    }
 
-                    // Case 2: position drifted since last broadcast (covers
-                    // kinematic Animator-driven moving platforms, but ALSO
-                    // catches the final-settle frame of dynamic bodies).
                     bool positionDrifted = !_nsoLastBroadcastPos.TryGetValue(id, out var lastPos)
                         || Vector3.Distance(p, lastPos) > NsoPosDeltaThreshold;
 
-                    // Case 3: recently moved (keepalive).
                     float keepAlive = ent.Pushable ? NsoCrateKeepaliveSec : NsoKeepaliveSec;
                     bool recentlyActive = _nsoLastMovedAt.TryGetValue(id, out var lastMovedAt)
                         && (now - lastMovedAt) < keepAlive;
@@ -5188,8 +5188,13 @@ namespace SFHeadlessHost
                     var e = comp.transform.eulerAngles;
                     result.Add(new NsoSnap { Id = id, X = p.x, Y = p.y, Z = p.z, RotZ = e.z });
                 }
+                if (needRebuild)
+                {
+                    RebuildNsoIndexCache();
+                    _nsoCacheLastRebuildAt = Time.realtimeSinceStartup;
+                }
             }
-            catch (Exception ex) { Log.LogWarning($"[P6.14 NSO collect] {ex.Message}"); }
+            catch (Exception ex) { Log.LogWarning($"[P6.14 NSO collect] {ex.GetType().Name}: {ex.Message}"); }
             return result;
         }
 

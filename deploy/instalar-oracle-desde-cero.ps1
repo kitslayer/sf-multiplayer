@@ -111,6 +111,16 @@ if ((Get-FileHash $Asm).Hash -ne (Get-FileHash $SrvDll).Hash) {
 }
 Write-Host '      srv.v25 activo.'
 
+# --- 4b) Endpoint oracle (Steam sin -address en launch options) ---
+$cfgDir = Join-Path $Sf 'BepInEx\config'
+New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
+$endpointFile = Join-Path $cfgDir 'sf-oracle-endpoint.txt'
+@"
+$ServerIp
+$ServerPort
+"@ | Set-Content -Path $endpointFile -Encoding ASCII
+Write-Host "      Endpoint -> $endpointFile"
+
 # --- 5) Acceso directo (ruta absoluta al .ps1 del repo; no copiar solo el .bat) ---
 Write-Host '[5/5] Acceso directo en el escritorio...' -ForegroundColor Yellow
 $desk = [Environment]::GetFolderPath('Desktop')

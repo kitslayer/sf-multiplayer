@@ -62,7 +62,7 @@ namespace SFClientRecon
     {
         public const string PluginGuid = "com.stickfightdev.client-recon";
         public const string PluginName = "SFClientRecon";
-        public const string PluginVersion = "0.3.6";
+        public const string PluginVersion = "0.3.9";
 
         internal static ManualLogSource Log;
         internal static bool RefOk(object o) => !ReferenceEquals(o, null);
@@ -171,6 +171,8 @@ namespace SFClientRecon
             // correct. Per-second force is preserved because Movement.cs
             // scales by Time.deltaTime.
             Time.fixedDeltaTime = 1f / 60f;
+            Physics.sleepThreshold = 0.011f;
+            Physics.defaultContactOffset = 0.01f;
 
             var nsoSmoothEnv = Environment.GetEnvironmentVariable("SFCLIENTRECON_NSO_SMOOTH");
             if (!string.IsNullOrEmpty(nsoSmoothEnv) && float.TryParse(nsoSmoothEnv, out var nsr) && nsr > 1f)
@@ -281,18 +283,14 @@ namespace SFClientRecon
             }
 
             // Phase 6.12 — server endpoint for outbound PktPlayerInput.
-            // Mirrors the patched DLL's CLI parsing: -address X -port Y.
-            string serverHost = "127.0.0.1";
-            int serverPort = 1337;
-            var args = Environment.GetCommandLineArgs();
-            for (int i = 0; i < args.Length - 1; i++)
-            {
-                if (args[i] == "-address") serverHost = args[i + 1];
-                else if (args[i] == "-port" && int.TryParse(args[i + 1], out var p)) serverPort = p;
-            }
+            // Mirrors the patched DLL's CLI parsing: -address X -port Y, or
+            // BepInEx/config/sf-oracle-endpoint.txt when launched from Steam.
+            ResolveOracleEndpoint();
             try
             {
                 IPAddress ip;
+                string serverHost = OracleServerHost;
+                int serverPort = OracleServerPort;
                 if (!IPAddress.TryParse(serverHost, out ip))
                     ip = Dns.GetHostAddresses(serverHost)[0];
                 _serverEp = new IPEndPoint(ip, serverPort);
@@ -513,11 +511,29 @@ namespace SFClientRecon
                 _snapsReceived++;
             }
             finally { System.Threading.Monitor.Exit(_snapLock); }
-            // Snapshots only ever flow once we're truly connected to the oracle.
-            // The lobby-connect path (BeginOracleLobbyConnect) isn't the only way
-            // in (server browser / autoconnect bypass it), so use snapshot flow as
-            // the universal "connected" signal that unblocks the init flag.
-            _oracleConnectStarted = true;
+        }
+
+        private static Type _ctrlTypeForNp;
+        private static FieldInfo _ctrlPlayerIdField;
+
+        private static bool TryGetPlayerSlotFromNetworkPlayer(object np, out int slot)
+        {
+            slot = -1;
+            if (!RefOk(np)) return false;
+            try
+            {
+                if (!RefOk(_ctrlTypeForNp)) _ctrlTypeForNp = AccessTools.TypeByName("Controller");
+                if (!RefOk(_ctrlTypeForNp)) return false;
+                if (!RefOk(_ctrlPlayerIdField)) _ctrlPlayerIdField = AccessTools.Field(_ctrlTypeForNp, "playerID");
+                if (!RefOk(_ctrlPlayerIdField)) return false;
+                var npComp = np as Component;
+                if (!RefOk(npComp)) return false;
+                var ctrl = npComp.GetComponent(_ctrlTypeForNp);
+                if (!RefOk(ctrl)) return false;
+                slot = (int)_ctrlPlayerIdField.GetValue(ctrl);
+                return true;
+            }
+            catch { return false; }
         }
 
         private void Update()
@@ -654,8 +670,8 @@ namespace SFClientRecon
         // crate up + outward). So we cap horizontal STRICTLY when there's no
         // vertical motion (bullets), but allow a MUCH higher horizontal cap when
         // a vertical kick is present (explosions feel powerful, fly visibly).
-        private const float CrateMaxHoriz       = 4.0f;   // m/s — bullet cap (no vert velocity)
-        private const float CrateMaxHorizBlast  = 14.0f;  // m/s — explosion cap (when vert velocity present)
+        private const float CrateMaxHoriz       = 2.6f;   // m/s — bullet / walk shove cap
+        private const float CrateMaxHorizBlast  = 12.0f;  // m/s — explosion cap (when vert velocity present)
         private const float CrateVertTrigger    = 2.0f;   // |v.y| above this enables the explosion cap
         private const float CrateMaxUp          = 9.0f;   // m/s upward — lets explosions launch crates
         private const float CrateMaxFall        = 30.0f;  // m/s downward — natural gravity fall
@@ -769,13 +785,19 @@ namespace SFClientRecon
             return false;
         }
 
-        private const float StackAngularDamp  = 0.55f;   // multiplied each tick when load above (so a stack rotates slowly)
-        private const float PlayerHorizDamp   = 0.78f;   // multiplied each tick while a player is touching
-        private const float OverhangTorqueMul = 0.4f;    // fraction of full gravity torque applied to perched crates
+        private const float StackAngularDamp  = 0.88f;   // only on settled stacks — light damp, not weld
+        private const float StackSettledSpeed = 1.8f;      // above this, stack can disassemble freely
+        private const float PlayerHorizDamp   = 0.46f;   // strong — player shove feels heavy/controlled
+        private const float OverhangTorqueMul = 0.68f;   // gravity tip about support edge
+        private const float OverhangFallTorqueMul = 0.35f; // extra tumble while falling with partial support
+        private const float CrateVoidRescueY    = -22f;
+        private static readonly Dictionary<int, Vector3> _crateSafePos = new Dictionary<int, Vector3>(64);
+        private static readonly Dictionary<int, float> _crateSafeAt = new Dictionary<int, float>(64);
 
         private void ApplyStackAndContactBehavior()
         {
             if (_nsoCache.Count == 0) return;
+            float now = Time.realtimeSinceStartup;
             foreach (var kv in _nsoCache)
             {
                 var entry = kv.Value;
@@ -783,28 +805,44 @@ namespace SFClientRecon
                 var rb = entry.Rb;
                 if (rb == null || rb.isKinematic) continue;
 
-                var comp = entry.Comp; if (comp == null) continue;
+                var comp = entry.Comp;
+                if (comp == null) continue;
                 var col = comp.GetComponent<Collider>() ?? comp.GetComponentInChildren<Collider>();
                 if (col == null || col.isTrigger) continue;
                 Bounds b = col.bounds;
                 if (b.extents.x < 0.05f || b.extents.y < 0.05f) continue;
 
+                int rid = rb.GetInstanceID();
+                Vector3 pos = rb.position;
+                if (pos.y > CrateVoidRescueY + 2f)
+                {
+                    _crateSafePos[rid] = pos;
+                    _crateSafeAt[rid] = now;
+                }
+                else if (pos.y < CrateVoidRescueY && _crateSafePos.TryGetValue(rid, out var safe) && safe.y > CrateVoidRescueY + 1f)
+                {
+                    rb.position = safe;
+                    rb.velocity = Vector3.zero;
+                    rb.angularVelocity = Vector3.zero;
+                    rb.WakeUp();
+                    continue;
+                }
+
                 bool loadAbove     = HasCrateAbove(rb, b);
                 bool playerTouches = IsPlayerTouching(rb, b);
+                float speedSqr     = rb.velocity.sqrMagnitude;
+                bool stackSettled  = speedSqr < StackSettledSpeed * StackSettledSpeed;
 
-                // (A) Stack cohesion: a load-bearing crate must NOT spin freely —
-                // strongly damp angular velocity so the column stays vertical.
-                if (loadAbove && rb.angularVelocity.sqrMagnitude > 0.0001f)
+                // (A) Stack cohesion ONLY when the column is at rest — vertical hits
+                //     can break the stack apart (vanilla). Skip while falling fast.
+                if (loadAbove && stackSettled && rb.angularVelocity.sqrMagnitude > 0.0001f)
                     rb.angularVelocity *= StackAngularDamp;
 
-                // (B) Player push damping: scale down horizontal velocity (X/Z)
-                // gained from collisions while a player is in contact. Y left
-                // alone so the player can't stop a falling crate by walking under
-                // it. Skipped if velocity is already small or already a blast.
+                // (B) Player push damping — attenuate horizontal shove from character.
                 if (playerTouches)
                 {
                     Vector3 v = rb.velocity;
-                    if (v.x * v.x + v.z * v.z > 0.04f && Mathf.Abs(v.y) < 1.5f)
+                    if (v.x * v.x + v.z * v.z > 0.025f && Mathf.Abs(v.y) < 2.0f)
                     {
                         v.x *= PlayerHorizDamp;
                         v.z *= PlayerHorizDamp;
@@ -812,22 +850,42 @@ namespace SFClientRecon
                     }
                 }
 
-                // (C) Overhang tip — skip while supporting load OR already moving.
-                if (loadAbove) continue;
-                if (rb.velocity.sqrMagnitude > 1.0f) continue;
-                if (rb.angularVelocity.sqrMagnitude > 0.3f) continue;
+                // (C) Overhang / partial-support tip (skip load-bearing settled stacks).
+                if (loadAbove && stackSettled) continue;
 
                 Vector3 c = b.center;
                 Vector3 e = b.extents;
                 float probeY = c.y - e.y + 0.05f;
-                float probeX = e.x * 0.85f;
-                bool leftSup  = Physics.Raycast(new Vector3(c.x - probeX, probeY, c.z), Vector3.down, 0.20f);
-                bool rightSup = Physics.Raycast(new Vector3(c.x + probeX, probeY, c.z), Vector3.down, 0.20f);
+                float probeX = e.x * 0.82f;
+                bool leftSup  = Physics.Raycast(new Vector3(c.x - probeX, probeY, c.z), Vector3.down, 0.22f);
+                bool rightSup = Physics.Raycast(new Vector3(c.x + probeX, probeY, c.z), Vector3.down, 0.22f);
                 if (leftSup == rightSup) continue;
+
                 Vector3 tipDir = leftSup ? Vector3.right : Vector3.left;
-                Vector3 torque = Vector3.Cross(tipDir, Physics.gravity) * rb.mass * OverhangTorqueMul;
+                float torqueScale = speedSqr > 0.5f ? OverhangFallTorqueMul : OverhangTorqueMul;
+                Vector3 torque = Vector3.Cross(tipDir, Physics.gravity) * rb.mass * torqueScale;
                 rb.AddTorque(torque, ForceMode.Force);
+
+                // Vertical stack break: upward impulse on a crate with load above
+                // → nudge top separation (vanilla stack pop on head-bonk).
+                if (loadAbove && rb.velocity.y > 1.2f)
+                {
+                    var aboveRb = FindCrateRigidbodyAbove(rb);
+                    if (aboveRb != null && !aboveRb.isKinematic)
+                        aboveRb.AddForce(Vector3.up * rb.mass * 0.35f, ForceMode.Impulse);
+                }
             }
+        }
+
+        private static Rigidbody FindCrateRigidbodyAbove(Rigidbody self)
+        {
+            var col = self.GetComponent<Collider>() ?? self.GetComponentInChildren<Collider>();
+            if (col == null) return null;
+            Bounds b = col.bounds;
+            Vector3 origin = new Vector3(b.center.x, b.max.y + 0.02f, b.center.z);
+            RaycastHit hit;
+            if (!Physics.Raycast(origin, Vector3.up, out hit, 0.45f)) return null;
+            return hit.rigidbody;
         }
 
         // Clamp in FixedUpdate (the physics step) — a bullet imparts velocity in
@@ -859,13 +917,11 @@ namespace SFClientRecon
                     if ((object)npType != null)
                     {
                         var nps = UnityEngine.Object.FindObjectsOfType(npType);
-                        var pidField = AccessTools.Field(npType, "playerID");
-                        if (nps != null && (object)pidField != null)
+                        if (nps != null)
                         {
                             foreach (var np in nps)
                             {
-                                var pidObj = pidField.GetValue(np);
-                                if (!(pidObj is int pi)) continue;
+                                if (!TryGetPlayerSlotFromNetworkPlayer(np, out var pi)) continue;
                                 if (!_playerTargets.TryGetValue(pi, out var target)) continue;
                                 var npComp = np as Component;
                                 var rb = npComp.GetComponent<Rigidbody>() ?? npComp.GetComponentInChildren<Rigidbody>();
@@ -1367,13 +1423,11 @@ namespace SFClientRecon
                 if ((object)npType != null)
                 {
                     var nps = UnityEngine.Object.FindObjectsOfType(npType);
-                    var pidField = AccessTools.Field(npType, "playerID");
-                    if (nps != null && (object)pidField != null)
+                    if (nps != null)
                     {
                         foreach (var np in nps)
                         {
-                            var pidObj = pidField.GetValue(np);
-                            if (!(pidObj is int pi) || pi != localSlot) continue;
+                            if (!TryGetPlayerSlotFromNetworkPlayer(np, out var pi) || pi != localSlot) continue;
                             var npComp = np as Component;
                             if ((object)npComp == null) break;
                             Vector3 currentPos = npComp.transform.position;
@@ -1718,8 +1772,6 @@ namespace SFClientRecon
                 if ((object)npType == null) return;
                 var nps = UnityEngine.Object.FindObjectsOfType(npType);
                 if (nps == null) return;
-                var pidField = AccessTools.Field(npType, "playerID");
-                if ((object)pidField == null) return;
 
                 bool smoothRemote = Environment.GetEnvironmentVariable("SFCLIENTRECON_SMOOTH_REMOTE") == "1";
                 foreach (var entry in snap)
@@ -1752,8 +1804,7 @@ namespace SFClientRecon
                             {
                                 foreach (var np2 in nps)
                                 {
-                                    var pidObj2 = pidField.GetValue(np2);
-                                    if (!(pidObj2 is int pi2) || pi2 != localSlot) continue;
+                                    if (!TryGetPlayerSlotFromNetworkPlayer(np2, out var pi2) || pi2 != localSlot) continue;
                                     var npComp2 = np2 as Component;
                                     var rb2 = npComp2.GetComponent<Rigidbody>() ?? npComp2.GetComponentInChildren<Rigidbody>();
                                     if ((object)rb2 != null)
@@ -1793,8 +1844,7 @@ namespace SFClientRecon
                             // so the player can't be permanently lost.
                             foreach (var np2 in nps)
                             {
-                                var pidObj2 = pidField.GetValue(np2);
-                                if (!(pidObj2 is int pi2) || pi2 != localSlot) continue;
+                                if (!TryGetPlayerSlotFromNetworkPlayer(np2, out var pi2) || pi2 != localSlot) continue;
                                 var npComp2 = np2 as Component;
                                 var rb2 = npComp2.GetComponent<Rigidbody>() ?? npComp2.GetComponentInChildren<Rigidbody>();
                                 if ((object)rb2 != null) { rb2.position = target; rb2.velocity = Vector3.zero; }
@@ -1843,15 +1893,11 @@ namespace SFClientRecon
                 var npType = AccessTools.TypeByName("NetworkPlayer");
                 if ((object)npType != null)
                 {
-                    var pidField = AccessTools.Field(npType, "playerID");
-                    var hasCtrlNp = AccessTools.Field(npType, "mHasControl");
                     foreach (var np in UnityEngine.Object.FindObjectsOfType(npType))
                     {
-                        if ((object)hasCtrlNp != null && !(bool)hasCtrlNp.GetValue(np)) continue;
-                        if ((object)pidField != null)
+                        if (TryGetPlayerSlotFromNetworkPlayer(np, out _localSlot))
                         {
-                            _localSlot = (int)pidField.GetValue(np);
-                            Log.LogInfo($"[P6.11] Discovered localSlot={_localSlot} (NetworkPlayer).");
+                            Log.LogInfo($"[P6.11] Discovered localSlot={_localSlot} (NetworkPlayer+Controller).");
                             return _localSlot;
                         }
                     }

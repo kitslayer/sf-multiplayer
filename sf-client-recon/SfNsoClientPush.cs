@@ -122,7 +122,7 @@ namespace SFClientRecon
                     var rbsF = (__instance as Component)?.GetComponentsInChildren<Rigidbody>();
                     if (rbsF != null)
                         foreach (var rbF in rbsF)
-                            if ((object)rbF != null) ConfigureCratePhysics(rbF);
+                            if ((object)rbF != null) ConfigureCratePhysics(rbF, floatingPreset: true);
                 }
                 catch { }
                 return true;   // run vanilla → stays kinematic/floating until activated
@@ -146,7 +146,7 @@ namespace SFClientRecon
                         // desaparecen / se caen" bug. We also NO LONGER freeze
                         // position Z (locking a settled crate at a mismatched depth
                         // dropped it through the floor / destabilised stacks).
-                        ConfigureCratePhysics(rb);
+                        ConfigureCratePhysics(rb, floatingPreset: false);
                     }
                 // CRITICAL: mIsListening = FALSE for local-physics crates.
                 // When a NetworkSyncableObject "listens", its Update/LerpLocalDummy
@@ -165,112 +165,123 @@ namespace SFClientRecon
             return false;
         }
 
-        // Applied once, at map-load, to every pushable ground-crate rigidbody.
-        // Stable settling values so crates grip + stack, settle fast after a hit,
-        // and can't spin up forever. NO position-Z freeze (the game owns the
-        // play plane; forcing it here dropped crates through the floor).
-        internal static void ConfigureCratePhysics(Rigidbody rb)
+        // Applied at map-load to every pushable crate rigidbody (ground + floating
+        // preset). Tuned for vanilla-like stack tumble: lower inter-crate grip,
+        // higher CoM / lower Z inertia for tipping, lighter solver so contacts
+        // don't "glue" stacks, heavier player-push damping lives in FixedUpdate.
+        internal static void ConfigureCratePhysics(Rigidbody rb, bool floatingPreset = false)
         {
             if ((object)rb == null) return;
             try
             {
-                var cols = rb.GetComponentsInChildren<Collider>();
-                if (cols != null)
-                    foreach (var col in cols)
-                        // sharedMaterial (NOT material): assigning `.material`
-                        // clones a NEW PhysicMaterial per collider, and we do this
-                        // for every crate every round → a steady material leak that
-                        // made FPS degrade the longer you played. sharedMaterial
-                        // reuses the one instance.
-                        if ((object)col != null && !col.isTrigger) col.sharedMaterial = ClientGripMaterial;
-                // Near-vanilla feel: crates REACT to bullets/pushes (low drag),
-                // but a touch of angular drag so a spin decays instead of going
-                // near-forever, and a sane spin cap (7 = Unity default-ish) so a
-                // hit can't pump runaway energy. Heavy damping made them feel dead
-                // ("no reaccionan a los tiros") — reverted.
-                // Weight tuning. Vanilla crates (>=50) were immovable in a cluster;
-                // mass 8 was the opposite — they had no weight and slid all over
-                // from a walk/bump/bullet. 25 is the middle: they feel heavy (a
-                // walk barely nudges them, bullets push a little) but a deliberate
-                // push or an explosion still moves a whole row, because friction is
-                // kept low (0.3 / Minimum) so a cluster doesn't fight the floor.
-                // Player push is velocity-driven, so friction only changed how
-                // crates behave with EACH OTHER (and high friction made stacks
-                // weird). To resist the PLAYER you need real INERTIA: a high mass
-                // means the player's collision impulse moves the crate much less,
-                // so it feels heavy to shove. Friction stays low (set on the
-                // material) so crate-vs-crate stays normal and clusters still slide.
-                // Lower mass = responsive ROTATION/tipping. Push/bullet-induced
-                // angular velocity is ~ torque/inertia ∝ 1/mass, so mass 110 made
-                // crates barely rotate when shoved/hit. 30 lets them tip & tumble.
-                // (Bullet fling is bounded by the velocity clamp, NOT by mass, so
-                // lowering mass doesn't bring back "salen disparadas".)
-                // Mid mass: enough that the player can't shove it weightlessly,
-                // light enough that impact rotation still reads. Gravity-tipping is
-                // mass-independent (handled by friction grip + free Z rotation).
-                // Heavier to resist the player's collision impulse (the user kept
-                // pushing crates around too easily). Bullet/explosion fling is
-                // bounded by the velocity clamp NOT by mass, so heavier mass only
-                // affects the response to the player's character controller and to
-                // crate-crate impacts → stacks feel more solid.
-                rb.mass                = 80f;
-                // GRAVITY-TIP FIX: PhysX box-on-box keeps contacts across the full
-                // bottom face, so a crate with most of its mass overhanging the
-                // edge of another still has "support" contacts and never pivots —
-                // it just slides off flat. Two changes force the natural tip:
-                //   1) Raise center-of-mass above the geometric center → as soon
-                //      as the CoM passes the support point, gravity has a LONG
-                //      moment arm and the crate pivots (the barrel-like topple).
-                //   2) Reset the inertia tensor so Unity recomputes a clean one
-                //      from the collider (the prefab can ship a tensor that
-                //      resists Z rotation specifically).
-                // Solver iterations way up — PhysX needs more passes to resolve the
-                // box-on-box edge contact correctly; the default (~6) was averaging
-                // contacts across the bottom face and producing fake stability →
-                // crate sat perched. 32/20 gives the solver enough work to remove
-                // non-touching contacts and let gravity tip the body.
-                // Lower solver iterations (18/12 instead of 32/20) — 32 was overkill
-                // and made contacts feel sticky. 18 still resolves edge contacts
-                // correctly so tipping works, without over-precise solver behavior.
-                // Moderate solver: enough precision for stacking, not so high that
-                // contacts feel sticky. The TIPPING problem is now solved by the
-                // explicit Overhang-Assist torque in FixedUpdate (which mimics
-                // gravity torque about the support edge — see ApplyOverhangAssist).
-                rb.solverIterations         = 14;
-                rb.solverVelocityIterations = 8;
-                rb.ResetInertiaTensor();
-                // CoM slightly above center — keeps stacks stable but biases tipping.
-                rb.centerOfMass             = new Vector3(0f, 0.45f, 0f);
-                // Subtle inertia tilt — helps tip start, doesn't break stacks.
-                var it = rb.inertiaTensor;
-                it.x *= 0.85f; it.z *= 0.85f;
-                rb.inertiaTensor            = it;
-                rb.useGravity               = true;
-                // Very low sleep threshold so a crate balanced on the edge of
-                // another doesn't "fall asleep" while it still has a tipping torque
-                // — that was why it sat perched instead of toppling. It still
-                // sleeps once truly settled.
-                rb.sleepThreshold      = 0.005f;
-                // Drag 0.3 + angularDrag 0.8 so a hit/push doesn't slide forever
-                // (less "pegajoso" feel between crates) but still rotates freely.
-                rb.drag                = 0.3f;
-                rb.angularDrag         = 0.8f;
-                rb.maxAngularVelocity  = 7f;
-                // Discrete = cheapest (ContinuousDynamic on every crate was a big
-                // CPU cost → FPS lag). Crates are slow enough not to tunnel.
-                rb.collisionDetectionMode = CollisionDetectionMode.Discrete;
-                rb.interpolation       = RigidbodyInterpolation.Interpolate;          // smooth render
-                // Rotation: freeze X/Y (out-of-plane tilt) but FORCE Z FREE so the
-                // crate can tip/tumble in the 2.5D plane. The prefab ships crates
-                // with Z rotation frozen (for stability), and a `|=` never unfroze
-                // it → crates only slid, never rotated ("no giran, se salen de la
-                // hitbox sin voltearse"). Clear the Z-rotation bit explicitly.
-                var c = rb.constraints;
-                c |= RigidbodyConstraints.FreezeRotationX | RigidbodyConstraints.FreezeRotationY;
-                c &= ~RigidbodyConstraints.FreezeRotationZ;
-                rb.constraints = c;
+                ApplyCrateColliderMaterials(rb, floatingPreset);
+                ApplyCrateMassAndSolver(rb, floatingPreset);
+                ApplyCrateInertiaAndCenterOfMass(rb, floatingPreset);
+                ApplyCrateDragAndRotationLimits(rb, floatingPreset);
+                ApplyCrateConstraintMask(rb);
             }
             catch { }
+        }
+
+        private static PhysicMaterial _crateStackMaterial;
+        private static PhysicMaterial _crateFloorMaterial;
+
+        private static PhysicMaterial CrateStackMaterial
+        {
+            get
+            {
+                if ((object)_crateStackMaterial == null)
+                {
+                    _crateStackMaterial = new PhysicMaterial("CrateStackVanilla")
+                    {
+                        // Low crate-vs-crate grip → stacks disassemble on vertical hits.
+                        staticFriction = 0.26f,
+                        dynamicFriction = 0.22f,
+                        bounciness = 0.10f,
+                        frictionCombine = PhysicMaterialCombine.Average,
+                        bounceCombine = PhysicMaterialCombine.Maximum
+                    };
+                }
+                return _crateStackMaterial;
+            }
+        }
+
+        private static PhysicMaterial CrateFloorMaterial
+        {
+            get
+            {
+                if ((object)_crateFloorMaterial == null)
+                {
+                    _crateFloorMaterial = new PhysicMaterial("CrateFloorGrip")
+                    {
+                        // Enough floor grip to pivot on edges, not so high that stacks weld.
+                        staticFriction = 0.42f,
+                        dynamicFriction = 0.36f,
+                        bounciness = 0.06f,
+                        frictionCombine = PhysicMaterialCombine.Average,
+                        bounceCombine = PhysicMaterialCombine.Minimum
+                    };
+                }
+                return _crateFloorMaterial;
+            }
+        }
+
+        // Ground crates: stack material on all colliders (most contacts are crate-crate).
+        // Floating: same stack tuning pre-applied before activation.
+        private static void ApplyCrateColliderMaterials(Rigidbody rb, bool floatingPreset)
+        {
+            var cols = rb.GetComponentsInChildren<Collider>();
+            if (cols == null) return;
+            var mat = CrateStackMaterial;
+            foreach (var col in cols)
+            {
+                if ((object)col == null || col.isTrigger) continue;
+                col.sharedMaterial = mat;
+            }
+        }
+
+        private static void ApplyCrateMassAndSolver(Rigidbody rb, bool floatingPreset)
+        {
+            // Lighter than 80 → tips/rotates under impact; player push capped in FixedUpdate.
+            rb.mass = floatingPreset ? 42f : 36f;
+            // Fewer solver passes → less "contact welding" in stacks (vanilla chaos).
+            rb.solverIterations = floatingPreset ? 10 : 8;
+            rb.solverVelocityIterations = floatingPreset ? 6 : 5;
+            rb.useGravity = true;
+            rb.sleepThreshold = floatingPreset ? 0.014f : 0.011f;
+            // Continuous catches floor tunneling without ContinuousDynamic cost on every crate.
+            rb.collisionDetectionMode = CollisionDetectionMode.Continuous;
+            rb.interpolation = RigidbodyInterpolation.Interpolate;
+        }
+
+        private static void ApplyCrateInertiaAndCenterOfMass(Rigidbody rb, bool floatingPreset)
+        {
+            rb.ResetInertiaTensor();
+            // High CoM → gravity torque when overhanging an edge (barrel topple).
+            float comY = floatingPreset ? 0.50f : 0.58f;
+            rb.centerOfMass = new Vector3(0f, comY, 0f);
+            var it = rb.inertiaTensor;
+            // Ease rotation in the 2.5D play plane (Z), keep pitch/roll slightly stiff.
+            it.x *= 0.80f;
+            it.y *= 1.05f;
+            it.z *= 0.62f;
+            rb.inertiaTensor = it;
+        }
+
+        private static void ApplyCrateDragAndRotationLimits(Rigidbody rb, bool floatingPreset)
+        {
+            rb.drag = floatingPreset ? 0.16f : 0.14f;
+            rb.angularDrag = floatingPreset ? 0.32f : 0.28f;
+            // Allow visible tumble when falling; still capped in FixedUpdate.
+            rb.maxAngularVelocity = 11f;
+        }
+
+        private static void ApplyCrateConstraintMask(Rigidbody rb)
+        {
+            var c = rb.constraints;
+            c |= RigidbodyConstraints.FreezeRotationX | RigidbodyConstraints.FreezeRotationY;
+            c &= ~RigidbodyConstraints.FreezeRotationZ;
+            rb.constraints = c;
         }
 
         private void RelayPushableCrateUpdates()

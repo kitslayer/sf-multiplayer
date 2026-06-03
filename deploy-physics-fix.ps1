@@ -49,6 +49,12 @@ if (Test-Path $Dist) {
 if ($InstallLocal) {
     $Plug = Join-Path $Sf "BepInEx\plugins"
     Copy-Item $ClientDll $Plug -Force
+    $cfgDir = Join-Path $Sf "BepInEx\config"
+    New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
+    @"
+69.53.117.43
+1337
+"@ | Set-Content -Path (Join-Path $cfgDir "sf-oracle-endpoint.txt") -Encoding ASCII
     $hostOff = Join-Path $Plug 'SFHeadlessHost.dll.oracle-client-off'
     $hostPlug = Join-Path $Plug 'SFHeadlessHost.dll'
     if (Test-Path $hostPlug) {
