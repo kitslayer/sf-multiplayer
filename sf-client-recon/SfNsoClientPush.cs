@@ -80,6 +80,13 @@ namespace SFClientRecon
             if (!_oraclePushMode) return true;
             var comp = __instance as Component;
             if ((object)comp == null) return true;
+            // Scene gate — leave MainScene NSOs alone (menu decorations).
+            try
+            {
+                var sn = comp.gameObject.scene.name;
+                if (string.IsNullOrEmpty(sn) || sn == "MainScene") return true;
+            }
+            catch { return true; }
             int id = comp.GetInstanceID();
             bool pushable;
             if (!_pushableLerpCache.TryGetValue(id, out pushable))
@@ -103,6 +110,18 @@ namespace SFClientRecon
             // (relay is disabled below) and NOT by forcing kinematic.
             var rootGo = (__instance as Component)?.gameObject;
             if (!_oraclePushMode || !IsPushableCrateRoot(rootGo)) return true;
+            // SCENE GATE: NEVER touch NSOs that live in MainScene (the persistent
+            // menu / lobby scene with decorative barrels). Match maps are loaded
+            // ADDITIVELY into their own scene; only crates IN those map scenes get
+            // our physics config. Without this gate, the PLAY ONLINE menu barrels
+            // were being given CoM=0.58, mass=36, Z-rotation-free → they fell over
+            // and bounced around the menu like crazy.
+            try
+            {
+                var sceneName = rootGo != null ? rootGo.scene.name : null;
+                if (string.IsNullOrEmpty(sceneName) || sceneName == "MainScene") return true;
+            }
+            catch { return true; }
             // Floating crates (DontEnableRig) are suspended on purpose. Do NOT
             // force them dynamic or they fall "porque sí". BUT we still want our
             // physics tuning (CoM, mass, grip, free Z rotation) to be on them so
