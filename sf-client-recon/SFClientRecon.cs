@@ -785,103 +785,170 @@ namespace SFClientRecon
             return false;
         }
 
-        private const float StackAngularDamp  = 0.88f;   // only on settled stacks — light damp, not weld
-        private const float StackSettledSpeed = 1.8f;      // above this, stack can disassemble freely
-        private const float PlayerHorizDamp   = 0.46f;   // strong — player shove feels heavy/controlled
-        private const float OverhangTorqueMul = 0.68f;   // gravity tip about support edge
-        private const float OverhangFallTorqueMul = 0.35f; // extra tumble while falling with partial support
-        private const float CrateVoidRescueY    = -22f;
+        // ─────────────────  CRATE BEHAVIOUR TUNABLES ─────────────────
+        // Stack cohesion (anti-twist when the column is at rest)
+        private const float StackAngularDamp     = 0.84f;   // light damp on settled stacks (no weld)
+        private const float StackSettledSpeed    = 1.6f;    // ≤ this, the stack is "settled"
+        // Player shove (heavy feel when player walks/jumps into a crate)
+        private const float PlayerHorizDamp      = 0.32f;   // strong damp on horizontal velocity
+        private const float PlayerAngularDamp   = 0.74f;   // also damp spin while player in contact
+        // Edge-tipping torque (mass × gravity × multiplier)
+        private const float OverhangTorqueMul   = 0.85f;   // perched/static crate → strong tip
+        private const float OverhangFallTorqueMul = 0.45f; // already-falling crate → moderate extra tumble
+        // Free-fall tumble — once a crate is fully airborne, nudge a small spin so it tumbles visually
+        private const float FallTumbleStartSpeed = 2.4f;    // |v.y| above this → consider as "falling"
+        private const float FallTumbleTorque     = 0.18f;   // mass-scaled tumble kick
+        // Stack disassembly — when a load-bearing crate is hit from below, scatter the upper crate
+        private const float StackPopUpwardImpulse  = 0.42f; // upward separation impulse on the crate above (× mass)
+        private const float StackPopLateralImpulse = 0.28f; // sideways jitter to break the column visually
+        // Void rescue — teleport crates back instead of letting them fall forever
+        private const float CrateVoidRescueY      = -22f;
+        private const float CrateVoidRescueMinSafeY = -20f;   // safe pos must be above this to be usable
         private static readonly Dictionary<int, Vector3> _crateSafePos = new Dictionary<int, Vector3>(64);
-        private static readonly Dictionary<int, float> _crateSafeAt = new Dictionary<int, float>(64);
+        private static readonly Dictionary<int, float>   _crateSafeAt  = new Dictionary<int, float>(64);
+        private static readonly Dictionary<int, float>   _crateFallStartedAt = new Dictionary<int, float>(64);
+
+        // 4-corner support sample: returns the count of corners with ground/box below.
+        // Returns 0..4. Also outputs the X-axis bias of support (positive = right is supported).
+        private static int SampleBottomSupport(Bounds b, out float xBias)
+        {
+            xBias = 0f;
+            float probeY    = b.center.y - b.extents.y + 0.04f;
+            float probeDist = 0.22f;
+            float xL = b.center.x - b.extents.x * 0.82f;
+            float xR = b.center.x + b.extents.x * 0.82f;
+            float zN = b.center.z - b.extents.z * 0.55f;
+            float zF = b.center.z + b.extents.z * 0.55f;
+            int hits = 0;
+            if (Physics.Raycast(new Vector3(xL, probeY, zN), Vector3.down, probeDist)) { hits++; xBias -= 1f; }
+            if (Physics.Raycast(new Vector3(xL, probeY, zF), Vector3.down, probeDist)) { hits++; xBias -= 1f; }
+            if (Physics.Raycast(new Vector3(xR, probeY, zN), Vector3.down, probeDist)) { hits++; xBias += 1f; }
+            if (Physics.Raycast(new Vector3(xR, probeY, zF), Vector3.down, probeDist)) { hits++; xBias += 1f; }
+            return hits;
+        }
 
         private void ApplyStackAndContactBehavior()
         {
             if (_nsoCache.Count == 0) return;
-            float now = Time.realtimeSinceStartup;
+            float now    = Time.realtimeSinceStartup;
+            float dt     = Time.fixedDeltaTime;
             foreach (var kv in _nsoCache)
             {
                 var entry = kv.Value;
                 if (entry == null || entry.SkipSmooth || !entry.Pushable) continue;
                 var rb = entry.Rb;
-                if (rb == null || rb.isKinematic) continue;
+                if ((object)rb == null || rb.isKinematic) continue;
 
                 var comp = entry.Comp;
-                if (comp == null) continue;
+                if ((object)comp == null) continue;
                 var col = comp.GetComponent<Collider>() ?? comp.GetComponentInChildren<Collider>();
-                if (col == null || col.isTrigger) continue;
-                Bounds b = col.bounds;
+                if ((object)col == null || col.isTrigger) continue;
+                Bounds b;
+                try { b = col.bounds; } catch { continue; }
                 if (b.extents.x < 0.05f || b.extents.y < 0.05f) continue;
 
-                int rid = rb.GetInstanceID();
+                int rid    = rb.GetInstanceID();
                 Vector3 pos = rb.position;
-                if (pos.y > CrateVoidRescueY + 2f)
+                Vector3 vel = rb.velocity;
+
+                // ─── Void rescue: cache the last "safe" position above the killbox.
+                // If the crate dips below CrateVoidRescueY but had a recent safe pos
+                // well above the line, snap it back instead of letting it fall forever.
+                if (pos.y > CrateVoidRescueMinSafeY)
                 {
                     _crateSafePos[rid] = pos;
-                    _crateSafeAt[rid] = now;
+                    _crateSafeAt[rid]  = now;
                 }
-                else if (pos.y < CrateVoidRescueY && _crateSafePos.TryGetValue(rid, out var safe) && safe.y > CrateVoidRescueY + 1f)
+                else if (pos.y < CrateVoidRescueY
+                    && _crateSafePos.TryGetValue(rid, out var safe)
+                    && safe.y > CrateVoidRescueMinSafeY)
                 {
-                    rb.position = safe;
-                    rb.velocity = Vector3.zero;
+                    rb.position        = safe;
+                    rb.velocity        = Vector3.zero;
                     rb.angularVelocity = Vector3.zero;
                     rb.WakeUp();
+                    _crateFallStartedAt.Remove(rid);
                     continue;
                 }
 
-                bool loadAbove     = HasCrateAbove(rb, b);
-                bool playerTouches = IsPlayerTouching(rb, b);
-                float speedSqr     = rb.velocity.sqrMagnitude;
-                bool stackSettled  = speedSqr < StackSettledSpeed * StackSettledSpeed;
+                // ─── Contact + stack probes
+                int supports     = SampleBottomSupport(b, out float xBias);
+                bool fullyAir    = supports == 0;
+                bool fullyOnTop  = supports == 4;
+                bool loadAbove   = HasCrateAbove(rb, b);
+                bool playerHere  = IsPlayerTouching(rb, b);
+                float speedSqr   = vel.sqrMagnitude;
+                bool settled     = speedSqr < StackSettledSpeed * StackSettledSpeed;
 
-                // (A) Stack cohesion ONLY when the column is at rest — vertical hits
-                //     can break the stack apart (vanilla). Skip while falling fast.
-                if (loadAbove && stackSettled && rb.angularVelocity.sqrMagnitude > 0.0001f)
+                // ─── (A) STACK COHESION (settled stacks): damp twist so the column
+                //     stays vertical at rest. Disabled while moving fast → vertical
+                //     hits / shoves can disassemble the stack like vanilla.
+                if (loadAbove && settled && rb.angularVelocity.sqrMagnitude > 0.0001f)
                     rb.angularVelocity *= StackAngularDamp;
 
-                // (B) Player push damping — attenuate horizontal shove from character.
-                if (playerTouches)
+                // ─── (B) PLAYER SHOVE DAMPING: cut horizontal velocity (and a bit of
+                //     spin) while a player Controller is touching. Skips during
+                //     blasts/falls (significant v.y) so explosions still throw.
+                if (playerHere && Mathf.Abs(vel.y) < 2.0f)
                 {
-                    Vector3 v = rb.velocity;
-                    if (v.x * v.x + v.z * v.z > 0.025f && Mathf.Abs(v.y) < 2.0f)
+                    Vector3 v2 = vel;
+                    float hSq = v2.x * v2.x + v2.z * v2.z;
+                    if (hSq > 0.02f) { v2.x *= PlayerHorizDamp; v2.z *= PlayerHorizDamp; rb.velocity = v2; vel = v2; }
+                    if (rb.angularVelocity.sqrMagnitude > 0.04f) rb.angularVelocity *= PlayerAngularDamp;
+                }
+
+                // ─── (C) STACK POP — if THIS crate is rising (hit from below) and has
+                //     load above, scatter the upper crate with an upward + lateral
+                //     impulse so the column visibly breaks apart instead of welding.
+                if (loadAbove && vel.y > 1.2f)
+                {
+                    var aboveRb = FindCrateRigidbodyAbove(rb);
+                    if ((object)aboveRb != null && !aboveRb.isKinematic)
                     {
-                        v.x *= PlayerHorizDamp;
-                        v.z *= PlayerHorizDamp;
-                        rb.velocity = v;
+                        Vector3 imp = Vector3.up * rb.mass * StackPopUpwardImpulse;
+                        // Lateral jitter based on a hash of the rigid id → deterministic but varied
+                        float jx = ((rid * 73856093) % 1000) / 500f - 1f;       // -1..+1
+                        imp += new Vector3(jx, 0, 0) * rb.mass * StackPopLateralImpulse;
+                        aboveRb.AddForce(imp, ForceMode.Impulse);
+                        // Also kick a small Z torque to start the tumble
+                        aboveRb.AddTorque(new Vector3(0, 0, -jx * rb.mass * 0.25f), ForceMode.Impulse);
                     }
                 }
 
-                // (C) Overhang / partial-support tip (skip load-bearing settled stacks).
-                if (loadAbove && stackSettled) continue;
+                // ─── (D) FALL TUMBLE — once airborne and falling fast, ensure the
+                //     crate isn't perfectly rigid: give it a tiny, mass-scaled tumble
+                //     torque so it spins as it descends (vanilla feel).
+                if (fullyAir && vel.y < -FallTumbleStartSpeed && rb.angularVelocity.sqrMagnitude < 4f)
+                {
+                    if (!_crateFallStartedAt.ContainsKey(rid)) _crateFallStartedAt[rid] = now;
+                    float jh = ((rid * 19349663) % 1000) / 500f - 1f;
+                    rb.AddTorque(new Vector3(0, 0, jh * rb.mass * FallTumbleTorque), ForceMode.Force);
+                }
+                else if (!fullyAir)
+                {
+                    _crateFallStartedAt.Remove(rid);
+                }
 
-                Vector3 c = b.center;
-                Vector3 e = b.extents;
-                float probeY = c.y - e.y + 0.05f;
-                float probeX = e.x * 0.82f;
-                bool leftSup  = Physics.Raycast(new Vector3(c.x - probeX, probeY, c.z), Vector3.down, 0.22f);
-                bool rightSup = Physics.Raycast(new Vector3(c.x + probeX, probeY, c.z), Vector3.down, 0.22f);
-                if (leftSup == rightSup) continue;
+                // ─── (E) EDGE TIP — strong gravity torque about the support edge
+                //     when only partial bottom support exists. Skipped when stack-
+                //     supported (loadAbove + settled) so towers don't self-collapse.
+                if (loadAbove && settled) continue;
+                if (fullyOnTop || fullyAir) continue;   // need partial support
 
-                Vector3 tipDir = leftSup ? Vector3.right : Vector3.left;
+                Vector3 tipDir = xBias > 0f ? Vector3.right : Vector3.left;
                 float torqueScale = speedSqr > 0.5f ? OverhangFallTorqueMul : OverhangTorqueMul;
                 Vector3 torque = Vector3.Cross(tipDir, Physics.gravity) * rb.mass * torqueScale;
                 rb.AddTorque(torque, ForceMode.Force);
-
-                // Vertical stack break: upward impulse on a crate with load above
-                // → nudge top separation (vanilla stack pop on head-bonk).
-                if (loadAbove && rb.velocity.y > 1.2f)
-                {
-                    var aboveRb = FindCrateRigidbodyAbove(rb);
-                    if (aboveRb != null && !aboveRb.isKinematic)
-                        aboveRb.AddForce(Vector3.up * rb.mass * 0.35f, ForceMode.Impulse);
-                }
             }
         }
 
         private static Rigidbody FindCrateRigidbodyAbove(Rigidbody self)
         {
+            if ((object)self == null) return null;
             var col = self.GetComponent<Collider>() ?? self.GetComponentInChildren<Collider>();
-            if (col == null) return null;
-            Bounds b = col.bounds;
+            if ((object)col == null) return null;
+            Bounds b;
+            try { b = col.bounds; } catch { return null; }
             Vector3 origin = new Vector3(b.center.x, b.max.y + 0.02f, b.center.z);
             RaycastHit hit;
             if (!Physics.Raycast(origin, Vector3.up, out hit, 0.45f)) return null;
