@@ -649,14 +649,22 @@ namespace SFClientRecon
         // Y<-30). We cap HORIZONTAL speed (X/Z — that's the direction bullets fling
         // a crate) and the UPWARD impulse, but let a crate FALL naturally (large
         // downward cap) so it doesn't descend in slow motion.
-        private const float CrateMaxHoriz = 3.5f;   // m/s sideways/depth — kills bullet fling (but lets a topple's arc through)
-        private const float CrateMaxUp    = 4.0f;   // m/s upward — kills upward fling
-        private const float CrateMaxFall  = 30.0f;  // m/s downward — natural gravity fall
+        // Bullets vs explosions distinction: bullets fly nearly pure-horizontal
+        // (v.y ~= 0), explosions impart a vertical component too (they launch the
+        // crate up + outward). So we cap horizontal STRICTLY when there's no
+        // vertical motion (bullets), but allow a MUCH higher horizontal cap when
+        // a vertical kick is present (explosions feel powerful, fly visibly).
+        private const float CrateMaxHoriz       = 4.0f;   // m/s — bullet cap (no vert velocity)
+        private const float CrateMaxHorizBlast  = 14.0f;  // m/s — explosion cap (when vert velocity present)
+        private const float CrateVertTrigger    = 2.0f;   // |v.y| above this enables the explosion cap
+        private const float CrateMaxUp          = 9.0f;   // m/s upward — lets explosions launch crates
+        private const float CrateMaxFall        = 30.0f;  // m/s downward — natural gravity fall
         private float _crateDiagAt2 = -1f;
         private void ClampCrateVelocities()
         {
             if (_nsoCache.Count == 0) return;
-            float hSqr = CrateMaxHoriz * CrateMaxHoriz;
+            float hSqrBullet = CrateMaxHoriz      * CrateMaxHoriz;
+            float hSqrBlast  = CrateMaxHorizBlast * CrateMaxHorizBlast;
             int crates = 0, kin = 0, dyn = 0, push = 0; float maxAng = 0f, maxLin = 0f;
             foreach (var kv in _nsoCache)
             {
@@ -676,10 +684,15 @@ namespace SFClientRecon
                     var v = rb.velocity;
                     float lm = v.magnitude; if (lm > maxLin) maxLin = lm;
                     bool changed = false;
+                    // Pick the horizontal cap based on whether there's a vertical
+                    // component (explosion → high cap; pure horizontal → bullet cap).
+                    bool isBlast = Mathf.Abs(v.y) > CrateVertTrigger;
+                    float hSqr   = isBlast ? hSqrBlast : hSqrBullet;
+                    float hCap   = isBlast ? CrateMaxHorizBlast : CrateMaxHoriz;
                     float hMagSqr = v.x * v.x + v.z * v.z;
                     if (hMagSqr > hSqr)
                     {
-                        float s = CrateMaxHoriz / Mathf.Sqrt(hMagSqr);
+                        float s = hCap / Mathf.Sqrt(hMagSqr);
                         v.x *= s; v.z *= s; changed = true;
                     }
                     if (v.y > CrateMaxUp) { v.y = CrateMaxUp; changed = true; }

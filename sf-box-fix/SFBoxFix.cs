@@ -506,14 +506,20 @@ namespace SFBoxFix
         // direction) and UPWARD impulse, but allow a natural downward fall so
         // crates don't descend in slow motion. (A single magnitude cap throttled
         // the fall speed → "caen en camara lenta".)
-        private const float CrateMaxHorizSrv = 3.5f;
-        private const float CrateMaxUpSrv    = 4.0f;
-        private const float CrateMaxFallSrv  = 30.0f;
+        // Two horizontal caps: STRICT for bullets (pure horizontal velocity), HIGH
+        // for explosions (detected by vertical velocity component). Lets blasts
+        // throw crates while still killing bullet fling.
+        private const float CrateMaxHorizSrv      = 4.0f;
+        private const float CrateMaxHorizBlastSrv = 14.0f;
+        private const float CrateVertTriggerSrv   = 2.0f;
+        private const float CrateMaxUpSrv         = 9.0f;
+        private const float CrateMaxFallSrv       = 30.0f;
         private static readonly List<Rigidbody> _crateRbs = new List<Rigidbody>();
         private void FixedUpdate()
         {
             if (_crateRbs.Count == 0) return;
-            float hSqr = CrateMaxHorizSrv * CrateMaxHorizSrv;
+            float hSqrBullet = CrateMaxHorizSrv      * CrateMaxHorizSrv;
+            float hSqrBlast  = CrateMaxHorizBlastSrv * CrateMaxHorizBlastSrv;
             for (int i = _crateRbs.Count - 1; i >= 0; i--)
             {
                 var rb = _crateRbs[i];
@@ -521,8 +527,11 @@ namespace SFBoxFix
                 if (rb.isKinematic) continue;
                 var v = rb.velocity;
                 bool changed = false;
+                bool isBlast = Mathf.Abs(v.y) > CrateVertTriggerSrv;
+                float hSqr   = isBlast ? hSqrBlast : hSqrBullet;
+                float hCap   = isBlast ? CrateMaxHorizBlastSrv : CrateMaxHorizSrv;
                 float hMagSqr = v.x * v.x + v.z * v.z;
-                if (hMagSqr > hSqr) { float s = CrateMaxHorizSrv / Mathf.Sqrt(hMagSqr); v.x *= s; v.z *= s; changed = true; }
+                if (hMagSqr > hSqr) { float s = hCap / Mathf.Sqrt(hMagSqr); v.x *= s; v.z *= s; changed = true; }
                 if (v.y > CrateMaxUpSrv) { v.y = CrateMaxUpSrv; changed = true; }
                 else if (v.y < -CrateMaxFallSrv) { v.y = -CrateMaxFallSrv; changed = true; }
                 if (changed) rb.velocity = v;
