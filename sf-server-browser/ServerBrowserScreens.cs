@@ -37,12 +37,17 @@ namespace SFServerBrowser
         {
             float a = EaseOutCubic(_overlayAnim);
 
-            // Scrim — dim the game and capture click-outside-to-close.
+            // Scrim — dim the game + BLOCK clicks from reaching the menu behind.
+            // It deliberately does NOT close the panel: IMGUI assigns control IDs
+            // by call order, and the server list / open-animation change the
+            // control count between MouseDown and MouseUp, so the full-screen
+            // scrim button kept "winning" clicks meant for the tabs/buttons →
+            // the panel closed on EVERY click ("la gui se cierra al clickear").
+            // Close is now via the X button or Esc only (deterministic).
             var prevC = GUI.color;
             GUI.color = new Color(1f, 1f, 1f, a);
             FillRect(new Rect(0, 0, VW, VH), new Color(ColScrim.r, ColScrim.g, ColScrim.b, ColScrim.a));
-            if (_overlayOpen && GUI.Button(new Rect(0, 0, VW, VH), GUIContent.none, GUIStyle.none))
-                _overlayOpen = false;
+            GUI.Button(new Rect(0, 0, VW, VH), GUIContent.none, GUIStyle.none); // block-through only; return ignored
 
             // Panel — fixed design size, slides up slightly as it appears.
             float pw = 960f, ph = 640f;
@@ -50,10 +55,6 @@ namespace SFServerBrowser
             var panel = new Rect((VW - pw) / 2f, (VH - ph) / 2f + slide, pw, ph);
 
             PanelSurface(panel, 22);
-            // Catch-all over the panel so clicks on empty panel area are consumed
-            // here (no-op) instead of falling through to the scrim's close button.
-            // Real buttons are drawn after this and still win (later control = top).
-            GUI.Button(panel, GUIContent.none, GUIStyle.none);
 
             // Header bar
             var header = new Rect(panel.x, panel.y, panel.width, 84f);
