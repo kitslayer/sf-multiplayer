@@ -211,6 +211,7 @@ namespace SFClientRecon
             Instance._nsoTargets.Clear();
             Instance._nsoCacheRebuildAt = 0;
             Instance._crateConfigured.Clear();
+            Instance._appliedGwIds.Clear();   // new map → new ground-weapon ids
             ClearPushableLerpCache();
             _countDownDeferred = false;
             Instance.StartCoroutine(Instance.RebuildMapCachesAfterLoadCoroutine());
@@ -409,6 +410,12 @@ namespace SFClientRecon
                     float y = reader.ReadSingle();
                     ushort weaponId = reader.ReadUInt16();
                     ushort syncIdx = reader.ReadUInt16();
+                    // CRITICAL: OnGroundWeaponsInit fires repeatedly (per map-state
+                    // sync). OnWeaponSpawned DESTROYS any weapon already registered
+                    // under the same weaponSpawnID — so re-applying an id on the 2nd+
+                    // pass DELETED the map weapon ("las armas no aparecen"). Apply
+                    // each id ONCE per map.
+                    if (_appliedGwIds.Contains(weaponId)) continue;
                     var target = new Vector2(x, y);
                     Component best = null;
                     float bestD = 2.5f;
@@ -422,6 +429,7 @@ namespace SFClientRecon
                     if ((object)best == null) continue;
                     used.Add(best.GetInstanceID());
                     onSpawned.Invoke(mm, new object[] { best, weaponId, syncIdx, true });
+                    _appliedGwIds.Add(weaponId);
                     applied++;
                 }
             }
@@ -432,6 +440,9 @@ namespace SFClientRecon
             }
         }
         private int _groundWeaponFuzzyLog;
+        // weaponSpawnIDs already handed to OnWeaponSpawned this map — re-applying an
+        // id destroys the existing weapon, so we never apply the same id twice.
+        private readonly HashSet<ushort> _appliedGwIds = new HashSet<ushort>();
 
         private static bool _mapSyncQuantizeClientInstalled;
         private static void InstallMapInfoSyncQuantizeClient()

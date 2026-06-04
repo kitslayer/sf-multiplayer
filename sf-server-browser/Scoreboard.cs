@@ -47,6 +47,9 @@ namespace SFServerBrowser
 
             bool inMatch = Owner != null && Owner.UiInMatch && !_hidden;
             if (_root != null && _root.activeSelf != inMatch) _root.SetActive(inMatch);
+            // Our bar replaces the stock crown stack: hide vanilla WinCounterUI
+            // while we're shown, restore it when hidden (F4) or back in the menu.
+            SetVanillaWinUi(!inMatch);
             if (!inMatch) return;
 
             if (Time.unscaledTime >= _nextPoll)
@@ -159,6 +162,22 @@ namespace SFServerBrowser
             }
             outl.Sort(delegate (SP a, SP b) { return a.Slot.CompareTo(b.Slot); });
             return outl;
+        }
+
+        // Show/hide the stock WinCounterUI (the top-left crown stack).
+        private static bool _winUiTried;
+        private static Type _winUiType;
+        private void SetVanillaWinUi(bool show)
+        {
+            if (!_winUiTried) { _winUiTried = true; try { _winUiType = AccessTools.TypeByName("WinCounterUI"); } catch { } }
+            if ((object)_winUiType == null) return;
+            try
+            {
+                var ui = UnityEngine.Object.FindObjectOfType(_winUiType) as Component;
+                if ((object)ui != null && ui.gameObject.activeSelf != show)
+                    ui.gameObject.SetActive(show);
+            }
+            catch { }
         }
 
         private static void EnsureRefl()
