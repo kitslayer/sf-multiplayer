@@ -47,10 +47,37 @@ namespace SFClientRecon
                 int patched = 0;
 
                 // Per-type: transpile each gimmick's Update so its server/network
-                // gate reads true → it self-drives locally.
-                patched += PatchMapTypeUpdate(harmony, "MoveAlongPathUsingForce");
-                patched += PatchMapTypeUpdate(harmony, "PillarHandler");
-                patched += PatchMapTypeUpdate(harmony, "GhostPlatform");
+                // gate reads true → it self-drives locally. ONLY deterministic,
+                // time-driven gimmicks belong here (so both clients compute the
+                // same motion → no divergence). Non-deterministic ones (random
+                // object enabling, player-triggered levers) must stay server-fed.
+                patched += PatchMapTypeMethod(harmony, "MoveAlongPathUsingForce", "Update");
+                patched += PatchMapTypeMethod(harmony, "PillarHandler", "Update");
+                patched += PatchMapTypeMethod(harmony, "GhostPlatform", "Update");
+
+                // EXTENSIBLE: add more frozen gimmick types WITHOUT a recompile via
+                // SF_MAP_LOCAL_TYPES="TypeA,TypeB:Start,TypeC". Each entry is a type
+                // name, optionally with the method to patch (defaults to Update).
+                // Use this to self-drive the exact gimmick that's frozen on a map
+                // (e.g. a rotating bar) once you know its class — the transpiler
+                // forces any IsServer / m_NetworkControl gate inside it to true.
+                try
+                {
+                    string extra = Environment.GetEnvironmentVariable("SF_MAP_LOCAL_TYPES");
+                    if (!string.IsNullOrEmpty(extra))
+                        foreach (var tok in extra.Split(','))
+                        {
+                            var raw = tok.Trim();
+                            if (raw.Length == 0) continue;
+                            string typeName = raw, method = "Update";
+                            int colon = raw.IndexOf(':');
+                            if (colon > 0) { typeName = raw.Substring(0, colon).Trim(); method = raw.Substring(colon + 1).Trim(); }
+                            int added = PatchMapTypeMethod(harmony, typeName, method);
+                            patched += added;
+                            Log.LogInfo($"[map-local] SF_MAP_LOCAL_TYPES: {typeName}.{method} → {(added > 0 ? "patched" : "NOT FOUND")}.");
+                        }
+                }
+                catch (Exception e) { Log.LogWarning($"[map-local] SF_MAP_LOCAL_TYPES: {e.Message}"); }
 
                 // Neutralise outbound state send (client owns these locally now).
                 var mmType = AccessTools.TypeByName("MultiplayerManager");
@@ -66,19 +93,19 @@ namespace SFClientRecon
             catch (Exception e) { Log.LogWarning($"[map-local] install failed: {e.Message}"); }
         }
 
-        private int PatchMapTypeUpdate(Harmony harmony, string typeName)
+        private int PatchMapTypeMethod(Harmony harmony, string typeName, string methodName)
         {
             try
             {
                 var t = AccessTools.TypeByName(typeName);
                 if ((object)t == null) return 0;
-                var update = AccessTools.Method(t, "Update");
-                if ((object)update == null) return 0;
-                harmony.Patch(update, transpiler: new HarmonyMethod(typeof(Plugin), nameof(ForceMapScriptLocalTranspiler)));
+                var m = AccessTools.Method(t, methodName);
+                if ((object)m == null) return 0;
+                harmony.Patch(m, transpiler: new HarmonyMethod(typeof(Plugin), nameof(ForceMapScriptLocalTranspiler)));
                 _selfDrivenMapTypes.Add(t);   // so ApplyMapStateSnapshot ignores its SetData
                 return 1;
             }
-            catch (Exception e) { Log.LogWarning($"[map-local] patch {typeName}: {e.Message}"); return 0; }
+            catch (Exception e) { Log.LogWarning($"[map-local] patch {typeName}.{methodName}: {e.Message}"); return 0; }
         }
 
         // True when this component is one of the gimmick types we now drive locally
@@ -101,28 +128,21 @@ namespace SFClientRecon
         // with ldc.i4.1 pushes the same one bool.
         internal static IEnumerable<CodeInstruction> ForceMapScriptLocalTranspiler(IEnumerable<CodeInstruction> instructions)
         {
-            MethodInfo isServerGetter = null;
-            FieldInfo netCtrlField = null;
-            try
-            {
-                var mmType = AccessTools.TypeByName("MultiplayerManager");
-                if ((object)mmType != null) isServerGetter = AccessTools.PropertyGetter(mmType, "IsServer");
-                var baseType = AccessTools.TypeByName("MapInfoSyncableBase");
-                if ((object)baseType != null) netCtrlField = AccessTools.Field(baseType, "m_NetworkControl");
-            }
-            catch { }
-
+            // Match by NAME, not a specific resolved member, so this works for any
+            // gimmick regardless of WHICH IsServer it reads (MultiplayerManager.
+            // IsServer, MatchMakingHandlerSockets.IsServer, or a class-local
+            // IsServer property) and for the static m_NetworkControl flag. Applied
+            // only to the gimmick methods we explicitly patch, so forcing the
+            // server-side branch on the client is exactly the intent.
             var codes = new List<CodeInstruction>(instructions);
             int n = 0;
             for (int i = 0; i < codes.Count; i++)
             {
                 var c = codes[i];
-                bool isIsServer = (object)isServerGetter != null
-                    && (c.opcode == OpCodes.Call || c.opcode == OpCodes.Callvirt)
-                    && (object)(c.operand as MethodInfo) == (object)isServerGetter;
-                bool isNetCtrl = (object)netCtrlField != null
-                    && c.opcode == OpCodes.Ldsfld
-                    && (object)(c.operand as FieldInfo) == (object)netCtrlField;
+                bool isIsServer = (c.opcode == OpCodes.Call || c.opcode == OpCodes.Callvirt)
+                    && c.operand is MethodInfo mi && mi.Name == "get_IsServer";
+                bool isNetCtrl = c.opcode == OpCodes.Ldsfld
+                    && c.operand is FieldInfo fi && fi.Name == "m_NetworkControl";
                 if (isIsServer || isNetCtrl)
                 {
                     c.opcode = OpCodes.Ldc_I4_1;
@@ -130,7 +150,7 @@ namespace SFClientRecon
                     n++;
                 }
             }
-            if (n > 0) Log.LogInfo($"[map-local] Update gate forced local ({n} site(s)).");
+            if (n > 0) Log.LogInfo($"[map-local] gate forced local ({n} site(s)).");
             return codes;
         }
     }
