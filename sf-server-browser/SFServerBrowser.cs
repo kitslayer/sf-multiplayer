@@ -37,7 +37,7 @@ namespace SFServerBrowser
     {
         public const string PluginGuid = "com.stickfightdev.server-browser";
         public const string PluginName = "SFServerBrowser";
-        public const string PluginVersion = "0.4.1";
+        public const string PluginVersion = "0.5.0";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance;
@@ -145,11 +145,17 @@ namespace SFServerBrowser
                 UnityEngine.Object.DontDestroyOnLoad(go);
                 _lobbyUi = go.AddComponent<LobbyOverlay>();
                 _lobbyUi.Owner = this;
+
+                var sb = new GameObject("ALKAScoreboard");
+                UnityEngine.Object.DontDestroyOnLoad(sb);
+                _scoreUi = sb.AddComponent<Scoreboard>();
+                _scoreUi.Owner = this;
             }
             catch (Exception e) { Log.LogWarning($"{PluginName}: lobby overlay init failed: {e.Message}"); }
         }
 
         internal LobbyOverlay _lobbyUi;
+        internal Scoreboard _scoreUi;
 
         private void OnSceneLoaded(Scene s, LoadSceneMode m)
         {

@@ -62,7 +62,7 @@ namespace SFClientRecon
     {
         public const string PluginGuid = "com.stickfightdev.client-recon";
         public const string PluginName = "SFClientRecon";
-        public const string PluginVersion = "0.4.6";
+        public const string PluginVersion = "0.4.7";
 
         internal static ManualLogSource Log;
         internal static bool RefOk(object o) => !ReferenceEquals(o, null);
