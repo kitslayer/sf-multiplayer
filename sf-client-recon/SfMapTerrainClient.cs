@@ -57,6 +57,25 @@ namespace SFClientRecon
                         Log.LogInfo("[v26.6] Patched RequestWeaponThrow postfix.");
                     }
                 }
+                // THROW FIX — a weapon you throw must never stick to or damage YOU.
+                // Vanilla only guards self-hit for 0.2s (sinceThrow<0.2f). At high
+                // FPS the dropped weapon spawns overlapping your body and the solver
+                // keeps it there past 0.2s, so it "stays on the character" and then
+                // deals 55 dmg to its own thrower. On Throw(Controller) we ignore
+                // collision between the weapon's colliders and the thrower's body →
+                // flies clean, no self-hit, FPS-independent.
+                var wpThrowType = AccessTools.TypeByName("WeaponPickUp");
+                var ctrlTypeThrow = AccessTools.TypeByName("Controller");
+                if ((object)wpThrowType != null && (object)ctrlTypeThrow != null)
+                {
+                    var throwM = AccessTools.Method(wpThrowType, "Throw", new[] { ctrlTypeThrow });
+                    if ((object)throwM != null)
+                    {
+                        harmony.Patch(throwM, postfix: new HarmonyMethod(
+                            AccessTools.Method(typeof(Plugin), nameof(WeaponPickUp_Throw_IgnoreThrowerPostfix))));
+                        Log.LogInfo("[throw-fix] Patched WeaponPickUp.Throw (no self-hit / no sticking).");
+                    }
+                }
                 InstallMapInfoSyncQuantizeClient();
                 if ((object)mmType != null)
                 {
@@ -335,7 +354,13 @@ namespace SFClientRecon
             if ((object)mmType == null || (object)wpType == null) return;
             var mm = UnityEngine.Object.FindObjectOfType(mmType);
             if ((object)mm == null) return;
-            var onSpawned = AccessTools.Method(mmType, "OnWeaponSpawned");
+            // MUST specify the signature: OnWeaponSpawned has TWO overloads
+            // (byte[]) and (WeaponPickUp, ushort, ushort, bool). Without the
+            // param types AccessTools throws AmbiguousMatchException every call —
+            // that was the "GroundWeapons fuzzy: Ambiguous match" log spam, and it
+            // meant map weapons never registered on the client (weapon desync).
+            var onSpawned = AccessTools.Method(mmType, "OnWeaponSpawned",
+                new[] { wpType, typeof(ushort), typeof(ushort), typeof(bool) });
             if ((object)onSpawned == null) return;
 
             var pickups = new List<Component>();
@@ -460,6 +485,33 @@ namespace SFClientRecon
         internal static void RequestWeaponThrowPostfix()
         {
             if (Instance != null) Instance._lastFastInputAt = 0f;
+        }
+
+        // Postfix of WeaponPickUp.Throw(Controller d): ignore collision between the
+        // just-thrown weapon and the thrower's body so it can never stick to or
+        // damage the player who threw it (param name 'd' = the thrower Controller).
+        internal static void WeaponPickUp_Throw_IgnoreThrowerPostfix(object __instance, object d)
+        {
+            try
+            {
+                var wp = __instance as Component;
+                var ctrl = d as Component;
+                if ((object)wp == null || (object)ctrl == null) return;
+                var weaponCols = wp.GetComponentsInChildren<Collider>(true);
+                var bodyCols = ctrl.transform.root.GetComponentsInChildren<Collider>(true);
+                if (weaponCols == null || bodyCols == null) return;
+                for (int i = 0; i < weaponCols.Length; i++)
+                {
+                    var wc = weaponCols[i];
+                    if ((object)wc == null) continue;
+                    for (int j = 0; j < bodyCols.Length; j++)
+                    {
+                        var bc = bodyCols[j];
+                        if ((object)bc != null) Physics.IgnoreCollision(wc, bc, true);
+                    }
+                }
+            }
+            catch (Exception e) { Log.LogWarning("[throw-fix] " + e.Message); }
         }
 
         private void ParseMapStateSection(byte[] pkt, ref int o, int bodyEnd, out List<MapStateSnapEntry> list)

@@ -62,7 +62,7 @@ namespace SFClientRecon
     {
         public const string PluginGuid = "com.stickfightdev.client-recon";
         public const string PluginName = "SFClientRecon";
-        public const string PluginVersion = "0.4.3";
+        public const string PluginVersion = "0.4.4";
 
         internal static ManualLogSource Log;
         internal static bool RefOk(object o) => !ReferenceEquals(o, null);
@@ -707,15 +707,15 @@ namespace SFClientRecon
         // felt sluggish / "lentas". 6 m/s lets a deliberate push be responsive
         // while still well under a bullet's fling speed (which the blast cap and
         // the server governor catch).
-        private const float CrateMaxHoriz       = 6.0f;   // m/s — player-push cap (responsive)
+        private const float CrateMaxHoriz       = 3.5f;   // m/s — player-push cap (6 was too floaty; "se mueven mucho")
         private const float CrateMaxHorizBlast  = 13.0f;  // m/s — explosion cap (when vert velocity present)
         private const float CrateVertTrigger    = 2.0f;   // |v.y| above this enables the explosion cap
         private const float CrateMaxUp          = 9.0f;   // m/s upward — lets explosions launch crates
         private const float CrateMaxFall        = 30.0f;  // m/s downward — natural gravity fall
         // Air-tumble: crates falling through the air with no spin look frozen/stiff
-        // ("no giran ni rotan en el aire"). Nudge a gentle Z-axis tumble (Z is the
-        // ONLY rotation axis synced over the NSO wire, so both clients see it the
-        // same). Bounded + deterministic sign per body so it stays consistent.
+        // ("no giran ni rotan en el aire"). Nudge a gentle WORLD-X tumble — X is the
+        // visible in-plane spin axis for the Y-Z play plane (now freed in the crate
+        // constraint mask). Bounded + deterministic sign per body so it's stable.
         private const float CrateAirTumbleSpeed   = 3.0f; // |down v| above which we add tumble
         private const float CrateAirTumbleTorque  = 0.16f;// mass-scaled gentle spin
         private const float CrateAirTumbleMaxAngSqr = 9f; // skip if already spinning (~3 rad/s)
@@ -764,7 +764,7 @@ namespace SFClientRecon
                     if (v.y < -CrateAirTumbleSpeed && rb.angularVelocity.sqrMagnitude < CrateAirTumbleMaxAngSqr)
                     {
                         float sign = ((rb.GetInstanceID() & 1) == 0) ? 1f : -1f;
-                        rb.AddTorque(new Vector3(0f, 0f, sign * rb.mass * CrateAirTumbleTorque), ForceMode.Force);
+                        rb.AddTorque(new Vector3(sign * rb.mass * CrateAirTumbleTorque, 0f, 0f), ForceMode.Force);
                     }
                 }
             }

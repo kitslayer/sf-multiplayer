@@ -314,9 +314,15 @@ namespace SFClientRecon
 
         private static void ApplyCrateConstraintMask(Rigidbody rb)
         {
+            // Play plane is Y-Z (position syncs p.y/p.z), so a crate sliding in Z
+            // under gravity (-Y) tips by rotating about WORLD X. The old mask froze
+            // X (and Y) and only freed Z, which is why crates slid but never tipped
+            // or fell off edges ("no rotan / no se caen en los bordes"). Free BOTH
+            // X (the visible tip axis) and Z; freeze only Y (yaw → would spin the
+            // box flat into depth, looks wrong). Now crates tumble/tip like vanilla.
             var c = rb.constraints;
-            c |= RigidbodyConstraints.FreezeRotationX | RigidbodyConstraints.FreezeRotationY;
-            c &= ~RigidbodyConstraints.FreezeRotationZ;
+            c |= RigidbodyConstraints.FreezeRotationY;
+            c &= ~(RigidbodyConstraints.FreezeRotationX | RigidbodyConstraints.FreezeRotationZ);
             rb.constraints = c;
         }
 
