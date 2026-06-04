@@ -76,6 +76,23 @@ namespace SFClientRecon
                         Log.LogInfo("[throw-fix] Patched WeaponPickUp.Throw (no self-hit / no sticking).");
                     }
                 }
+                // THROW BUTTON UNSTICK — Fighting.mRequestedThrow is set true on a
+                // networked throw and ONLY cleared in Dissarm(). On the oracle a
+                // throw sometimes doesn't trigger Dissarm (no server echo), so the
+                // flag stays true and the throw button "breaks" — you can't throw
+                // again ("a veces se rompe el botón para tirar"). After a throw, if
+                // the weapon is still held a moment later, clear the stuck flag.
+                var fightingType = AccessTools.TypeByName("Fighting");
+                if ((object)fightingType != null)
+                {
+                    var tw = AccessTools.Method(fightingType, "ThrowWeapon", new[] { typeof(bool) });
+                    if ((object)tw != null)
+                    {
+                        harmony.Patch(tw, postfix: new HarmonyMethod(
+                            AccessTools.Method(typeof(Plugin), nameof(Fighting_ThrowWeapon_UnstickPostfix))));
+                        Log.LogInfo("[throw-fix] Patched Fighting.ThrowWeapon (unstick mRequestedThrow).");
+                    }
+                }
                 InstallMapInfoSyncQuantizeClient();
                 if ((object)mmType != null)
                 {
@@ -500,18 +517,61 @@ namespace SFClientRecon
                 var weaponCols = wp.GetComponentsInChildren<Collider>(true);
                 var bodyCols = ctrl.transform.root.GetComponentsInChildren<Collider>(true);
                 if (weaponCols == null || bodyCols == null) return;
-                for (int i = 0; i < weaponCols.Length; i++)
-                {
-                    var wc = weaponCols[i];
-                    if ((object)wc == null) continue;
-                    for (int j = 0; j < bodyCols.Length; j++)
-                    {
-                        var bc = bodyCols[j];
-                        if ((object)bc != null) Physics.IgnoreCollision(wc, bc, true);
-                    }
-                }
+                SetThrowIgnore(weaponCols, bodyCols, true);
+                // TEMPORARY: re-enable after the weapon has cleared the body so it
+                // can be picked up again later. A PERMANENT ignore made thrown
+                // weapons un-pickable forever ("se vuelven traspasables, no las
+                // puedo volver a agarrar"). 0.8s > vanilla cantBePickledUpFor (0.5)
+                // and by then the weapon has flown off / slowed below the 20 m/s
+                // damage threshold, so re-enabling can't re-introduce a self-hit.
+                if (Instance != null) Instance.StartCoroutine(ReenableThrowCollision(weaponCols, bodyCols, 0.8f));
             }
             catch (Exception e) { Log.LogWarning("[throw-fix] " + e.Message); }
+        }
+
+        private static void SetThrowIgnore(Collider[] weaponCols, Collider[] bodyCols, bool ignore)
+        {
+            for (int i = 0; i < weaponCols.Length; i++)
+            {
+                var wc = weaponCols[i];
+                if ((object)wc == null) continue;
+                for (int j = 0; j < bodyCols.Length; j++)
+                {
+                    var bc = bodyCols[j];
+                    if ((object)bc != null) Physics.IgnoreCollision(wc, bc, ignore);
+                }
+            }
+        }
+
+        private static System.Collections.IEnumerator ReenableThrowCollision(Collider[] weaponCols, Collider[] bodyCols, float delay)
+        {
+            yield return new WaitForSeconds(delay);
+            try { SetThrowIgnore(weaponCols, bodyCols, false); }
+            catch (Exception e) { Log.LogWarning("[throw-fix] reenable: " + e.Message); }
+        }
+
+        internal static void Fighting_ThrowWeapon_UnstickPostfix(object __instance)
+        {
+            if (__instance == null || Instance == null) return;
+            try { Instance.StartCoroutine(UnstickThrow(__instance)); } catch { }
+        }
+
+        private static System.Collections.IEnumerator UnstickThrow(object fighting)
+        {
+            yield return new WaitForSeconds(0.5f);
+            try
+            {
+                var t = Traverse.Create(fighting);
+                bool stuck = t.Field<bool>("mRequestedThrow").Value;
+                var weapon = t.Field("weapon").GetValue();
+                // Only clear when still flagged AND still holding a weapon: that
+                // means the throw never completed (no Dissarm). If it HAD completed,
+                // Dissarm already set weapon=null + mRequestedThrow=false, so this
+                // is a no-op and we never double-throw.
+                if (stuck && weapon != null)
+                    t.Field<bool>("mRequestedThrow").Value = false;
+            }
+            catch (Exception e) { Log.LogWarning("[throw-fix] unstick: " + e.Message); }
         }
 
         private void ParseMapStateSection(byte[] pkt, ref int o, int bodyEnd, out List<MapStateSnapEntry> list)
