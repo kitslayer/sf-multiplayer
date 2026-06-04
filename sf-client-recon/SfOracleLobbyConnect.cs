@@ -520,7 +520,7 @@ namespace SFClientRecon
                 if (rawData != null && rawData.Length >= 5)
                 {
                     byte mt = rawData[4];
-                    if (mt == 4 || mt == 5 || mt == 18 || mt == 35)
+                    if (VerboseDiag && (mt == 4 || mt == 5 || mt == 18 || mt == 35))
                         Log.LogInfo($"[oracle-diag] ReadMessageBuffer inbound msgType={mt} len={rawData.Length}");
                 }
                 if (_oracleConnectStarted)

@@ -41,6 +41,17 @@ Everything below ships in the **1-click installer** above — drop it on any Ste
 | **Anti-cheat host** | Server-side damage validation, tick rewind, and bounds checks (`SFHeadlessHost`). |
 | **Clean uninstall** | The uninstaller restores your game *exactly* as it was and leaves any other mods you had untouched. |
 
+## 🔧 Recent fixes
+
+Active development (see the [commit history](https://github.com/kitslayer/sf-multiplayer/commits/main) for who did what):
+
+- **Crates** tip / tumble / fall off edges like vanilla again (the rotation was frozen on the wrong axis); player-push capped so they're not over-floaty.
+- **Weapons** — thrown weapons fly clean and never hit the thrower; the throw button no longer sticks; fast-throw can't duplicate a weapon (rate-limited — also closes that server exploit); map weapons stopped vanishing (a repeated init was deleting them).
+- **Explosive barrels** detonate again.
+- **In-game menu** is clickable again (IMGUI control-id shift was eating clicks).
+- **Lobby UI** auto-finds the server, English/Spanish toggle, native uGUI lobby (**F2**), team scoreboard (RED vs BLUE + extra players, **F4**).
+- **Performance** — killed per-frame reflection + log spam; uncapped FPS; input sent at a fixed 60 Hz regardless of your frame rate.
+
 ## What’s in this repo
 
 |Path                                                                                                                                                         |What it is                                                                                                                                                                                                                                                                                            |

@@ -62,9 +62,14 @@ namespace SFClientRecon
     {
         public const string PluginGuid = "com.stickfightdev.client-recon";
         public const string PluginName = "SFClientRecon";
-        public const string PluginVersion = "0.4.8";
+        public const string PluginVersion = "0.5.0";
 
         internal static ManualLogSource Log;
+        // Verbose per-tick diagnostics OFF by default — they spammed the log and
+        // cost string-format + file I/O every snapshot/input/shot. Set
+        // SF_VERBOSE_LOG=1 to re-enable for debugging. Keeps the log clean + lean.
+        internal static readonly bool VerboseDiag =
+            System.Environment.GetEnvironmentVariable("SF_VERBOSE_LOG") == "1";
         internal static bool RefOk(object o) => !ReferenceEquals(o, null);
         // Default v26 listener port. Overridable via SFCLIENTRECON_PORT env
         // var for multi-instance same-machine testing (each instance picks a
@@ -707,7 +712,7 @@ namespace SFClientRecon
         // felt sluggish / "lentas". 6 m/s lets a deliberate push be responsive
         // while still well under a bullet's fling speed (which the blast cap and
         // the server governor catch).
-        private const float CrateMaxHoriz       = 3.5f;   // m/s — player-push cap (6 was too floaty; "se mueven mucho")
+        private const float CrateMaxHoriz       = 2.5f;   // m/s — player-push CAP only (not the physics logic). Lower = "no las empuja tanto"
         private const float CrateMaxHorizBlast  = 13.0f;  // m/s — explosion cap (when vert velocity present)
         private const float CrateVertTrigger    = 2.0f;   // |v.y| above this enables the explosion cap
         private const float CrateMaxUp          = 9.0f;   // m/s upward — lets explosions launch crates
@@ -719,6 +724,11 @@ namespace SFClientRecon
         private const float CrateAirTumbleSpeed   = 3.0f; // |down v| above which we add tumble
         private const float CrateAirTumbleTorque  = 0.16f;// mass-scaled gentle spin
         private const float CrateAirTumbleMaxAngSqr = 9f; // skip if already spinning (~3 rad/s)
+        // Settle dead-zone: a crate creeping below these speeds has no business
+        // drifting — zero it so it sits still ("poco a poco se resbalan/deslizan").
+        // Doesn't touch the rotation LOGIC, only kills sub-perceptual residual motion.
+        private const float CrateSettleLin = 0.16f;  // m/s
+        private const float CrateSettleAng = 0.22f;  // rad/s
         private float _crateDiagAt2 = -1f;
         private void ClampCrateVelocities()
         {
@@ -759,6 +769,14 @@ namespace SFClientRecon
                     else if (v.y < -CrateMaxFall) { v.y = -CrateMaxFall; changed = true; }
                     if (changed) rb.velocity = v;
 
+                    // SETTLE — kill residual creep so resting crates don't slide.
+                    if (lm < CrateSettleLin && av < CrateSettleAng)
+                    {
+                        rb.velocity = Vector3.zero;
+                        rb.angularVelocity = Vector3.zero;
+                        continue;   // settled — skip the air-tumble nudge
+                    }
+
                     // AIR TUMBLE — falling fast with little spin ⇒ add a gentle,
                     // deterministic Z tumble so it rotates as it falls (synced axis).
                     if (v.y < -CrateAirTumbleSpeed && rb.angularVelocity.sqrMagnitude < CrateAirTumbleMaxAngSqr)
@@ -774,7 +792,7 @@ namespace SFClientRecon
             if ((maxLin > 1f || maxAng > 0.5f) && Time.realtimeSinceStartup - _crateDiagAt2 > 1f)
             {
                 _crateDiagAt2 = Time.realtimeSinceStartup;
-                Log.LogInfo($"[crate-rot] crates={crates} pushable={push} dynRB={dyn} kinRB={kin} maxLin={maxLin:0.0} maxAng={maxAng:0.00}");
+                if (VerboseDiag) Log.LogInfo($"[crate-rot] crates={crates} pushable={push} dynRB={dyn} kinRB={kin} maxLin={maxLin:0.0} maxAng={maxAng:0.00}");
             }
         }
 
@@ -1403,7 +1421,7 @@ namespace SFClientRecon
                     }
                     applied++;
                 }
-                if (_snapsApplied == 1 || _snapsApplied % 90 == 0)
+                if (VerboseDiag && (_snapsApplied == 1 || _snapsApplied % 90 == 0))
                     Log.LogInfo($"[P6.14] NSO snap tick={tick} targeted {applied}/{snap.Count}");
             }
             catch (Exception ex) { Log.LogWarning($"[P6.14 NSO apply] {ex.Message}"); }
@@ -1604,7 +1622,7 @@ namespace SFClientRecon
             }
             catch { /* best-effort */ }
 
-            if (_inputSeq == 1 || _inputSeq % 300 == 0)
+            if (VerboseDiag && (_inputSeq == 1 || _inputSeq % 300 == 0))
                 Log.LogInfo($"[P6.12] Sent PlayerInput #{_inputSeq} slot={localSlot} stick=({sx:0.00},{sy:0.00}) btns=0x{btns:X} hist={_historySeq.Count}");
         }
 
@@ -1906,7 +1924,7 @@ namespace SFClientRecon
             Buffer.BlockCopy(body, 0, pkt, 5, body.Length);
             try { _socket.Send(pkt, pkt.Length, _serverEp); }
             catch (Exception e) { Log.LogWarning($"SendFireWeaponPacket: {e.Message}"); }
-            Log.LogInfo($"[P6.17] Sent FireWeapon slot={slot} w={weaponType} origin={origin} dir={dir}");
+            if (VerboseDiag) Log.LogInfo($"[P6.17] Sent FireWeapon slot={slot} w={weaponType} origin={origin} dir={dir}");
         }
 
         // Plugin instance accessor for static Harmony postfixes.
@@ -1978,7 +1996,7 @@ namespace SFClientRecon
                     }
                 }
                 _snapsApplied++;
-                if (_snapsApplied == 1 || _snapsApplied % 90 == 0)
+                if (VerboseDiag && (_snapsApplied == 1 || _snapsApplied % 90 == 0))
                     Log.LogInfo($"[P6.11] Applied snapshot tick={tick} localSlot={localSlot} (received={_snapsReceived}, applied={_snapsApplied}).");
             }
             catch (Exception e) { Log.LogWarning($"[P6.11 apply] {e.Message}"); }

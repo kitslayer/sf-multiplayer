@@ -72,21 +72,22 @@ namespace SFServerBrowser
             _canvas = Ugui.CreateCanvas("ALKAScoreboard", 4000);
             _root = _canvas.gameObject;
 
-            // RED chip (top-left of centre), VS, BLUE chip (top-right of centre).
-            _redBox  = Ugui.Panel(_root.transform, "Red",  new Vector2(0.345f, 0.915f), new Vector2(0.475f, 0.985f), RedTeamHi).rectTransform;
-            Ugui.Panel(_redBox, "tag", new Vector2(0f, 0f), new Vector2(0.06f, 1f), RedTeam, false);
-            Ugui.Label(_redBox, "RED",  new Vector2(0.10f, 0f), new Vector2(0.62f, 1f), 22, RedTeam, TextAnchor.MiddleLeft);
-            _redWins = Ugui.Label(_redBox, "0", new Vector2(0.62f, 0f), new Vector2(0.95f, 1f), 26, Ugui.TextWhite, TextAnchor.MiddleRight);
+            // Compact thin bar pinned to the very TOP edge so it never covers
+            // players during PvP (the game uses the whole screen). RED | VS | BLUE.
+            _redBox  = Ugui.Panel(_root.transform, "Red",  new Vector2(0.420f, 0.962f), new Vector2(0.482f, 0.995f), RedTeamHi).rectTransform;
+            Ugui.Panel(_redBox, "tag", new Vector2(0f, 0f), new Vector2(0.07f, 1f), RedTeam, false);
+            Ugui.Label(_redBox, "RED",  new Vector2(0.12f, 0f), new Vector2(0.60f, 1f), 14, RedTeam, TextAnchor.MiddleLeft);
+            _redWins = Ugui.Label(_redBox, "0", new Vector2(0.60f, 0f), new Vector2(0.93f, 1f), 16, Ugui.TextWhite, TextAnchor.MiddleRight);
 
-            Ugui.Label(_root.transform, "VS", new Vector2(0.478f, 0.915f), new Vector2(0.522f, 0.985f), 18, Ugui.TextDim, TextAnchor.MiddleCenter);
+            Ugui.Label(_root.transform, "VS", new Vector2(0.484f, 0.962f), new Vector2(0.516f, 0.995f), 12, Ugui.TextDim, TextAnchor.MiddleCenter);
 
-            _blueBox = Ugui.Panel(_root.transform, "Blue", new Vector2(0.525f, 0.915f), new Vector2(0.655f, 0.985f), BlueTeamHi).rectTransform;
-            _blueWins = Ugui.Label(_blueBox, "0", new Vector2(0.05f, 0f), new Vector2(0.38f, 1f), 26, Ugui.TextWhite, TextAnchor.MiddleLeft);
-            Ugui.Label(_blueBox, "BLUE", new Vector2(0.38f, 0f), new Vector2(0.90f, 1f), 22, BlueTeam, TextAnchor.MiddleRight);
-            Ugui.Panel(_blueBox, "tag", new Vector2(0.94f, 0f), new Vector2(1f, 1f), BlueTeam, false);
+            _blueBox = Ugui.Panel(_root.transform, "Blue", new Vector2(0.518f, 0.962f), new Vector2(0.580f, 0.995f), BlueTeamHi).rectTransform;
+            _blueWins = Ugui.Label(_blueBox, "0", new Vector2(0.07f, 0f), new Vector2(0.40f, 1f), 16, Ugui.TextWhite, TextAnchor.MiddleLeft);
+            Ugui.Label(_blueBox, "BLUE", new Vector2(0.40f, 0f), new Vector2(0.88f, 1f), 14, BlueTeam, TextAnchor.MiddleRight);
+            Ugui.Panel(_blueBox, "tag", new Vector2(0.93f, 0f), new Vector2(1f, 1f), BlueTeam, false);
 
-            // Extra players row (below the two teams).
-            _extraBox = Ugui.Panel(_root.transform, "Extras", new Vector2(0.37f, 0.862f), new Vector2(0.63f, 0.912f), new Color(0, 0, 0, 0f), false).rectTransform;
+            // Extra players row (just below the two teams, still near the top edge).
+            _extraBox = Ugui.Panel(_root.transform, "Extras", new Vector2(0.42f, 0.930f), new Vector2(0.58f, 0.960f), new Color(0, 0, 0, 0f), false).rectTransform;
         }
 
         private void Refresh()
@@ -115,9 +116,9 @@ namespace SFServerBrowser
                 float xa = i * w, xb = (i + 1) * w;
                 var chip = Ugui.Panel(_extraBox, "E" + p.Slot, new Vector2(xa + 0.01f, 0.08f), new Vector2(xb - 0.01f, 0.92f),
                     new Color(p.Col.r * 0.35f, p.Col.g * 0.35f, p.Col.b * 0.35f, 0.96f)).gameObject;
-                Ugui.Panel(chip.transform, "dot", new Vector2(0.05f, 0.28f), new Vector2(0.18f, 0.72f), p.Col, false);
-                Ugui.Label(chip.transform, "P" + (p.Slot + 1) + "  " + p.Wins, new Vector2(0.2f, 0f), new Vector2(0.95f, 1f),
-                    16, Ugui.TextWhite, TextAnchor.MiddleCenter);
+                Ugui.Panel(chip.transform, "dot", new Vector2(0.05f, 0.30f), new Vector2(0.16f, 0.70f), p.Col, false);
+                Ugui.Label(chip.transform, "P" + (p.Slot + 1) + " " + p.Wins, new Vector2(0.18f, 0f), new Vector2(0.96f, 1f),
+                    12, Ugui.TextWhite, TextAnchor.MiddleCenter);
             }
         }
 

@@ -47,7 +47,10 @@ namespace SFServerBrowser
             var prevC = GUI.color;
             GUI.color = new Color(1f, 1f, 1f, a);
             FillRect(new Rect(0, 0, VW, VH), new Color(ColScrim.r, ColScrim.g, ColScrim.b, ColScrim.a));
-            GUI.Button(new Rect(0, 0, VW, VH), GUIContent.none, GUIStyle.none); // block-through only; return ignored
+            // NOTE: no GUI.Button scrim here — GUI.Button calls Event.Use() on
+            // MouseDown, which would eat the click before our event-based buttons
+            // (ClickedThisEvent) get to see it. Leftover clicks are consumed at the
+            // END of this method instead (blocks the game menu behind, no close).
 
             // Panel — fixed design size, slides up slightly as it appears.
             float pw = 960f, ph = 640f;
@@ -89,6 +92,12 @@ namespace SFServerBrowser
             string ep = string.IsNullOrEmpty(_lobbyEndpoint) ? "endpoint not set" : EndpointHost();
             GUI.Label(footer, "·  " + ep + "   " + _statusText,
                 StLabel(FzTiny, ColInkFaint, FontStyle.Normal, TextAnchor.MiddleLeft));
+
+            // Block any click that wasn't already consumed by a button above so it
+            // can't fall through to the game menu behind (and empty-area clicks do
+            // nothing — they never close the panel). Buttons already e.Use()'d theirs.
+            var ev = Event.current;
+            if (ev != null && ev.type == EventType.MouseDown) ev.Use();
 
             GUI.color = prevC;
         }

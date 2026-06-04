@@ -110,7 +110,22 @@ namespace SFServerBrowser
             GUI.Label(rr, new GUIContent(label, tooltip), st);
 
             if (!enabled) return false;
-            return GUI.Button(rr, GUIContent.none, GUIStyle.none);
+            return ClickedThisEvent(rr);
+        }
+
+        // Deterministic click: handle the MouseDown event by rect hit-test and
+        // consume it. Immune to IMGUI control-id shifts — the server-list/fetch
+        // state changed the control count between MouseDown and MouseUp, so
+        // GUI.Button mapped clicks to the wrong control ("clicking closed the menu").
+        internal static bool ClickedThisEvent(Rect r)
+        {
+            var e = Event.current;
+            if (e != null && e.type == EventType.MouseDown && e.button == 0 && r.Contains(VMouse()))
+            {
+                e.Use();
+                return true;
+            }
+            return false;
         }
 
         // ---- Status pill (player count / state) -------------------------------
@@ -152,7 +167,7 @@ namespace SFServerBrowser
                 Color tc = isSel ? selInk : (hot ? ColPaperText : ColInkFaint);
                 var st = StLabel(FzSmall, tc, FontStyle.Bold, TextAnchor.MiddleCenter);
                 GUI.Label(segR, labels[i], st);
-                if (GUI.Button(segR, GUIContent.none, GUIStyle.none)) result = i;
+                if (ClickedThisEvent(segR)) result = i;
             }
             return result;
         }
