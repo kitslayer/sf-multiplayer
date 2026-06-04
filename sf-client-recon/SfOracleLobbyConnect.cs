@@ -431,15 +431,17 @@ namespace SFClientRecon
             {
                 var host = OracleServerHost;
                 int port = OracleServerPort;
-                // ALWAYS point the patched assembly's UDP client at the oracle for a
-                // remote host. The OLD code only did this when -address was ABSENT,
-                // wrongly assuming the assembly self-configures from -address. The
-                // .srv assembly is server-oriented and does NOT bind the client UDP
-                // from -address, so with -address present (the normal launcher) the
-                // rebind was SKIPPED → the vanilla handshake (ClientRequestingAccepting)
-                // was never sent over UDP → the host never assigned a slot → "no me
-                // mete". Rebinding here makes the whole SF P2P flow ride our UDP link.
-                if (host != "127.0.0.1" && host != "localhost")
+                // The patched assembly's OWN Init() already reads -address/-port and
+                // calls UDPClient() once (connecting + starting the receive loop). So
+                // ONLY rebind here when -address is ABSENT (the assembly couldn't
+                // self-configure). Calling UDPClient a SECOND time with -address
+                // present double-Connects the socket + starts a second receive loop,
+                // which BREAKS the assembly's UDP entirely (handshake stops sending).
+                bool hasCliAddr = false;
+                var args = Environment.GetCommandLineArgs();
+                for (int i = 0; i < args.Length - 1; i++)
+                    if (args[i] == "-address") { hasCliAddr = true; break; }
+                if (!hasCliAddr && host != "127.0.0.1" && host != "localhost")
                 {
                     var udpClient = AccessTools.Method(__instance.GetType(), "UDPClient");
                     if (RefOk(udpClient))
@@ -447,7 +449,6 @@ namespace SFClientRecon
                         udpClient.Invoke(__instance, new object[] { host, port });
                         Log.LogInfo($"[oracle-lobby] Init rebound UDP client → {host}:{port}");
                     }
-                    else Log.LogWarning("[oracle-lobby] UDPClient method not found — assembly may be vanilla (handshake won't reach the oracle).");
                 }
             }
             catch (Exception e) { Log.LogWarning($"[oracle-lobby] Init postfix: {e.Message}"); }
