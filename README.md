@@ -13,13 +13,33 @@ Unzip → run **`INSTALAR-ALKA-KITSLAYER.bat`** → launch Stick Fight. That's i
 
 ---
 
-# sf-multiplayer
+# ALKA Online — Stick Fight: The Game dedicated server
 
-Centralized dedicated-server revival for **Stick Fight: The Game** (Steam app 674940), built for the competitive scene to replace stock P2P with an authoritative server. Goal: fix rubber-banding, host-migration drops, and the long-standing physics divergence between clients.
+**A community project by ALKA** to kill **Stick Fight's peer-to-peer host model** and replace it with a real **dedicated, server-authoritative** backend — so matches stop rubber-banding, surviving a host's connection drop, and showing each player a different physics simulation.
 
-> **Status: beta / live-test verification.** Real Stick Fight (Windows or Linux/Proton) connects directly to `SFHeadlessHost.dll` running inside a headless instance of the game on UDP 1337. The host-side gameplay loop — physics, killboxes, weapon spawn timers — runs through SF’s own code, with the headless host plugin driving it via Harmony patches.
-> 
-> The v26.5 protocol with client-side prediction + server reconciliation (canonical CSGO/Valorant model) is shipped: client predicts locally, sends inputs to the server at 60Hz, server runs the authoritative simulation, broadcasts 30Hz `WorldStateSnapshot`, client shift-corrects when its prediction diverged. Multi-lobby sharding (multi-process) is live — one host can run several isolated matches concurrently. Current work is bug verification from live testing + polish.
+In stock Stick Fight one of the players *is* the host: their PC runs the match, everyone else relays through them, and if they lag or leave, the lobby dies and the simulation diverges. **ALKA Online removes that.** A headless copy of the game runs the match on a dedicated server (the "oracle"); every player is just a client. The result is lower, *consistent* lag, no host-migration drops, and both screens converging on the **same** authoritative world.
+
+> **What it gives you**
+> - 🛰️ **Dedicated server, no P2P host** — the match lives on the oracle, not on a player's PC.
+> - 🎯 **Server-authoritative simulation** — physics, killboxes, weapon spawns and damage all resolved on the server (client predicts locally, server reconciles — the CS:GO / Valorant model).
+> - 🛡️ **Anti-cheat** — damage is validated server-side with tick-history rewind; movement/fire is bounded; clients can't fabricate hits or teleport.
+> - 📉 **Less lag, more in-sync** — 60 Hz client input, 30 Hz authoritative snapshots, uncapped FPS, client-local crate physics for smoothness.
+> - 🧩 **Multi-lobby** — one server runs many isolated matches at once; a single-port UDP router fronts them all.
+
+## ✨ Features (the ALKA client mod)
+
+Everything below ships in the **1-click installer** above — drop it on any Steam copy of Stick Fight and you're online.
+
+| Feature | What it does |
+|---|---|
+| **Dedicated-server client** (`SFClientRecon`) | Connects to the oracle instead of a P2P host; runs client prediction + server reconciliation; uncaps FPS. |
+| **In-game lobby & server browser** | Press **F2** for the native ALKA lobby (BROWSE / JOIN by code / CREATE / SETTINGS), or use the "PLAY ONLINE" menu button. Auto-finds the server from your `-address`. |
+| **English + Spanish UI** | English by default; switch to Spanish in the lobby's **SETTINGS** tab (your choice is saved). |
+| **Server-authoritative crates** | Crates push, tip, tumble and fall off edges like vanilla — but driven so both clients agree, without the old rubber-banding. |
+| **Weapon fixes** | Thrown weapons fly clean and never damage the thrower; the throw button never sticks; map weapons register correctly. |
+| **Explosive barrels & map gimmicks** | Powder barrels detonate again; frozen map scripts can be self-driven (`SF_MAP_LOCAL_TYPES`). |
+| **Anti-cheat host** | Server-side damage validation, tick rewind, and bounds checks (`SFHeadlessHost`). |
+| **Clean uninstall** | The uninstaller restores your game *exactly* as it was and leaves any other mods you had untouched. |
 
 ## What’s in this repo
 
@@ -136,12 +156,14 @@ Issues and PRs welcome.
 
 ## Credits
 
-### Team (sf-multiplayer / oracle)
+### Team
 
 | Name | Role | Contact |
 |------|------|---------|
-| **kitslayer** | Maintainer, headless host, VPS oracle, v26 protocol | GitHub: [@kitslayer](https://github.com/kitslayer) · Discord: `kitslayer` |
-| **AlkaDev** | Client plugin, Windows deploy scripts, live testing, box/lobby fixes | GitHub: [@AlkaPrime12](https://github.com/AlkaPrime12) · Discord: `Tyralka0660` |
+| **ALKA** | **Creator & project lead** — vision & direction, client mod, in-game lobby/GUI, crate & weapon physics, FPS/netcode work, installer, Windows deploy, live testing & QA | GitHub: [@AlkaPrime12](https://github.com/AlkaPrime12) · Discord: `Tyralka0660` |
+| **kit** | Co-developer — headless host, VPS oracle, v26 protocol & relay | GitHub: [@kitslayer](https://github.com/kitslayer) · Discord: `kitslayer` |
+
+ALKA started and leads the project; kit has contributed heavily on the server side. The split of work is visible in each author's commits — see the [commit history](https://github.com/kitslayer/sf-multiplayer/commits/main).
 
 Repo: [github.com/kitslayer/sf-multiplayer](https://github.com/kitslayer/sf-multiplayer)
 

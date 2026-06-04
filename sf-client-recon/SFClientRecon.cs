@@ -62,7 +62,7 @@ namespace SFClientRecon
     {
         public const string PluginGuid = "com.stickfightdev.client-recon";
         public const string PluginName = "SFClientRecon";
-        public const string PluginVersion = "0.4.5";
+        public const string PluginVersion = "0.4.6";
 
         internal static ManualLogSource Log;
         internal static bool RefOk(object o) => !ReferenceEquals(o, null);
@@ -1683,6 +1683,13 @@ namespace SFClientRecon
                 if ((object)rb == null) return true;
                 var rootT = rb.transform.root;
                 if ((object)rootT == null) return true;
+
+                // EXPLOSIVE BARRELS (eventDestruction) must ALWAYS process their
+                // collision — they detonate from inside OnCollisionEnter. Our
+                // suppression below is only for ice/chain pieces; without this
+                // exception the prefix swallowed the barrel's hit and they never
+                // exploded ("los barriles de pólvora no explotan").
+                if (IsEventDestructibleTarget(__instance)) return true;
 
                 // Ice only breaks from LOCAL player rig — not from boxes/lerped NSOs/weapons.
                 if (IsIceDestructibleTarget(__instance))

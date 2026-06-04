@@ -670,6 +670,25 @@ namespace SFClientRecon
             return simple && !ev;
         }
 
+        // True for explosive barrels (DestructiblePiece.eventDestruction == true).
+        // They detonate from inside OnCollisionEnter, so the destructible-collision
+        // suppressor MUST let them through or they never explode.
+        internal static bool IsEventDestructibleTarget(MonoBehaviour piece)
+        {
+            if ((object)piece == null) return false;
+            if ((object)_clientDpType == null)
+            {
+                _clientDpType = AccessTools.TypeByName("DestructiblePiece");
+                if ((object)_clientDpType != null)
+                {
+                    _clientDpSimpleField = AccessTools.Field(_clientDpType, "simpleDestruction");
+                    _clientDpEventField = AccessTools.Field(_clientDpType, "eventDestruction");
+                }
+            }
+            if ((object)_clientDpEventField == null) return false;
+            return (bool)_clientDpEventField.GetValue(piece);
+        }
+
         internal static bool IsLocalPlayerCollisionRigidbody(Rigidbody rb)
         {
             if ((object)rb == null) return false;
