@@ -12,7 +12,12 @@ import sys
 
 import UnityPy
 
-DATA_DIR = "$HOME/.local/share/Steam/steamapps/common/StickFightTheGame/StickFight_Data"
+DATA_DIR = os.path.expanduser(
+    os.environ.get(
+        "SF_DATA_DIR",
+        "~/.local/share/Steam/steamapps/common/StickFightTheGame/StickFight_Data",
+    )
+)
 
 def main():
     found = {}
