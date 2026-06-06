@@ -212,20 +212,6 @@ namespace SFHeadlessHost
                         Log.LogInfo("Patched Controller.Update with input-injection prefix.");
                     }
                 }
-                // [INSTR3] Patch Movement.MoveRight / MoveLeft so we can see
-                // whether Controller.Update actually invokes them after our
-                // input injection.
-                var movType = AccessTools.TypeByName("Movement");
-                if ((object)movType != null)
-                {
-                    var mr = AccessTools.Method(movType, "MoveRight");
-                    if ((object)mr != null)
-                        harmony.Patch(mr, prefix: new HarmonyMethod(AccessTools.Method(typeof(Plugin), nameof(MoveRightPrefix))));
-                    var ml = AccessTools.Method(movType, "MoveLeft");
-                    if ((object)ml != null)
-                        harmony.Patch(ml, prefix: new HarmonyMethod(AccessTools.Method(typeof(Plugin), nameof(MoveLeftPrefix))));
-                    Log.LogInfo("[INSTR3] Patched Movement.MoveRight/MoveLeft entry-loggers.");
-                }
             }
             catch (Exception e)
             {
@@ -349,8 +335,6 @@ namespace SFHeadlessHost
         private static int _prefixCallCount;
         private static int _prefixOurRigCount;
         private static int _applyInputCount;
-        private static int _moveRightCallCount;
-        private static int _moveLeftCallCount;
         internal static bool InjectInputPrefix(object __instance)
         {
             try
@@ -451,35 +435,8 @@ namespace SFHeadlessHost
             return true; // always let original Update run
         }
 
-        internal static void MoveRightPrefix(object __instance)
-        {
-            _moveRightCallCount++;
-            if (_moveRightCallCount == 1 || _moveRightCallCount % 30 == 0)
-            {
-                try
-                {
-                    var c = __instance as Component;
-                    string name = (object)c != null ? c.gameObject.name : "?";
-                    Log.LogInfo($"[INSTR3] Movement.MoveRight#{_moveRightCallCount} on {name}");
-                }
-                catch { }
-            }
-        }
-
-        internal static void MoveLeftPrefix(object __instance)
-        {
-            _moveLeftCallCount++;
-            if (_moveLeftCallCount == 1 || _moveLeftCallCount % 30 == 0)
-            {
-                try
-                {
-                    var c = __instance as Component;
-                    string name = (object)c != null ? c.gameObject.name : "?";
-                    Log.LogInfo($"[INSTR3] Movement.MoveLeft#{_moveLeftCallCount} on {name}");
-                }
-                catch { }
-            }
-        }
+        // [INSTR3] MoveRight/MoveLeft entry-logger prefixes removed — they ran on
+        // every frame a player moved and only logged; their diagnostic job is done.
 
         // Phase 6.5 Step 1 — IsServer=true. Static property getter so no __instance.
         internal static void IsServerPostfix(ref bool __result)
