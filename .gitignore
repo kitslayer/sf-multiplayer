@@ -56,6 +56,10 @@ steam_appid.txt
 steam_settings/
 account_name.txt
 user_steam_id.txt
+
+# ---- Control-plane / runtime secrets ----
+*.env
+sf-control.env
 legacy/StickFightDedicatedSrv/smoke-test
 smoke-test
 __pycache__/

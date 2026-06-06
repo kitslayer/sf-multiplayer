@@ -1,5 +1,5 @@
 # Sesion oracle: instala cliente persistente, MelonLoader OFF solo esta sesion, lanza el juego.
-# Team: kitslayer + AlkaDev | Discord: kitslayer, Tyralka0660
+# Team: kitslayer + AlkaDev
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'team-sf-multiplayer.ps1')
 Show-SfMultiplayerTeamInfo

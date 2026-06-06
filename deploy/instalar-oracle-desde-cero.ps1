@@ -1,6 +1,6 @@
 # Instalacion completa oracle en Stick Fight LIMPIO (o reinstalado).
 # Instala BepInEx 5.4.23.5 + Assembly-CSharp.srv + SFClientRecon. Sin MelonLoader.
-# Team: kitslayer + AlkaDev | Discord: kitslayer, Tyralka0660
+# Team: kitslayer + AlkaDev
 param(
     [string]$ServerIp = '69.53.117.43',
     [string]$ServerPort = '1337',
@@ -136,7 +136,7 @@ pause
 Write-Host ''
 Write-Host '========================================' -ForegroundColor Green
 Write-Host '  LISTO — Oracle instalado' -ForegroundColor Green
-Write-Host '  kitslayer + AlkaDev | Discord: kitslayer, Tyralka0660' -ForegroundColor DarkGray
+Write-Host '  kitslayer + AlkaDev' -ForegroundColor DarkGray
 Write-Host '========================================' -ForegroundColor Green
 Write-Host ''
 Write-Host 'Pon en Steam -> Propiedades -> Opciones de lanzamiento:' -ForegroundColor White

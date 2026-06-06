@@ -1,5 +1,5 @@
 # Build + deploy physics-fix plugins (SFHeadlessHost + SFClientRecon)
-# Team: kitslayer + AlkaDev | Discord: kitslayer, Tyralka0660
+# Team: kitslayer + AlkaDev
 param(
     [switch]$DeployVps,
     [switch]$InstallLocal

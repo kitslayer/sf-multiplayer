@@ -1,7 +1,7 @@
 # Oracle + MelonLoader (skins) en la misma sesion Steam.
 # Problema: Melon usa version.dll y BepInEx usa winhttp.dll — solo uno gana al abrir el .exe.
 # Solucion: BepInEx arranca primero + BepInEx.MelonLoader.Loader carga tus Mods de Melon.
-# Team: kitslayer + AlkaDev | Discord: kitslayer, Tyralka0660
+# Team: kitslayer + AlkaDev
 param(
     [string]$ServerIp = '69.53.117.43',
     [string]$ServerPort = '1337'

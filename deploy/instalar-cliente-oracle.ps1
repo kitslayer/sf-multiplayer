@@ -1,6 +1,6 @@
 # Instala el cliente para oracle de forma PERSISTENTE (Steam o .bat).
 # Requiere: Assembly-CSharp.srv.v25.dll, BepInEx, SFClientRecon (sin SFHeadlessHost en el cliente).
-# Team: kitslayer + AlkaDev | Discord: kitslayer, Tyralka0660
+# Team: kitslayer + AlkaDev
 param(
     [string]$ServerIp = '69.53.117.43',
     [string]$ServerPort = '1337',

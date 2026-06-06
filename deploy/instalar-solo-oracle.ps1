@@ -1,5 +1,5 @@
 # Cliente oracle SOLO: BepInEx + srv.dll + SFClientRecon. Sin MelonLoader / MLLoader.
-# Team: kitslayer + AlkaDev | Discord: kitslayer, Tyralka0660
+# Team: kitslayer + AlkaDev
 param(
     [string]$ServerIp = '69.53.117.43',
     [string]$ServerPort = '1337'

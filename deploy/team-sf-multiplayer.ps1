@@ -8,8 +8,6 @@ function Show-SfMultiplayerTeamInfo {
     Write-Host '  ========================================' -ForegroundColor Cyan
     Write-Host '   Team:    kitslayer  +  AlkaDev' -ForegroundColor White
     Write-Host '   GitHub:  https://github.com/kitslayer/sf-multiplayer' -ForegroundColor DarkGray
-    Write-Host '   Discord kitslayer  ->  kitslayer' -ForegroundColor DarkGray
-    Write-Host '   Discord AlkaDev    ->  Tyralka0660' -ForegroundColor DarkGray
     Write-Host '  ========================================' -ForegroundColor Cyan
     Write-Host ''
 }

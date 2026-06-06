@@ -1,8 +1,7 @@
 # `deploy/` — Windows one-click scripts
 
 **Team:** kitslayer + AlkaDev  
-**GitHub:** https://github.com/kitslayer/sf-multiplayer  
-**Discord:** `kitslayer` · `Tyralka0660` (AlkaDev)
+**GitHub:** https://github.com/kitslayer/sf-multiplayer
 
 Windows wrappers for the lobby management scripts. The Linux equivalents at the repo root (`launch-lobby.sh`, `stop-all-lobbies.sh`, `list-lobbies.sh`) are the source of truth; these `.bat` files mirror their behavior so Windows users can double-click instead of installing WSL.
 
