@@ -79,3 +79,28 @@ func TestRegistryMissingDir(t *testing.T) {
 		t.Error("Lookup on missing dir returned ok")
 	}
 }
+
+// TestRegistryKeepsCacheOnTransientError is the regression for the audit's
+// "wipes the cache on any FS error" finding: a non-ENOENT scan failure (here, a
+// suddenly-unreadable dir) must KEEP the previously-loaded lobbies rather than
+// drop every live client.
+func TestRegistryKeepsCacheOnTransientError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	dir := t.TempDir()
+	writeConf(t, dir, "KEEP", 1360, os.Getpid())
+	reg := NewRegistry(dir, time.Millisecond)
+	if _, ok := reg.Lookup("KEEP"); !ok {
+		t.Fatal("KEEP not loaded initially")
+	}
+	// Make the dir unreadable → ReadDir returns a permission (non-ENOENT) error.
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	defer func() { _ = os.Chmod(dir, 0o755) }() // restore so TempDir cleanup works
+	time.Sleep(5 * time.Millisecond)            // expire the 1ms TTL
+	if _, ok := reg.Lookup("KEEP"); !ok {
+		t.Error("KEEP dropped after a transient FS error; the cache should be retained")
+	}
+}

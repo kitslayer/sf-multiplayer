@@ -47,6 +47,11 @@ const (
 	maxBindings = 8192
 )
 
+// defaultMaxFlowsPerIP bounds one source IP's share of the flow table — generous
+// enough for many players behind a single NAT, while stopping one source from
+// exhausting maxFlows. Overridable via -max-flows-per-ip (0 = unlimited).
+const defaultMaxFlowsPerIP = 64
+
 // reapInterval is how often the janitor scans for idle flows.
 const reapInterval = 5 * time.Second
 
@@ -89,6 +94,10 @@ type Router struct {
 	resolve       func(code string) (*net.UDPAddr, bool)
 	requireSelect bool
 
+	// maxFlowsPerIP caps concurrent flows from one source IP (0 = unlimited).
+	// Set once before Run; read under mu on the new-flow path.
+	maxFlowsPerIP int
+
 	mu     sync.Mutex
 	flows  map[string]*flow  // by clientAddr.String() (per source endpoint)
 	epBind map[string]*bound // by client endpoint string (the endpoint that SELECTed)
@@ -114,12 +123,13 @@ func New(listenAddr, backendAddr string) (*Router, error) {
 		return nil, fmt.Errorf("listen %q: %w", listenAddr, err)
 	}
 	return &Router{
-		pub:     pub,
-		backend: ba,
-		flows:   make(map[string]*flow),
-		epBind:  make(map[string]*bound),
-		ipBind:  make(map[string]*bound),
-		stop:    make(chan struct{}),
+		pub:           pub,
+		backend:       ba,
+		flows:         make(map[string]*flow),
+		epBind:        make(map[string]*bound),
+		ipBind:        make(map[string]*bound),
+		stop:          make(chan struct{}),
+		maxFlowsPerIP: defaultMaxFlowsPerIP,
 	}, nil
 }
 
@@ -143,6 +153,7 @@ func NewRouting(listenAddr string, resolve func(code string) (*net.UDPAddr, bool
 		epBind:        make(map[string]*bound),
 		ipBind:        make(map[string]*bound),
 		stop:          make(chan struct{}),
+		maxFlowsPerIP: defaultMaxFlowsPerIP,
 	}, nil
 }
 
@@ -197,6 +208,11 @@ func (r *Router) handleClientDatagram(cliAddr *net.UDPAddr, data []byte) {
 		if len(r.flows) >= maxFlows {
 			r.mu.Unlock()
 			log.Printf("[router] flow cap %d reached; dropping new flow from %s", maxFlows, key)
+			return
+		}
+		if r.maxFlowsPerIP > 0 && r.countFlowsForIPLocked(cliAddr.IP) >= r.maxFlowsPerIP {
+			r.mu.Unlock()
+			log.Printf("[router] per-IP flow cap %d reached for %s; dropping new flow", r.maxFlowsPerIP, cliAddr.IP)
 			return
 		}
 		nf, err := r.newFlow(cliAddr, backend, code)
@@ -344,6 +360,26 @@ func (r *Router) newFlow(cliAddr, backend *net.UDPAddr, code string) (*flow, err
 	r.wg.Add(1)
 	go r.pumpUpstream(fl)
 	return fl, nil
+}
+
+// SetMaxFlowsPerIP sets the per-source-IP flow cap (0 = unlimited). Call before Run.
+func (r *Router) SetMaxFlowsPerIP(n int) {
+	r.mu.Lock()
+	r.maxFlowsPerIP = n
+	r.mu.Unlock()
+}
+
+// countFlowsForIPLocked counts active flows whose client shares ip. Caller holds
+// r.mu. O(flows), but only runs on new-flow creation (rare) and only after the
+// O(1) global cap check has passed.
+func (r *Router) countFlowsForIPLocked(ip net.IP) int {
+	n := 0
+	for _, fl := range r.flows {
+		if fl.clientAddr.IP.Equal(ip) {
+			n++
+		}
+	}
+	return n
 }
 
 // pumpUpstream reads backend→client datagrams off this flow's dialed socket and

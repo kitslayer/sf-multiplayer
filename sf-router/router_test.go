@@ -115,3 +115,41 @@ func TestPerClientFlows(t *testing.T) {
 		t.Errorf("flows = %d, want 2 (one per client endpoint)", got)
 	}
 }
+
+// TestPerIPFlowCap verifies the DoS backstop: with a per-IP flow cap of 2, a
+// third distinct endpoint from the SAME source IP is dropped rather than
+// allocating another flow (so one source can't exhaust the global flow table).
+func TestPerIPFlowCap(t *testing.T) {
+	echoAddr, stopEcho := startEcho(t, "C")
+	defer stopEcho()
+
+	r, err := New("127.0.0.1:0", echoAddr.String())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	r.SetMaxFlowsPerIP(2)
+	go func() { _ = r.Run() }()
+	defer r.Close()
+	time.Sleep(50 * time.Millisecond)
+	routerAddr := r.LocalAddr().(*net.UDPAddr)
+
+	// Three endpoints, all from 127.0.0.1 (distinct source ports). Only the first
+	// two should establish a flow; the third trips the per-IP cap and is dropped.
+	for i := 0; i < 3; i++ {
+		cli, err := net.DialUDP("udp", nil, routerAddr)
+		if err != nil {
+			t.Fatalf("client %d dial: %v", i, err)
+		}
+		defer cli.Close()
+		if _, err := cli.Write([]byte("x")); err != nil {
+			t.Fatalf("client %d write: %v", i, err)
+		}
+		_ = cli.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		_, _ = cli.Read(make([]byte, 64)) // drain reply; 3rd will time out (dropped)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	if got := r.Stats().Flows; got != 2 {
+		t.Errorf("flows = %d, want 2 (per-IP cap of 2)", got)
+	}
+}

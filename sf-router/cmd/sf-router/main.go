@@ -33,18 +33,22 @@ func main() {
 	backend := flag.String("backend", "", "stage-0 fixed backend (e.g. 127.0.0.1:1338); used only when -registry is empty")
 	stats := flag.String("stats", "", "optional HTTP addr for GET /router/stats (e.g. 127.0.0.1:8081)")
 	regTTL := flag.Duration("registry-ttl", 2*time.Second, "lobby registry cache TTL")
+	maxPerIP := flag.Int("max-flows-per-ip", 64, "max concurrent flows from one source IP (0 = unlimited)")
 	flag.Parse()
 
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
 	log.SetPrefix("")
 
 	var (
-		r   *router.Router
-		err error
+		r       *router.Router
+		err     error
+		regStop chan struct{}
 	)
 	switch {
 	case *registry != "":
 		reg := router.NewRegistry(*registry, *regTTL)
+		regStop = make(chan struct{})
+		reg.StartRefresh(regStop) // keep the cache warm off the relay hot path
 		r, err = router.NewRouting(*listen, reg.Lookup)
 		if err == nil {
 			log.Printf("[router] routing mode: registry=%s ttl=%s", *registry, *regTTL)
@@ -57,6 +61,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("[router] startup failed: %v", err)
 	}
+	r.SetMaxFlowsPerIP(*maxPerIP)
 
 	if *stats != "" {
 		go serveStats(*stats, r)
@@ -68,6 +73,9 @@ func main() {
 	go func() {
 		<-sig
 		log.Printf("[router] shutting down")
+		if regStop != nil {
+			close(regStop)
+		}
 		r.Close()
 	}()
 
