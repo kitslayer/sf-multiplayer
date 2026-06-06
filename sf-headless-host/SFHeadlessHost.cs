@@ -3541,6 +3541,62 @@ namespace SFHeadlessHost
                 if (!kv.Value.Initialized) continue;
                 SendSfPacket(kv.Value.Addr, PktWeaponThrown, body, 0uL, throwChannel);
             }
+
+            // Phase 6.18 (throw-auth, SHADOW) — also model the throw as a server-side
+            // projectile so its hit registration is FPS-independent. Seeded from this same
+            // msgType-21 body, so detection needs no client change. Log-only for now.
+            try { RegisterThrownWeaponShadow(sender, data, off, len); }
+            catch (Exception ex) { Log.LogWarning($"[throw-auth] shadow register threw: {ex.Message}"); }
+        }
+
+        // Decode a RequestingWeaponThrow (21) body and register a server-side projectile
+        // mirroring the thrown weapon's flight, so the hit is computed authoritatively on
+        // the fixed server tick (fps-independent) instead of by each client's render-rate
+        // ThrownWeapon.LateUpdate raycast.
+        //
+        // Body (NetworkPlayer.ThrowWeapon, real throw = 10 bytes):
+        //   u8  justDrop           (0 for a real throw; 1 = empty-drop, no force)
+        //   u8  weaponIndex
+        //   i16 posY * 100   (LE)  ShortVector2 — throw origin Y  (SF plays on the YZ plane)
+        //   i16 posZ * 100   (LE)  ShortVector2 — throw origin Z
+        //   i8  rotY * 100         ByteVector2  — weapon rotation (unused here)
+        //   i8  rotZ * 100         ByteVector2
+        //   i8  aimY * 100         ByteVector2  — throw direction Y
+        //   i8  aimZ * 100         ByteVector2  — throw direction Z
+        private void RegisterThrownWeaponShadow(SfClient sender, byte[] data, int off, int len)
+        {
+            if (len < 10) return;            // 8-byte body = justDrop, or malformed → no projectile
+            if (data[off] != 0) return;      // justDrop==true → vanilla just releases it, no throw force
+            if (sender.Slot < 0 || sender.Slot > 3) return;
+
+            short sy = (short)(data[off + 2] | (data[off + 3] << 8));
+            short sz = (short)(data[off + 4] | (data[off + 5] << 8));
+            sbyte aY = (sbyte)data[off + 8];
+            sbyte aZ = (sbyte)data[off + 9];
+            Vector3 origin = new Vector3(0f, sy / 100f, sz / 100f);
+            Vector3 aim    = new Vector3(0f, aY / 100f, aZ / 100f);
+            if (aim.sqrMagnitude < 0.0001f) return;   // no aim direction → not a real throw
+            aim.Normalize();
+
+            // Self-validate the decode: the throw origin should sit on top of the thrower's rig.
+            string val = "rig=?";
+            if (SlotToRig.TryGetValue(sender.Slot, out var rig) && (object)rig != null)
+                val = $"rigPos={rig.transform.position} Δ={Vector3.Distance(origin, rig.transform.position):0.00}u";
+
+            var p = new Projectile
+            {
+                Id          = _nextProjId++,
+                OwnerSlot   = (byte)sender.Slot,
+                WeaponType  = ThrownWeaponType,
+                Position    = origin,
+                Velocity    = aim * ThrownWeaponSpeed,
+                BornAt      = Time.realtimeSinceStartup,
+                LifetimeSec = ThrownWeaponLifetime,
+                IsThrown    = true,
+                ShadowOnly  = _throwAuthShadow,
+            };
+            _projectiles.Add(p);
+            Log.LogInfo($"[throw-auth] SHADOW throw registered: id={p.Id} slot={sender.Slot} origin={origin} aim={aim} v={ThrownWeaponSpeed}u/s {val} rawlen={len}");
         }
 
         // === packet handlers ===
@@ -4461,11 +4517,26 @@ namespace SFHeadlessHost
             public Vector3  Velocity;
             public float    BornAt;
             public float    LifetimeSec;    // max time of flight before expire
+            public bool     IsThrown;       // thrown weapon (not a bullet) — never wall-explodes
+            public bool     ShadowOnly;     // detect + LOG a hit, but emit NO damage (safe rollout)
         }
         private readonly List<Projectile> _projectiles = new List<Projectile>();
         private uint _nextProjId = 1;
         private const float DefaultProjectileSpeed = 60f;     // SF-units/s for pistol
         private const float DefaultProjectileLifetime = 3f;   // 3s before expire
+
+        // === Phase 6.18 — server-authoritative thrown weapons (fixes the high-FPS "whiff") ===
+        // The client's ThrownWeapon.LateUpdate hit-check is a per-render-frame raycast, so
+        // whether a throw lands depends on the thrower's FPS (whiffs high, hits at 60). We
+        // model the thrown weapon as a server-side projectile instead — the swept-sphere
+        // TestProjectileHit runs on the fixed server tick, so detection is FPS-independent.
+        private const float ThrownWeaponSpeed    = 35f;   // Fighting.ThrowWeapon: AddForce(aim*35, VelocityChange)
+        private const float ThrownWeaponLifetime = 1.2f;  // after that it's just a pickup on the ground
+        private const byte  ThrownWeaponType     = 254;   // marker WeaponType for thrown (not a bullet type)
+        // v0 ships in SHADOW mode: detect + LOG hits, emit NO damage. Validates fps-independent
+        // detection on live data with zero double-damage / break risk. Flip false (next step)
+        // once confirmed + client-side dedup (suppress the vanilla local throw hit) is in.
+        private bool _throwAuthShadow = true;
 
         // PktClientFireWeapon body (v26.3 — client → server):
         //   u8  ownerSlot
@@ -4543,7 +4614,8 @@ namespace SFHeadlessHost
                 p.Position += p.Velocity * dt;
                 if (TryProjectileWallHit(prev, p.Position, out var wallHit))
                 {
-                    if (IsExplosiveWeaponType(p.WeaponType, p.Velocity.magnitude))
+                    // Thrown weapons hit walls and stick/drop — they never explode.
+                    if (!p.IsThrown && IsExplosiveWeaponType(p.WeaponType, p.Velocity.magnitude))
                         ApplyExplosiveBlastAt(wallHit, 5f, 900f);
                     _projectiles.RemoveAt(i);
                     continue;
@@ -4551,7 +4623,10 @@ namespace SFHeadlessHost
                 int hitSlot = TestProjectileHit(p, prev);
                 if (hitSlot >= 0)
                 {
-                    EmitServerDamage(hitSlot, p.OwnerSlot, p.WeaponType, p.Velocity);
+                    if (p.ShadowOnly)
+                        Log.LogInfo($"[throw-auth] SHADOW HIT: thrown id={p.Id} owner-slot={p.OwnerSlot} → would damage slot {hitSlot} (server swept-sphere @ fixed tick — FPS-INDEPENDENT; no damage emitted in shadow mode)");
+                    else
+                        EmitServerDamage(hitSlot, p.OwnerSlot, p.WeaponType, p.Velocity);
                     _projectiles.RemoveAt(i);
                 }
             }
