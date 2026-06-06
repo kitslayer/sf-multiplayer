@@ -14,14 +14,14 @@
 #   ./sflauncher.sh
 #
 # Or set the server explicitly:
-#   LOBBY_URL=http://192.168.1.115:8080/lobbies ./sflauncher.sh
+#   LOBBY_URL=http://69.53.117.43:8080/lobbies ./sflauncher.sh
 
 set -eu
 
 REPO="kitslayer/sf-multiplayer"
 BRANCH="main"
 BEPINEX_VERSION="5.4.23.5"
-BEPINEX_URL="https://github.com/BepInEx/BepInEx/releases/download/v${BEPINEX_VERSION}/BepInEx_x86_${BEPINEX_VERSION}.zip"
+BEPINEX_URL="https://github.com/BepInEx/BepInEx/releases/download/v${BEPINEX_VERSION}/BepInEx_win_x86_${BEPINEX_VERSION}.zip"
 PLUGIN_HOST_URL="https://github.com/$REPO/raw/$BRANCH/dist/SFHeadlessHost.dll"
 PLUGIN_RECON_URL="https://github.com/$REPO/raw/$BRANCH/dist/SFClientRecon.dll"
 BROWSER_URL_BASE="https://raw.githubusercontent.com/$REPO/$BRANCH/deploy/server-browser.html"
@@ -119,7 +119,7 @@ md5sum "$SF/BepInEx/plugins/SFHeadlessHost.dll" "$SF/BepInEx/plugins/SFClientRec
 
 # ---- pick lobby URL ----
 if [ -z "${LOBBY_URL:-}" ]; then
-  default_url=$(cat "$LAST_URL_FILE" 2>/dev/null || echo "http://192.168.1.115:8080/lobbies")
+  default_url=$(cat "$LAST_URL_FILE" 2>/dev/null || echo "http://69.53.117.43:8080/lobbies")
   echo
   printf "Lobby endpoint URL [%s]: " "$default_url"
   read -r LOBBY_URL

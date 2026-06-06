@@ -41,7 +41,7 @@ Subsequent launches just open the lobby browser directly (install step is skippe
 
 **Lobby browser says "Couldn't reach server"** — type the right `http://<server-ip>:8080/lobbies` URL into the address bar at the top. It saves to LocalAppData so it persists.
 
-**Game launches but doesn't connect** — Steam launch options are missing. They should look exactly like `-address 192.168.1.115 -port 1337` (no quotes, no leading spaces). Set them via right-click Stick Fight → Properties → Launch Options.
+**Game launches but doesn't connect** — Steam launch options are missing. They should look exactly like `-address 69.53.117.43 -port 1337` (no quotes, no leading spaces). Set them via right-click Stick Fight → Properties → Launch Options.
 
 **No lobbies showing** — ask the host whether their oracle is running. They can verify with `bash list-lobbies.sh` on the server.
 

@@ -87,7 +87,7 @@ echo "[3/3] Set Steam Launch Options for Stick Fight: The Game:"
 echo
 echo "    WINEDLLOVERRIDES=\"winhttp=n,b\" %command% -address SERVER_IP -port 1337"
 echo
-echo "(Replace SERVER_IP with your server's address, e.g. 192.168.1.115)"
+echo "(Replace SERVER_IP with your server's address, e.g. 69.53.117.43)"
 echo
 echo "Steam → Stick Fight → Properties → Launch Options → paste → close → click Play."
 echo

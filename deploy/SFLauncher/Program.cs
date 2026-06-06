@@ -78,7 +78,7 @@ internal sealed class MainForm : Form
         _urlBox.BackColor = Color.FromArgb(35, 35, 40);
         _urlBox.ForeColor = ForeColor;
         _urlBox.BorderStyle = BorderStyle.FixedSingle;
-        _urlBox.Text = LoadSavedUrl() ?? "http://192.168.1.115:8080/lobbies";
+        _urlBox.Text = LoadSavedUrl() ?? "http://69.53.117.43:8080/lobbies";
 
         _refreshBtn.Location = new Point(508, 13);
         _refreshBtn.Size = new Size(82, 25);
@@ -156,7 +156,7 @@ internal sealed class MainForm : Form
     //  AUTO-INSTALLER — runs on first launch; idempotent on re-runs
     // ============================================================
     private const string BepInExUrl =
-        "https://github.com/BepInEx/BepInEx/releases/download/v5.4.23.5/BepInEx_x86_5.4.23.5.zip";
+        "https://github.com/BepInEx/BepInEx/releases/download/v5.4.23.5/BepInEx_win_x86_5.4.23.5.zip";
     private const string ExpectedHeadlessResource = "SFLauncher.Resources.SFHeadlessHost.dll";
     private const string ExpectedReconResource    = "SFLauncher.Resources.SFClientRecon.dll";
 
