@@ -15,7 +15,7 @@ Unzip → run **`INSTALAR-ALKA-KITSLAYER.bat`** → launch Stick Fight. That's i
 
 # ALKA Online — Stick Fight: The Game dedicated server
 
-**A community project by ALKA** to kill **Stick Fight's peer-to-peer host model** and replace it with a real **dedicated, server-authoritative** backend — so matches stop rubber-banding, surviving a host's connection drop, and showing each player a different physics simulation.
+**A community project** to kill **Stick Fight's peer-to-peer host model** and replace it with a real **dedicated, server-authoritative** backend — so matches stop rubber-banding, surviving a host's connection drop, and showing each player a different physics simulation.
 
 In stock Stick Fight one of the players *is* the host: their PC runs the match, everyone else relays through them, and if they lag or leave, the lobby dies and the simulation diverges. **ALKA Online removes that.** A headless copy of the game runs the match on a dedicated server (the "oracle"); every player is just a client. The result is lower, *consistent* lag, no host-migration drops, and both screens converging on the **same** authoritative world.
 
@@ -171,10 +171,10 @@ Issues and PRs welcome.
 
 | Name | Role | Contact |
 |------|------|---------|
-| **ALKA** | **Creator & project lead** — vision & direction, client mod, in-game lobby/GUI, crate & weapon physics, FPS/netcode work, installer, Windows deploy, live testing & QA | GitHub: [@AlkaPrime12](https://github.com/AlkaPrime12) · Discord: `Tyralka0660` |
-| **kit** | Co-developer — headless host, VPS oracle, v26 protocol & relay | GitHub: [@kitslayer](https://github.com/kitslayer) · Discord: `kitslayer` |
+| **ALKA** | **Co-creator — client lead.** Client mod, in-game lobby/GUI, crate & box physics, FPS/netcode work, installer, Windows deploy, live testing & QA. Now also maintains a separate edition for the Spanish-speaking community. | GitHub: [@AlkaPrime12](https://github.com/AlkaPrime12) |
+| **kit** | **Maintainer — server lead.** Dedicated server & VPS oracle, headless host, v26 protocol, single-port relay/router, multi-lobby, monitoring, hosting & deploy. | GitHub: [@kitslayer](https://github.com/kitslayer) |
 
-ALKA started and leads the project; kit has contributed heavily on the server side. The split of work is visible in each author's commits — see the [commit history](https://github.com/kitslayer/sf-multiplayer/commits/main).
+This repo is maintained by kit — the dedicated server, hosting, and backend. ALKA led the client mod and physics work, and now also maintains a separate edition for the Spanish-speaking community. The split of work is visible in each author's commits — see the [commit history](https://github.com/kitslayer/sf-multiplayer/commits/main).
 
 Repo: [github.com/kitslayer/sf-multiplayer](https://github.com/kitslayer/sf-multiplayer)
 
