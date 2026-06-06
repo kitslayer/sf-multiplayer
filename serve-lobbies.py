@@ -75,10 +75,25 @@ REAP_INTERVAL = float(os.environ.get("SF_REAP_INTERVAL", "30"))   # sec between 
 LOBBY_MIN_AGE = float(os.environ.get("SF_LOBBY_MIN_AGE", "120"))  # don't reap a lobby younger than this
 EMPTY_TTL = float(os.environ.get("SF_LOBBY_EMPTY_TTL", "300"))    # reap after this long with 0 clients
 
+# --- GET rate limit (per source IP token bucket) -----------------------------
+# A generous backstop against one source hammering the endpoints. The 1s lobby
+# cache already bounds per-request cost; this bounds request volume. Defaults sit
+# well above any legitimate poller (the browser refreshes every 10s). Set
+# SF_GET_RATE_REFILL=0 to disable. Behind a reverse proxy, prefer the proxy's
+# rate limiting.
+GET_RATE_BURST = float(os.environ.get("SF_GET_RATE_BURST", "120"))    # max tokens (burst)
+GET_RATE_REFILL = float(os.environ.get("SF_GET_RATE_REFILL", "20"))   # tokens/sec (0 disables)
+
 # per-IP last-create timestamps (rate limit) + per-code first-seen-empty (reaper)
 _last_create: dict[str, float] = {}
 _empty_since: dict[str, float] = {}
 _create_lock = threading.Lock()
+
+# GET rate-limit buckets (ip -> (tokens, last_ts)) + short-TTL lobby-list cache.
+_get_buckets: dict[str, tuple[float, float]] = {}
+_get_buckets_lock = threading.Lock()
+_lobbies_cache: dict = {"at": 0.0, "data": None}
+_lobbies_cache_lock = threading.Lock()
 
 
 def load_lobbies() -> list[dict]:
@@ -110,6 +125,34 @@ def load_lobbies() -> list[dict]:
         entry["alive"] = alive
         entries.append(entry)
     return entries
+
+
+def _load_lobbies_cached(ttl: float = 1.0) -> list[dict]:
+    """load_lobbies() behind a short TTL so a fleet of GET pollers doesn't
+    re-stat the registry on every request. Returns fresh per-entry copies so
+    callers (merge/enrich) can mutate without corrupting the cached snapshot."""
+    now = time.time()
+    with _lobbies_cache_lock:
+        if _lobbies_cache["data"] is None or now - _lobbies_cache["at"] >= ttl:
+            _lobbies_cache["data"] = load_lobbies()
+            _lobbies_cache["at"] = now
+        snapshot = _lobbies_cache["data"]
+    return [dict(e) for e in snapshot]
+
+
+def _allow_get(ip: str) -> bool:
+    """Per-IP token bucket for GET requests. Generous by default; refill<=0 disables."""
+    if GET_RATE_REFILL <= 0:
+        return True
+    now = time.time()
+    with _get_buckets_lock:
+        tokens, last = _get_buckets.get(ip, (GET_RATE_BURST, now))
+        tokens = min(GET_RATE_BURST, tokens + (now - last) * GET_RATE_REFILL)
+        if tokens < 1.0:
+            _get_buckets[ip] = (tokens, now)
+            return False
+        _get_buckets[ip] = (tokens - 1.0, now)
+        return True
 
 
 HTML_VIEW = """<!doctype html>
@@ -195,6 +238,9 @@ fetch("/lobbies").then(r=>r.json()).then(d=>{
 
 class LobbyHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
+        if not _allow_get(self._client_ip()):
+            self._send(429, "text/plain", b"rate limited; slow down\n")
+            return
         if self.path in ("", "/", "/index.html"):
             self._send(200, "text/html; charset=utf-8", HTML_VIEW.encode())
             return
@@ -203,7 +249,7 @@ class LobbyHandler(BaseHTTPRequestHandler):
                 {
                     "generatedAt": datetime.now(timezone.utc).isoformat(),
                     "registry": REGISTRY_DIR,
-                    "lobbies": _enrich_lobbies(_merge_static(load_lobbies())),
+                    "lobbies": _enrich_lobbies(_merge_static(_load_lobbies_cached())),
                 },
                 indent=2,
             ).encode()
@@ -212,7 +258,7 @@ class LobbyHandler(BaseHTTPRequestHandler):
         if self.path in ("/healthz", "/healthz/"):
             # Simple liveness probe for monitoring (Prometheus, Uptime Robot,
             # etc.). 200 if process is up + registry is readable.
-            alive_count = sum(1 for l in _merge_static(load_lobbies()) if l.get("alive"))
+            alive_count = sum(1 for l in _merge_static(_load_lobbies_cached()) if l.get("alive"))
             body = json.dumps({"status": "ok", "lobbiesAlive": alive_count}).encode()
             self._send(200, "application/json", body)
             return
@@ -290,10 +336,19 @@ class LobbyHandler(BaseHTTPRequestHandler):
             if len(live) >= MAX_LOBBIES:
                 self._send_json(429, {"error": "server at lobby capacity", "max": MAX_LOBBIES})
                 return
+            prev_last = _last_create.get(ip)  # captured for rollback if spawn fails
             _last_create[ip] = now  # reserve the slot before the slow spawn
 
         code, port, err = create_lobby(max_players=max_players, public=public, mode=mode)
         if err:
+            # The spawn failed → release the reserved rate-limit slot so the user
+            # isn't locked out for CREATE_MIN_INTERVAL over a failed create.
+            with _create_lock:
+                if _last_create.get(ip) == now:  # don't clobber a concurrent create
+                    if prev_last is None:
+                        _last_create.pop(ip, None)
+                    else:
+                        _last_create[ip] = prev_last
             self._send_json(500, {"error": err})
             return
         print(f"[control] created lobby {code} on port {port} "
@@ -542,6 +597,13 @@ def reaper_loop() -> None:
             for code in list(_empty_since):
                 if code not in seen_codes:
                     _empty_since.pop(code, None)
+            # prune idle per-IP rate-limit state so the maps stay bounded
+            with _get_buckets_lock:
+                for bip in [bip for bip, (_, last) in _get_buckets.items() if now - last > 300]:
+                    _get_buckets.pop(bip, None)
+            with _create_lock:
+                for cip in [cip for cip, t in list(_last_create.items()) if now - t > 300]:
+                    _last_create.pop(cip, None)
         except Exception as e:  # never let the reaper thread die
             print(f"[reaper] pass error: {e}")
 
