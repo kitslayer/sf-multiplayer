@@ -1,16 +1,16 @@
 ===================================================================
-  ALKA-KITSLAYER  -  Stick Fight Oracle  -  1-Click Install
+  sf-multiplayer  -  Stick Fight Oracle  -  1-Click Install
 ===================================================================
 
 HOW TO INSTALL (1 click):
-  1) Double-click:  INSTALAR-ALKA-KITSLAYER.bat
+  1) Double-click:  INSTALAR-sf-multiplayer.bat
   2) Accept the administrator prompt (needed to write into Steam).
   3) Wait until it says "INSTALL COMPLETE".
 
 DONE. To play:
-  - Double-click on the desktop: "Jugar-StickFight-ALKA.bat"
+  - Double-click on the desktop: "Jugar-StickFight.bat"
   - Or open Stick Fight from Steam (launch options are already set).
-  - In game: PLAY ONLINE -> QUICK MATCH, or press F2 for the ALKA lobby.
+  - In game: PLAY ONLINE -> QUICK MATCH, or press F2 for the in-game lobby.
 
 WHAT THE INSTALLER DOES:
   - Finds Stick Fight automatically (any Steam library).
@@ -20,8 +20,8 @@ WHAT THE INSTALLER DOES:
   - Installs the oracle client (SFClientRecon + SFServerBrowser).
 
 TO ROLL BACK EVERYTHING:
-  - Double-click:  DESINSTALAR-ALKA-KITSLAYER.bat
-    It restores your original Assembly-CSharp.dll and removes ONLY the ALKA
+  - Double-click:  DESINSTALAR-sf-multiplayer.bat
+    It restores your original Assembly-CSharp.dll and removes ONLY the mod
     plugins -- any other mods you had are left untouched.
 
 LANGUAGE:
@@ -29,6 +29,6 @@ LANGUAGE:
     to Spanish.
 
 -------------------------------------------------------------------
-  Team: kitslayer + AlkaDev
-  GitHub: kitslayer  /  AlkaPrime12
+  kitslayer
+  GitHub: kitslayer
 -------------------------------------------------------------------

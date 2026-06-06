@@ -103,9 +103,9 @@ sf-multiplayer/
 
 ## Project relationship with ALKA / other devs
 
-- We share research with ALKA's [Stickfight-TestingMultiplayer](https://github.com/AlkaPrime12/Stickfight-TestingMultiplayer) — credited in README
+- Early on we shared research with ALKA's [Stickfight-TestingMultiplayer](https://github.com/AlkaPrime12/Stickfight-TestingMultiplayer); ALKA has since stepped away from this project (see README credits)
 - Independent codebase (this repo, BepInEx + Harmony on top of stock SF DLLs) but compatible wire-protocol family with stock SF v25
-- Bug-fix ideas shared both directions when one of us catches something the other missed
+- Bug-fix ideas were shared both directions during that period
 
 ## Recent session work (2026-05-23)
 

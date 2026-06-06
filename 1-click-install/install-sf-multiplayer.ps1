@@ -1,6 +1,6 @@
 # ===================================================================
-#  ALKA-KITSLAYER  -  Stick Fight: The Game  -  Oracle 1-Click Installer
-#  Team: kitslayer + AlkaDev  |  GitHub: kitslayer, AlkaPrime12
+#  sf-multiplayer  -  Stick Fight: The Game  -  Oracle 1-Click Installer
+#  kitslayer  |  GitHub: kitslayer
 #
 #  What it does (without breaking your folder):
 #   1. Finds Stick Fight in any Steam library.
@@ -9,9 +9,9 @@
 #   4. Installs BepInEx (if missing), the patched Assembly-CSharp and the
 #      SFClientRecon (+ SFServerBrowser) plugins.
 #   5. Sets the launch options (-address of the oracle).
-#   6. Creates "Jugar-StickFight-ALKA.bat" on the desktop.
+#   6. Creates "Jugar-StickFight.bat" on the desktop.
 #
-#  To revert: run DESINSTALAR-ALKA-KITSLAYER.bat (restores the backup).
+#  To revert: run DESINSTALAR-sf-multiplayer.bat (restores the backup).
 # ===================================================================
 
 param(
@@ -25,19 +25,14 @@ $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = Split-Path $Here -Parent
 
 # ---------------------------------------------------------------- banner
-function Show-AlkaKitslayerBanner {
+function Show-Banner {
     Clear-Host
-    $c = 'Cyan'; $y = 'Yellow'; $m = 'Magenta'
+    $c = 'Cyan'; $y = 'Yellow'
     Write-Host ''
-    Write-Host '   ___    _    _  __    _         _  _____ _____ ____  _      _____   ___ _____ ____  ' -ForegroundColor $c
-    Write-Host '  / _ \  | |  | |/ /   / \       | |/ /_ _|_   _/ ___|| |    / \ \ \ / / __|  _ \  ' -ForegroundColor $c
-    Write-Host ' | |_| | | |  | | /   / _ \  ___ | | < | |  | | \___ \| |   / _ \ V / |__| |_) | ' -ForegroundColor $m
-    Write-Host ' |  _  | | |__| |\ \  / ___ \|___|| |\ \| |  | |  ___) | |__/ ___ \ | |  _| _ <  ' -ForegroundColor $m
-    Write-Host ' |_| |_| |____|_| \_\/_/   \_\   |_| \_\___| |_| |____/|____/_/   \_\_|_| |_| \_\ ' -ForegroundColor $y
-    Write-Host ''
-    Write-Host '        A L K A - K I T S L A Y E R   x   Stick Fight Oracle' -ForegroundColor $y
-    Write-Host '        ------------------------------------------------------' -ForegroundColor DarkGray
-    Write-Host '        Team: kitslayer + AlkaDev    GitHub: kitslayer / AlkaPrime12' -ForegroundColor DarkGray
+    Write-Host '   ===============================================' -ForegroundColor $c
+    Write-Host '     sf-multiplayer   x   Stick Fight Oracle' -ForegroundColor $y
+    Write-Host '     1-Click Installer   |   kitslayer' -ForegroundColor DarkGray
+    Write-Host '   ===============================================' -ForegroundColor $c
     Write-Host ''
     Start-Sleep -Milliseconds 600
 }
@@ -75,7 +70,7 @@ function Find-StickFight {
 }
 
 # ============================================================ MAIN
-Show-AlkaKitslayerBanner
+Show-Banner
 
 Step 1 'Searching for Stick Fight: The Game...'
 $Sf = Find-StickFight
@@ -171,10 +166,10 @@ if ($hasMelon) {
 Step 7 'Setting launch options and desktop shortcut...'
 $launchArgs = ("-address {0} -port {1}" -f $ServerIp, $ServerPort)
 $desktop = [Environment]::GetFolderPath('Desktop')
-$batPath = Join-Path $desktop 'Jugar-StickFight-ALKA.bat'
+$batPath = Join-Path $desktop 'Jugar-StickFight.bat'
 @"
 @echo off
-title ALKA-KITSLAYER  Stick Fight Oracle
+title sf-multiplayer  Stick Fight Oracle
 rem Menu SERVERS en el juego (listar + unirse a lobbies de este servidor):
 set "SF_LOBBY_ENDPOINT=http://${ServerIp}:8080/lobbies"
 rem Para CREAR lobbies desde el juego necesitas el token del servidor:
@@ -185,17 +180,17 @@ Ok ("Shortcut: {0}" -f $batPath)
 
 Write-Host ''
 Write-Host '===================================================================' -ForegroundColor Green
-Write-Host '   INSTALL COMPLETE  -  ALKA-KITSLAYER' -ForegroundColor Yellow
+Write-Host '   INSTALL COMPLETE  -  sf-multiplayer' -ForegroundColor Yellow
 Write-Host '===================================================================' -ForegroundColor Green
 Write-Host ''
 Write-Host '  To play (either way):' -ForegroundColor White
-Write-Host ('   A) Double-click on the desktop: Jugar-StickFight-ALKA.bat') -ForegroundColor Gray
+Write-Host ('   A) Double-click on the desktop: Jugar-StickFight.bat') -ForegroundColor Gray
 Write-Host  '   B) Steam -> Stick Fight -> Properties -> Launch options:' -ForegroundColor Gray
 Write-Host ('        {0}' -f $launchArgs) -ForegroundColor Cyan
 Write-Host ''
 Write-Host '  In game: PLAY ONLINE -> QUICK MATCH. In the lobby type /start' -ForegroundColor White
 Write-Host ''
-Write-Host '  Roll back everything: DESINSTALAR-ALKA-KITSLAYER.bat' -ForegroundColor DarkGray
+Write-Host '  Roll back everything: DESINSTALAR-sf-multiplayer.bat' -ForegroundColor DarkGray
 Write-Host ''
-Write-Host '  Thanks for playing ALKA-KITSLAYER!' -ForegroundColor Magenta
+Write-Host '  Thanks for playing sf-multiplayer!' -ForegroundColor Magenta
 Write-Host ''

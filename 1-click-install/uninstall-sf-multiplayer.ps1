@@ -1,12 +1,12 @@
-# ALKA-KITSLAYER uninstaller — rolls Stick Fight back to EXACTLY how it was
-# before the ALKA install, WITHOUT touching any other mods you had.
+# sf-multiplayer uninstaller — rolls Stick Fight back to EXACTLY how it was
+# before the install, WITHOUT touching any other mods you had.
 #
 # It only:
 #   - restores the Assembly-CSharp.dll we backed up at install time (this is YOUR
 #     original file, modded or vanilla — we never overwrite that backup),
-#   - removes ONLY the ALKA plugin DLLs (SFClientRecon / SFServerBrowser),
+#   - removes ONLY the mod plugin DLLs (SFClientRecon / SFServerBrowser),
 #   - restores doorstop_config.ini if we backed it up,
-#   - removes the ALKA configs + desktop shortcut.
+#   - removes the mod configs + desktop shortcut.
 # Every other BepInEx plugin you have is left in place.
 $ErrorActionPreference = 'Stop'
 
@@ -27,7 +27,7 @@ function Find-StickFight {
     return $null
 }
 
-Write-Host 'ALKA-KITSLAYER - Rolling Stick Fight back to its pre-install state...' -ForegroundColor Yellow
+Write-Host 'sf-multiplayer - Rolling Stick Fight back to its pre-install state...' -ForegroundColor Yellow
 $Sf = Find-StickFight
 if (-not $Sf) { $Sf = Read-Host 'Paste the path to your StickFightTheGame folder' }
 
@@ -41,13 +41,13 @@ if (Test-Path $VanillaBak) {
     Copy-Item $VanillaBak $TargetAsm -Force
     Write-Host 'OK  Restored your original Assembly-CSharp.dll.' -ForegroundColor Green
 } else {
-    Write-Host '!!  No ALKA backup found. If the game misbehaves, Steam > Verify integrity of game files.' -ForegroundColor Yellow
+    Write-Host '!!  No backup found. If the game misbehaves, Steam > Verify integrity of game files.' -ForegroundColor Yellow
 }
 
-# 2) Remove ONLY the ALKA plugins. Anything else in /plugins is left alone.
+# 2) Remove ONLY the mod plugins. Anything else in /plugins is left alone.
 foreach ($p in @('SFClientRecon.dll','SFServerBrowser.dll')) {
     $f = Join-Path $Plug $p
-    if (Test-Path $f) { Remove-Item $f -Force; Write-Host ("OK  Removed ALKA plugin {0}" -f $p) -ForegroundColor Green }
+    if (Test-Path $f) { Remove-Item $f -Force; Write-Host ("OK  Removed mod plugin {0}" -f $p) -ForegroundColor Green }
 }
 
 # 3) Restore doorstop if we backed it up.
@@ -57,16 +57,16 @@ if (Test-Path "$doorstop.alka.bak") {
     Write-Host 'OK  Restored doorstop_config.ini.' -ForegroundColor Green
 }
 
-# 4) Remove ALKA-only config files (oracle endpoint + language choice).
+# 4) Remove the mod's config files (oracle endpoint + language choice).
 foreach ($cfg in @('BepInEx\config\sf-oracle-endpoint.txt','BepInEx\config\alka-lang.txt')) {
     $cf = Join-Path $Sf $cfg
     if (Test-Path $cf) { Remove-Item $cf -Force }
 }
 
 # 5) Remove the desktop shortcut.
-$bat = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Jugar-StickFight-ALKA.bat'
+$bat = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Jugar-StickFight.bat'
 if (Test-Path $bat) { Remove-Item $bat -Force }
 
 Write-Host ''
-Write-Host 'Done. Stick Fight is back to how it was before ALKA — your other mods are untouched.' -ForegroundColor Green
-Write-Host 'If you added "-address ..." Steam launch options for ALKA, remove them too.' -ForegroundColor Gray
+Write-Host 'Done. Stick Fight is back to how it was before the mod — your other mods are untouched.' -ForegroundColor Green
+Write-Host 'If you added "-address ..." Steam launch options for the mod, remove them too.' -ForegroundColor Gray

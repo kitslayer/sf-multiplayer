@@ -1,11 +1,11 @@
 <div align="center">
 
-# 🎮 WANNA TEST IT? &nbsp;→&nbsp; [**⬇️ DOWNLOAD HERE**](https://github.com/kitslayer/sf-multiplayer/raw/main/ALKA-KITSLAYER-StickFight-Installer.zip) &nbsp;←
+# 🎮 WANNA TEST IT? &nbsp;→&nbsp; [**⬇️ DOWNLOAD HERE**](https://github.com/kitslayer/sf-multiplayer/raw/main/sf-multiplayer-StickFight-Installer.zip) &nbsp;←
 
-### [**`⬇️  ALKA-KITSLAYER 1-Click Installer (.zip)`**](https://github.com/kitslayer/sf-multiplayer/raw/main/ALKA-KITSLAYER-StickFight-Installer.zip)
+### [**`⬇️  sf-multiplayer 1-Click Installer (.zip)`**](https://github.com/kitslayer/sf-multiplayer/raw/main/sf-multiplayer-StickFight-Installer.zip)
 
-Self-contained — BepInEx + the ALKA plugins + patched `Assembly-CSharp` are **all inside**.
-Unzip → run **`INSTALAR-ALKA-KITSLAYER.bat`** → launch Stick Fight. That's it.
+Self-contained — BepInEx + the client plugins + patched `Assembly-CSharp` are **all inside**.
+Unzip → run **`INSTALAR-sf-multiplayer.bat`** → launch Stick Fight. That's it.
 
 `SFClientRecon 0.4.0` · `SFServerBrowser 0.3.0` · native uGUI lobby (**F2**) · smooth crates
 
@@ -13,11 +13,11 @@ Unzip → run **`INSTALAR-ALKA-KITSLAYER.bat`** → launch Stick Fight. That's i
 
 ---
 
-# ALKA Online — Stick Fight: The Game dedicated server
+# sf-multiplayer — Stick Fight: The Game dedicated server
 
 **A community project** to kill **Stick Fight's peer-to-peer host model** and replace it with a real **dedicated, server-authoritative** backend — so matches stop rubber-banding, surviving a host's connection drop, and showing each player a different physics simulation.
 
-In stock Stick Fight one of the players *is* the host: their PC runs the match, everyone else relays through them, and if they lag or leave, the lobby dies and the simulation diverges. **ALKA Online removes that.** A headless copy of the game runs the match on a dedicated server (the "oracle"); every player is just a client. The result is lower, *consistent* lag, no host-migration drops, and both screens converging on the **same** authoritative world.
+In stock Stick Fight one of the players *is* the host: their PC runs the match, everyone else relays through them, and if they lag or leave, the lobby dies and the simulation diverges. **sf-multiplayer removes that.** A headless copy of the game runs the match on a dedicated server (the "oracle"); every player is just a client. The result is lower, *consistent* lag, no host-migration drops, and both screens converging on the **same** authoritative world.
 
 > **What it gives you**
 > - 🛰️ **Dedicated server, no P2P host** — the match lives on the oracle, not on a player's PC.
@@ -26,14 +26,14 @@ In stock Stick Fight one of the players *is* the host: their PC runs the match, 
 > - 📉 **Less lag, more in-sync** — 60 Hz client input, 30 Hz authoritative snapshots, uncapped FPS, client-local crate physics for smoothness.
 > - 🧩 **Multi-lobby** — one server runs many isolated matches at once; a single-port UDP router fronts them all.
 
-## ✨ Features (the ALKA client mod)
+## ✨ Features (the client mod)
 
 Everything below ships in the **1-click installer** above — drop it on any Steam copy of Stick Fight and you're online.
 
 | Feature | What it does |
 |---|---|
 | **Dedicated-server client** (`SFClientRecon`) | Connects to the oracle instead of a P2P host; runs client prediction + server reconciliation; uncaps FPS. |
-| **In-game lobby & server browser** | Press **F2** for the native ALKA lobby (BROWSE / JOIN by code / CREATE / SETTINGS), or use the "PLAY ONLINE" menu button. Auto-finds the server from your `-address`. |
+| **In-game lobby & server browser** | Press **F2** for the native in-game lobby (BROWSE / JOIN by code / CREATE / SETTINGS), or use the "PLAY ONLINE" menu button. Auto-finds the server from your `-address`. |
 | **English + Spanish UI** | English by default; switch to Spanish in the lobby's **SETTINGS** tab (your choice is saved). |
 | **Server-authoritative crates** | Crates push, tip, tumble and fall off edges like vanilla — but driven so both clients agree, without the old rubber-banding. |
 | **Weapon fixes** | Thrown weapons fly clean and never damage the thrower; the throw button never sticks; map weapons register correctly. |
@@ -171,10 +171,10 @@ Issues and PRs welcome.
 
 | Name | Role | Contact |
 |------|------|---------|
-| **ALKA** | **Co-creator — client lead.** Client mod, in-game lobby/GUI, crate & box physics, FPS/netcode work, installer, Windows deploy, live testing & QA. Now also maintains a separate edition for the Spanish-speaking community. | GitHub: [@AlkaPrime12](https://github.com/AlkaPrime12) |
-| **kit** | **Maintainer — server lead.** Dedicated server & VPS oracle, headless host, v26 protocol, single-port relay/router, multi-lobby, monitoring, hosting & deploy. | GitHub: [@kitslayer](https://github.com/kitslayer) |
+| **kit** | **Lead & maintainer.** Dedicated server & VPS oracle, headless host, v26 protocol, single-port relay/router, multi-lobby, monitoring, anti-cheat, hosting & deploy. | GitHub: [@kitslayer](https://github.com/kitslayer) |
+| **ALKA** | **Major early contributor — client side (now departed).** Client mod, in-game lobby/GUI, crate & box physics, FPS uncap, the Windows installer, and live testing & QA. Has since moved on to a separate edition for the Spanish-speaking community. | GitHub: [@AlkaPrime12](https://github.com/AlkaPrime12) |
 
-This repo is maintained by kit — the dedicated server, hosting, and backend. ALKA led the client mod and physics work, and now also maintains a separate edition for the Spanish-speaking community. The split of work is visible in each author's commits — see the [commit history](https://github.com/kitslayer/sf-multiplayer/commits/main).
+This project is led and maintained by kit — the dedicated server, backend, protocol, router, and hosting. ALKA contributed a great deal on the client side early on (the client mod, in-game lobby/GUI, and crate/box physics) before stepping away from this project, and that work is still part of what ships here. The split of work is visible in each author's commits — see the [commit history](https://github.com/kitslayer/sf-multiplayer/commits/main).
 
 Repo: [github.com/kitslayer/sf-multiplayer](https://github.com/kitslayer/sf-multiplayer)
 
@@ -182,7 +182,7 @@ Repo: [github.com/kitslayer/sf-multiplayer](https://github.com/kitslayer/sf-mult
 
 - **JoshuaDoes** ([@JoshuaDoes](https://github.com/JoshuaDoes)) — original [StickFightDev/StickFightDedicatedSrv](https://github.com/StickFightDev/StickFightDedicatedSrv) (dormant since July 2022). This repo started as a fork; the v25 relay + lobby + matchmaking core in [`legacy/StickFightDedicatedSrv/`](legacy/StickFightDedicatedSrv) is from that project.
 - **Landfall Games** — for making Stick Fight in the first place. This is an unofficial community project not affiliated with or endorsed by Landfall.
-- **The SF competitive Discord** — for the ask + the testing.
+- **The SF competitive Discord** ([DSF](https://discord.gg/nrzMBA6XVc)) — for the ask + the testing.
 
 ## License
 
