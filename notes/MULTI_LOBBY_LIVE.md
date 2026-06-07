@@ -1,5 +1,7 @@
 # Multi-lobby — LIVE on .115 (2026-05-31)
 
+> ⚠️ **Historical record (2026-05-31).** Kept for reference; current state in [NEXT_STEPS.md](../NEXT_STEPS.md). (`.115` here is the internal LAN box; players connect to the public server.)
+
 Single-port router + in-game lobbies is **deployed, running, and verified** on the
 `.115` server. This is the result + operations doc for the `sharding` branch work.
 

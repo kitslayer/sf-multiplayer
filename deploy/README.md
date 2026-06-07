@@ -1,6 +1,6 @@
 # `deploy/` — Windows one-click scripts
 
-**Team:** kitslayer + AlkaDev  
+**Maintainer:** kit ([@kitslayer](https://github.com/kitslayer)) — solo  
 **GitHub:** https://github.com/kitslayer/sf-multiplayer
 
 Windows wrappers for the lobby management scripts. The Linux equivalents at the repo root (`launch-lobby.sh`, `stop-all-lobbies.sh`, `list-lobbies.sh`) are the source of truth; these `.bat` files mirror their behavior so Windows users can double-click instead of installing WSL.
@@ -35,8 +35,8 @@ Windows wrappers for the lobby management scripts. The Linux equivalents at the 
    WINEDLLOVERRIDES="winhttp=n,b" %command% -address 127.0.0.1 -port 1337
    ```
 
-## Differences from ALKA's `deploy/*.bat`
+## Why these differ from the early hybrid-Go deploy scripts
 
-ALKA's scripts assume his hybrid Go server + Unity headless model. Ours skip the Go server entirely (Path A — headless SF *is* the server) and only manage the SF instance per lobby. Same one-click experience; simpler stack.
+An earlier parallel effort (ALKA's, since departed) used a hybrid Go server + Unity headless model and shipped its own `deploy/*.bat`. These scripts skip the Go server entirely (Path A — headless SF *is* the server) and only manage the SF instance per lobby. Same one-click experience; simpler stack.
 
 If you need lobby browser / matchmaking on top, run `serve-lobbies.py` (works on Windows via Python) — it exposes `GET /lobbies` from the registry as JSON.

@@ -1,5 +1,7 @@
 # Phase 6.6 — Pickup forwarding + physics-objects investigation
 
+> ⚠️ **Historical (2026-05-22).** Phase design doc. Current state: [NEXT_STEPS.md](../../NEXT_STEPS.md).
+
 **Status:** code shipped 2026-05-22 (`6cc293a`); awaiting live test. Read [`10-PHASE6.5-host-side-gameplay.md`](10-PHASE6.5-host-side-gameplay.md) first.
 
 ## What 6.6 ships

@@ -1,5 +1,7 @@
 # Phase 6.13 — World shards (multi-lobby on one server)
 
+> ⚠️ **Historical (2026-05-23).** Phase design doc. Current state: [NEXT_STEPS.md](../../NEXT_STEPS.md).
+
 **Status:** v1 (multi-process) shipped 2026-05-23. v2 (in-process) is design-only.
 
 ## Two approaches

@@ -1,12 +1,13 @@
-# Live test checklist — post SFBoxFix v0.2.4 + SFHeadlessHost 0.3.9
+# Live test checklist — 2-player smoke test
 
-Two players, oracle VPS `69.53.117.43:1337`. After deploy, confirm log:
+Two players against the live oracle, `69.53.117.43:1337` (game UDP 1337). After a deploy, confirm the plugin booted and isn't throwing — substitute the current plugin version banner for the `grep` pattern:
 
 ```bash
-grep -E 'SFBoxFix v0.2.4|SFHeadlessHost 0.3.9|MONO-FIX|BOX-DIAG' /tmp/sf-oracle-plugin-11337.log | tail -30
+# Replace the version strings with the build you just deployed (see ../README.md for current versions)
+grep -E 'SFHeadlessHost [0-9.]+|MONO-FIX|BOX-DIAG' /tmp/sf-oracle-plugin-11337.log | tail -30
 ```
 
-No sustained spam of `MethodInfo.op_Inequality` in `WriteInputsToRigs`.
+No sustained spam of `MethodInfo.op_Inequality` in `WriteInputsToRigs` (that's the Mono-2.0 reflection landmine — should be guarded).
 
 ## Session checks
 

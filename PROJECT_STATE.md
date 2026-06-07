@@ -75,8 +75,8 @@ Measured resource use: ~600MB RAM, ~50-70% of one vCPU per oracle.
 
 ```
 sf-multiplayer/
-├── sf-headless-host/     ← server plugin source (~5000 lines C#)
-├── sf-client-recon/      ← client plugin source (~1000 lines C#)
+├── sf-headless-host/     ← server plugin source (~6,400 lines C#, + ~1,280 map-terrain helper)
+├── sf-client-recon/      ← client plugin source (~4,200 lines C#)
 ├── deploy/
 │   ├── SFLauncher/       ← Windows GUI source (.NET 8 WinForms)
 │   ├── start-oracle-server.sh

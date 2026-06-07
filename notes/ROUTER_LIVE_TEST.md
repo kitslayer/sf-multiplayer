@@ -1,5 +1,7 @@
 # Single-port router + in-game lobbies — live test runbook
 
+> ⚠️ **Historical record (2026-05).** Kept for reference; current state in [NEXT_STEPS.md](../NEXT_STEPS.md). (Pre-deployment runbook for the `sharding` branch — that work has since merged to `main` and is live.)
+
 Branch `sharding`. Server side (Go router + Python control plane) is unit-tested;
 the client side compiles but needs this live 2-player test. Nothing here is
 deployed to the live oracle yet — this is the runbook to do that + verify.

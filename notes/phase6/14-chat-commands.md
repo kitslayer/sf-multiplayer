@@ -1,5 +1,7 @@
 # Phase 6.15 / 6.20 — Chat-command admin interface
 
+> ⚠️ **Historical (2026-05).** Phase design doc. Current state: [NEXT_STEPS.md](../../NEXT_STEPS.md).
+
 **Status:** v1 shipped (Phase 6.15) + v2 admin/tournament suite shipped (Phase 6.20). Live commands below in [Implemented commands](#implemented-commands).
 
 This started as a design-only doc lifted from ALKA's `docs/MOD_CLIENT.md`; live commands are now documented inline.

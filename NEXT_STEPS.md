@@ -12,11 +12,11 @@ Live server end-to-end. Steam Stick Fight (Windows or Linux/Proton) connects to 
 - Handshake, spawn, auto-load to a Landfall map
 - Weapon pickup / throw / drop forwarded through SF's host-side handlers
 - Death + kill propagation + round advance, full 123-map rotation
-- Box pushing — via the Phase 6.7 *mirror rig* (a kinematic player rig per client that the oracle teleports to the client's reported position so it can collide with `NetworkSyncableObject`s)
+- Box pushing — server-authoritative. The oracle spawns a real authoritative `NetworkPlayer` rig per client (`SpawnAuthoritativePlayersForAllClients`, Phase 6.9) that pushes `NetworkSyncableObject`s on the server's own scene; box/crate positions are broadcast in the 30Hz `WorldStateSnapshot`, and clients run dynamic local NSOs so pushes feel responsive while converging on the server's view. (The old Phase 6.7 *mirror rig* was ripped out — see Phase 6.9 in the roadmap.)
 
-**Known broken / partial / untested-live (as of end-of-session 2026-05-23, commit `39f4c56`):**
+**Known broken / partial / untested-live:**
 
-See [`notes/SESSION_2026-05-23.md`](notes/SESSION_2026-05-23.md) for the full session handoff. Open items to verify on next-session resume:
+See [`notes/SESSION_2026-05-23.md`](notes/SESSION_2026-05-23.md) for the deep session handoff that first logged most of these. Open items still to verify:
 
 - **OPEN-1..OPEN-6** — user-reported bugs from live testing. Some likely fixed by the reverts in `4affabc` (void/lava damage, chains/ice/boxes random break) but UNTESTED on current build. See [`notes/BUGS_BACKLOG.md`](notes/BUGS_BACKLOG.md) "Open — needs verification" section for the test plan.
 - Hard-snap on big divergence — Phase 6.12.2 v1.0 shipped (shift correction) but the >2.5u WARN-log path needs live exercise to confirm threshold is right
@@ -138,58 +138,13 @@ Where we are vs. that target:
 - Client-side smooth interpolation on snapshot apply (Phase 6.11.2)
 - Input prediction replay rollback (Phase 6.12.2)
 
-## v0.2.8 mega-fix (2026-05-24) — cajas, Halloween, conexión
-
-**Cliente (`SFClientRecon` 0.2.8):** `instalar-cliente-oracle.ps1`, auto-connect, relay `ObjectUpdate` cajas empujables, `OnMatchStart` log, solo `SFClientRecon` en plugins (sin `SFHeadlessHost` en PC).
-
-**Oracle (`SFHeadlessHost` 0.2.8):** guard `IsPacketAvailable` (fin ~40k NullRef), skip `ReadyUp` sin clients, `StartCountDown()` real en servidor, `StartMatch` a clientes **5s después** de `MapChange`, keepalive cajas 25s en snapshot.
-
-**Deploy:** `deploy-physics-fix.ps1 -InstallLocal -DeployVps` → `sudo systemctl restart sf-oracle.service`
-
-**Logs esperados:** `[SF] Deferred StartMatch`, `[P6.5] Invoked GameManager.StartCountDown`, `nsos>0` al empujar, `[BOXES] Applied client ObjectUpdate`, cliente `[oracle-lobby] OnMatchStart`.
-
-## v0.2.5 round-2+ fix (2026-05-24d)
-
-- **Map load stuck** — `_oracleMapLoadInProgress` never cleared when Unity did not re-fire scene load → deaths queued forever. Now: queue advance + force-complete at 8s + `FinishOracleMapLoad` always in `finally`
-- **Armas** — `RearmOracleCombatLoop` after `PostMapLoad`; periodic rearm if `inFight` drops
-- **Cajas** — NSO snapshot only **pushable crates** (not all 90 NSOs/tick); fall guard max 2 resets/tick
-- **Init order** — `InitMapDataObjects` before `EnsureMapSyncObjectsRegistered`
-
-## v0.2.4 Factory/Desert fix (2026-05-24c)
-
-- **Mono reflection** — `GetMultiplayerManagerInstance()` uses `(object)` null checks (fixes `mapSync=0` / `mapState=0` on VPS)
-- **map dict** — `ClearMapDataObjects` before re-register each round; skip stale `PostMapLoad` if `buildIndex != _currentSceneIndex`
-- **Sky weapons ronda 2+** — `RearmOracleCombatLoop` on `AdvanceRound` + delayed after `BroadcastStartMatch` (`inFight`, `randomWeaponCounter=2`)
-- **Cajas** — dynamic NSO every snapshot tick; fall guard skips chains + real falls; client NSO smooth 40Hz + snap >0.5m
-- **QA mapas** — `/map 6` … `/map 12` (Factory), Desert con cajas; log `mapSync>0 mapState>0`, `[P6.5 SRW]`, sin `op_Inequality`
-
-## v26.6 terrain + weapons pass (2026-05-24b)
-
-- **mapState** in `WorldStateSnapshot`: `GetData()`/`SetData()` for GhostPlatform on/off, pillars, move-path
-- Oracle registers `MapInfoSyncableBase` in dict + `m_NetworkControl=true`
-- `CheckForGroundWeapons` on match start, scene load, late-join resend (msg 31 cache)
-- Client: crate NSO dynamic locally, quantized map keys, 90Hz input burst on Q/fire
-- Deploy: `deploy-physics-fix.ps1 -InstallLocal -DeployVps` then `jugar-oracle.ps1`
-- Verify log: `mapSync>0 mapState>0` (was `mapSync=0` always)
-
-## Physics / sync pass (2026-05-24)
-
-Shipped in `SFHeadlessHost` + `SFClientRecon` (deploy via `deploy-physics-fix.ps1`):
-
-- **P0-16** — NSO fallthrough guard + spawn cache + 5s keyframe snapshots + client `ObjectUpdate` while pushing crates
-- **P0-11b** — Y-aware server destruction forward (not drop-all)
-- **P0-17** — explosive blast on oracle; faster local ice break; weapons skip NSO lerp
-- Client: `SFCLIENTRECON_NSO_SMOOTH` (default 22), launch via desktop `Jugar Stick Fight Oracle.bat`
-
-Verify on VPS log: `mapSync=N`, `nsos>0` after Desert3 load, `[BOXES] Reset fallthrough` rare/zero.
-
 ## Client patched Assembly-CSharp (imported reference)
 
 Prebuilt client artifacts — the patched `Assembly-CSharp.srv.v25.dll`, `SFClientRecon.dll`, and `SFServerBrowser.dll` — ship in [`dist/`](dist) and are bundled by the [`1-click-install/`](1-click-install) installer. (Earlier notes referenced a `client-mod/` directory that was never committed; these prebuilt DLLs supersede it.)
 
 ## Where to start reading
 
-- [`sf-headless-host/SFHeadlessHost.cs`](sf-headless-host/SFHeadlessHost.cs) — the live plugin (~3300 lines). Key entry points: `Awake()` (Harmony patches), `HandleClientRequestingToSpawn`, `HandlePlayerUpdate`, `SpawnMirrorRigsForAllClients`, `TrySpawnPlayer`
+- [`sf-headless-host/SFHeadlessHost.cs`](sf-headless-host/SFHeadlessHost.cs) — the live plugin (~6,400 lines; map-terrain helper in [`sf-headless-host/SfMapTerrainHost.cs`](sf-headless-host/SfMapTerrainHost.cs), ~1,280). Key entry points: `Awake()` (installs the Harmony patches), `SfDispatch` (inbound v25/v26 packet router), `HandlePlayerInput` (v26 `PktPlayerInput`), `HandlePlayerUpdate` (v25 position relay), `SpawnAuthoritativePlayersForAllClients` / `TrySpawnPlayer` / `ConfigureAuthoritativeRig` (server-authoritative rigs), `BuildWorldStateBody` (30Hz snapshot serializer), `TickProjectiles` (server-side projectile sim + hit reg)
 - [`notes/phase6/10-PHASE6.5-host-side-gameplay.md`](notes/phase6/10-PHASE6.5-host-side-gameplay.md) — current host-side patch set + rationale
 - [`notes/phase6/11-PHASE6.6-pickup-and-physics.md`](notes/phase6/11-PHASE6.6-pickup-and-physics.md) — pickup forwarding + diagnosis of why boxes initially didn't move
 - [`refs/decompiled/Assembly-CSharp/MultiplayerManager.cs`](refs/) — host-side dispatcher

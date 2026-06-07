@@ -16,7 +16,7 @@ Every packet, in either direction:
 Total = 5 (prefix) + N (body) + 9 (suffix) = **N + 14**. Minimum packet = 14 bytes (zero-body).
 
 - `u32 timestamp` — seconds since Unix epoch. Cosmetic in current impl, not used for ordering.
-- `u8 msgType` — packet type ID. Stock SF defines 0..38 (`P2PPackageHandler.MsgType`). Kit's patched DLL extends with 56/57. Our v26 protocol adds 39/40.
+- `u8 msgType` — packet type ID. Stock SF defines 0..38 (`P2PPackageHandler.MsgType`). Kit's patched DLL extends with 56/57. Our v26 protocol adds 39/40/41/42.
 - `body` — type-specific payload.
 - `u64 steamID` — sender's SteamID (Goldberg fake or real Steam). Used by the server to identify who's talking. v26 server-emitted packets use `0`.
 - `u8 channel` — Unity event channel. Stock SF uses 0/1 for general traffic, NSO updates on channel 10, weapon throw on `slot*2 + 3`, player talk on `slot*2 + 3`.
@@ -80,13 +80,16 @@ Total = 5 (prefix) + N (body) + 9 (suffix) = **N + 14**. Minimum packet = 14 byt
 | v26.1 | + NSO section | Phase 6.14 |
 | v26.2 | + `lastInputSeq` per player | Phase 6.12.2 prep |
 | v26.3 | + projectile section + kinematic NSO position-delta detection | Phase 6.14.1 + 6.17 |
-| v26.5 | + MapInfoSyncable section (server-authoritative platform / pillar positions) | Phase 6.19 (P0-14 fix) |
+| v26.5 | + MapInfoSyncable position section (server-authoritative platform / pillar positions) | Phase 6.19 (P0-14 fix) |
+| v26.6 | + MapInfoSyncable state section (`GetData()` payloads — GhostPlatform on/off, etc.) | terrain + weapons pass |
 
-## v26 extensions (this repo, added 2026-05-23)
+**Current snapshot wire version is v26.6.** Ground truth is `BuildWorldStateBody` in `../sf-headless-host/SFHeadlessHost.cs` (the single place the layout lives — both the periodic broadcast and the per-endpoint keyframe build through it). The two map sections (v26.5 positions + v26.6 state) are serialized in `WriteMapStateSection` / `MapStateSectionByteLen` in `../sf-headless-host/SfMapTerrainHost.cs`.
+
+## v26 extensions (this repo)
 
 ### msgType 39 — `WorldStateSnapshot` (server → all clients, 30Hz)
 
-Current format is v26.3 (after Phase 6.17 added projectile section). Backward-incompatible with earlier client builds.
+Current format is **v26.6**. Backward-incompatible with earlier client builds — older `SFClientRecon.dll` will misparse the trailing sections.
 
 ```
 u32 serverTick (LE)
@@ -112,12 +115,27 @@ for each projectile (18 bytes):
   f32 posX (LE)
   f32 posY (LE)
   f32 posZ (LE)
+u16 mapSyncCount (LE)                                                 (v26.5 + — MapInfoSyncableBase positions)
+for each mapSync entry (20 bytes):
+  f32 startX (LE)           -- m_StartPos.x; the cross-process key (quantized 0.01 by P0-12)
+  f32 startY (LE)           -- m_StartPos.y
+  f32 posX (LE)             -- current transform.position
+  f32 posY (LE)
+  f32 posZ (LE)
+u16 mapStateCount (LE)                                                (v26.6 + — MapInfoSyncableBase GetData payloads)
+for each mapState entry (9 + dataLen bytes):
+  f32 startX (LE)           -- same Vector2 key as mapSync
+  f32 startY (LE)
+  u8  dataLen               -- length of the GetData() payload (capped at MapStateMaxPayload)
+  dataLen bytes             -- type-specific state (e.g. GhostPlatform isOn = 1 byte)
 ```
 
 - Sent to each spawned client's recorded v26 endpoint (discovered from their PlayerInput source addr).
-- NSO entries are included for: dynamic bodies with non-zero velocity, kinematic bodies whose position changed since last snapshot (Phase 6.14.1 moving platforms), and 1s keepalive after motion stops. Static crates skip.
-- Snapshot only fires when `_matchStarted == true` and at least one client is connected.
-- Total typical size: 4 players × 17 + 50 NSOs × 18 + headers + projectile section ≈ 1 KB.
+- NSO entries are included for: dynamic bodies with non-zero velocity, kinematic bodies whose position changed since last snapshot (Phase 6.14.1 moving platforms), and 1s keepalive after motion stops. Static crates skip. Weapon NSO roots are excluded. The Y > -30 filter drops killbox-fallen NSOs.
+- `mapSync` entries are keyed by the object's `m_StartPos` Vector2 (NOT `transform.GetInstanceID()` — Unity assigns instance IDs per-process, so they never match across server/client). P0-12 quantizes that Vector2 to 0.01 on both sides so the keys are stable cross-process.
+- Snapshot fires when there is something to send (any player rig, NSO, or map entry) and at least one v26 endpoint is known.
+- A full keyframe (all NSOs + map entries, no delta filter) is sent once to each newly-seen v26 endpoint, and a periodic full NSO keyframe is sent every ~5s.
+- Total typical size: 4 players × 17 + 50 NSOs × 18 + projectile + map sections + headers ≈ 1 KB.
 
 ### msgType 40 — `PlayerInput` (client → server, up to 60Hz)
 
@@ -155,6 +173,16 @@ f32 speed                   (units/sec; 0 → server uses default 60 u/s)
 - Total body = 30 bytes.
 - Only emitted for local player (HasControl=true on the parent Controller).
 
+### msgType 42 — `V26Announce` (server → all clients, event-driven)
+
+Server-emitted banner text the `SFClientRecon` plugin draws on-screen for ~3 seconds (e.g. lobby welcome / status notices).
+
+```
+N bytes  UTF-8 banner text (raw, no length prefix — body length comes from the packet)
+```
+
+- v25 envelope `steamID` is `0`.
+
 ## Channel encoding
 
 The `u8 channel` byte at the end of the envelope has gameplay meaning for some msgTypes. **Ground truth is `P2PPackageHandler.GetChannelForMsgType` (`refs/decompiled/Assembly-CSharp/P2PPackageHandler.cs:310-344`)** — copy of stock SF's per-msgType routing, reproduced here verbatim:
@@ -183,7 +211,6 @@ So any of the channel-0 or channel-1 msgTypes will be dispatched regardless of w
 
 | ID | Tentative name | Status |
 |----|----------------|--------|
-| 42 | ServerEvent (reliable event channel) | Reserved — for damage events, kill confirms, etc. when we move off PlayerTookDamage |
 | 43 | ClientHello (with v26 capabilities) | Reserved — pre-handshake to advertise plugin version |
 | 44 | ServerStatus (heartbeat + lobby info) | Reserved — for in-band lobby browser without HTTP |
 
@@ -212,9 +239,9 @@ until snapshots flow, so loss of the unreliable control datagram self-heals.
 
 ## Compatibility
 
-- v25 stock clients: handle 0..38. Receive but ignore 39/40/56/57.
-- v25 patched clients (kit's DLL): handle 0..38 + 56/57. Receive but ignore 39/40.
+- v25 stock clients: handle 0..38. Receive but ignore 39/40/41/42/56/57.
+- v25 patched clients (kit's DLL): handle 0..38 + 56/57. Receive but ignore 39/40/41/42.
 - v26 clients (with `SFClientRecon.dll`): handle all of the above.
-- v26 server (our oracle): emits 39, accepts 40, relays 56/57.
+- v26 server (our oracle): emits 39 + 42, accepts 40 + 41, relays 56/57.
 
-The wire-format bump at v26.2 (lastInputSeq added to per-player snapshot entry) requires matched plugin builds on both sides — older `SFClientRecon.dll` will misparse the snapshot.
+The snapshot wire format (msgType 39) must match between oracle and `SFClientRecon.dll` — each version bump (v26.2 added `lastInputSeq`; v26.5/v26.6 added the two map sections) appends to the body, so an older client misparses the new trailing fields. Keep both DLLs on the same build.

@@ -1,8 +1,10 @@
 # sf-router — single-port multi-lobby front-door
 
-**Branch:** `sharding`. **Status:** server side (Stage 0 + 1) implemented +
-unit-tested; client side (Stages 2/3/5) and the lifecycle control plane
-(Stage 4) in progress. Full plan: `~/.claude/plans/iterative-sparking-pascal.md`.
+**Status:** merged to `main` and deployed live on the server. Server side
+(router + flow table + reaper) and the client side (recon-socket SELECT + the
+in-game lobby browser) ship together; the lifecycle control plane is the
+`serve-lobbies.py` registry + reaper. `go test ./... -race` green. (The original
+build plan lived at `~/.claude/plans/iterative-sparking-pascal.md`.)
 
 ## Why
 

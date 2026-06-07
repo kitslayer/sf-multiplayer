@@ -1,10 +1,10 @@
 # Architecture — sf-multiplayer (Path A, server-authoritative)
 
-The whole system in one place. As of 2026-05-23 evening.
+The whole system in one place. This is a living reference doc — kept current; for the latest shipped/in-flight status see [`../NEXT_STEPS.md`](../NEXT_STEPS.md).
 
 ## One-paragraph summary
 
-A real Stick Fight Unity binary runs headlessly on the server, with a BepInEx plugin (`SFHeadlessHost.dll`) that turns it into a v25 UDP dedicated server. Real Stick Fight clients (Windows native or Linux/Proton) speak SF's stock v25 protocol to the oracle directly. A small companion plugin (`SFClientRecon.dll`) on each player's machine handles v26 extensions (snapshots, prediction inputs, divergence detection). The oracle is the sole authority for player positions, NSO physics (boxes/chains/ice), and weapon spawning — clients render what the oracle tells them.
+A real Stick Fight Unity binary runs headlessly on the server, with a BepInEx plugin (`SFHeadlessHost.dll`) that turns it into a v25 UDP dedicated server. Real Stick Fight clients (Windows native or Linux/Proton) speak SF's stock v25 protocol to the oracle directly. A companion plugin (`SFClientRecon.dll`) on each player's machine handles v26 extensions (snapshots, prediction inputs, divergence detection); the in-game lobby browser is a separate plugin (`SFServerBrowser.dll`). The oracle is the sole authority for player positions, NSO physics (boxes/chains/ice), and weapon spawning — clients render what the oracle tells them. The legacy Go dedicated server (`sfdsrv` / `StickFightDedicatedSrv`) is abandoned and parked in `../legacy/`; this headless-host design replaced it.
 
 ## Component overview
 
@@ -140,13 +140,14 @@ Every packet:
 | 10 | NSO updates — **ObjectUpdate** (26), `SyncableObjectManager.ListenForPackages` |
 | 11 | NSO destruction — **ObjectDestructionCollision** (30) |
 
-**v26 extensions** (this repo, msgType 39+):
+**v26 extensions** (this repo, msgType 39+). Current snapshot wire version is **v26.6**; full byte layout in [`PROTOCOL.md`](PROTOCOL.md):
 
 | ID | Direction | Body shape | Purpose |
 |----|-----------|------------|---------|
-| 39 | server → all clients, 30Hz | `u32 tick, u8 nPlayers, [u8 slot, f32 x, f32 y, f32 z, u32 lastInputSeq]×n, u16 nNSOs, [u16 id, f32 x, f32 y, f32 z, f32 rotZ]×m, u16 nProjs, [u32 id, u8 slot, u8 wType, f32 x, f32 y, f32 z]×k` | Authoritative state snapshot |
-| 40 | client → server, 60Hz | `u32 seq, u8 slot, f32 stickX, f32 stickY, f32 aimX, f32 aimY, u32 buttons` | Player input for prediction+reconciliation |
-| 41 | client → server, event | `u8 slot, u8 wType, f32 oX, f32 oY, f32 oZ, f32 dX, f32 dY, f32 dZ, f32 speed` | Local Weapon.ActuallyShoot — server registers projectile |
+| 39 | server → all clients, 30Hz | `u32 tick, u8 nPlayers, [u8 slot, f32 x, f32 y, f32 z, u32 lastInputSeq]×n, u16 nNSOs, [u16 id, f32 x, f32 y, f32 z, f32 rotZ]×m, u16 nProjs, [u32 id, u8 slot, u8 wType, f32 x, f32 y, f32 z]×k, u16 nMapSync, [f32 startX, f32 startY, f32 x, f32 y, f32 z]×p, u16 nMapState, [f32 startX, f32 startY, u8 dataLen, dataLen bytes]×q` | Authoritative state snapshot. `WorldStateSnapshot`. The mapSync section (v26.5) carries `MapInfoSyncableBase` *positions* keyed by their `m_StartPos` Vector2; the mapState section (v26.6) carries their `GetData()` payloads (e.g. GhostPlatform on/off). |
+| 40 | client → server, 60Hz | `u32 seq, u8 slot, f32 stickX, f32 stickY, f32 aimX, f32 aimY, u32 buttons` | `PktPlayerInput` — player input for prediction+reconciliation |
+| 41 | client → server, event | `u8 slot, u8 wType, f32 oX, f32 oY, f32 oZ, f32 dX, f32 dY, f32 dZ, f32 speed` | `PktClientFireWeapon` — local Weapon.ActuallyShoot; server registers projectile |
+| 42 | server → all clients, event | UTF-8 banner text | `PktV26Announce` — recon plugin draws it for ~3s |
 
 ## Authority model (current)
 
@@ -269,11 +270,17 @@ DAMAGE TICK HISTORY (Phase 6.14.5)
 ```
 sf-multiplayer/
 ├── sf-headless-host/         BepInEx plugin loaded on the oracle headless SF
-│   ├── SFHeadlessHost.cs     ~3500 lines: protocol, dispatch, snapshots, chat, anticheat
+│   ├── SFHeadlessHost.cs     ~6,400 lines: protocol, dispatch, snapshots, chat, anticheat
+│   ├── SfMapTerrainHost.cs   ~1,280 lines: MapInfoSyncableBase authority + map-state snapshot
 │   └── SFHeadlessHost.csproj
 ├── sf-client-recon/          BepInEx plugin loaded on each player's SF install
-│   ├── SFClientRecon.cs      ~500 lines: snapshot RX, input TX, smoothing, divergence detect
-│   └── SFClientRecon.csproj
+│   ├── SFClientRecon.cs      snapshot RX, input TX, smoothing, divergence detect
+│   ├── SfMapTerrainClient.cs map-object apply (mapSync/mapState)
+│   └── *.cs                  ~4,200 lines total across the plugin
+├── sf-server-browser/        BepInEx plugin: in-game lobby browser + scoreboard (uGUI/IMGUI)
+│   └── *.cs                  ~2,500 lines total
+├── sf-router/                Single-port UDP router (Go), ~1,450 lines incl. tests
+│   └── *.go
 ├── launch-sf-headless.sh     Single-oracle launcher (Proton + batchmode)
 ├── launch-lobby.sh           Multi-lobby manager: spawn oracle, alloc port, write registry
 ├── stop-lobby.sh             Tear down one lobby by code
@@ -288,9 +295,11 @@ sf-multiplayer/
 ├── maps/                     123 Landfall scene JSON dumps (geometry, spawns, killboxes)
 ├── refs/                     Decompiled Assembly-CSharp.cs (~358 .cs files, not committed)
 ├── notes/
+│   ├── README.md            Index + read-order for these docs
 │   ├── ARCHITECTURE.md       This file
 │   ├── PROTOCOL.md           Wire format spec
-│   ├── VPS.md                Deployment guide
+│   ├── OBJECT_SYNC.md        NSO / MapInfoSyncableBase / DestructiblePiece reference
+│   ├── VPS.md / DEPLOY.md    Deployment guides
 │   ├── BUGS_BACKLOG.md       Incident log (every bug we hit + fix shipped)
 │   ├── recon/                Reverse-engineering notes from earlier phases
 │   └── phase6/               Phase-by-phase design + status docs

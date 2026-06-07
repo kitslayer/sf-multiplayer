@@ -2,6 +2,8 @@
 
 The Phase 6 oracle is a headless Stick Fight instance running under Proton with our BepInEx plugin loaded. Below is the canonical setup for a fresh Linux server (Ubuntu 22.04 / 24.04 tested; should work on most modern distros with a working Wine ABI).
 
+> `SERVER` below is a placeholder for your VPS host. The live deployment is `69.53.117.43` (player connect: game UDP **1337** via the [`sf-router`](ROUTER.md), lobby browser TCP **8080**). With the router in front, players reach every lobby through the single public UDP port 1337 — the per-lobby `1337+N` ports in the multi-lobby section below are the router's loopback backends, not separate public ports.
+
 ## Target: a Linux VPS with…
 
 - 4+ GB RAM (per oracle ~600 MB; comfortable host = 4 GB + 600 MB × N lobbies)

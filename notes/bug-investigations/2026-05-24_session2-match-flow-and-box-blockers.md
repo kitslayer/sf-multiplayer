@@ -79,6 +79,8 @@ Until this is resolved, no client-side box-physics tweak can produce vanilla-fee
 
 ### Open B — Auth player rig cleared on `AdvanceRound`, never re-spawned
 
+*(Update 2026-06-06: resolved — chain re-arms on round advance.)*
+
 **Evidence:**
 ```
 [P6.9] Spawned authoritative rig for client slot=0 steamID=…   (round 1)

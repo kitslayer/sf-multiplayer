@@ -1,5 +1,7 @@
 # Spawn flow — line-by-line walk
 
+> ⚠️ **Historical record (2026-05).** Describes the abandoned Go `sfdsrv`/`StickFightDedicatedSrv` server (now in [`legacy/`](../../legacy)); not the current BepInEx/Harmony headless host. Kept for reference; current state in [NEXT_STEPS.md](../../NEXT_STEPS.md).
+
 Annotated trace of what happens between "ChangeMap finishes" and "player is on the new map with their HP." This is the critical path for the 3-second-match-cycle bug.
 
 ## Step 1 — Server broadcasts MapChange

@@ -1,5 +1,7 @@
 # Phase 6.5 — Host-side gameplay on the oracle
 
+> ⚠️ **Historical (2026-05-22).** Phase design doc. Current state: [NEXT_STEPS.md](../../NEXT_STEPS.md).
+
 **Status:** ✅ Weapon spawning works end-to-end as of 2026-05-22 (commit `4bf87cc`, hardened in `d4807fc`).
 
 **One-line summary:** the BepInEx plugin `SFHeadlessHost.dll` makes the headless Stick Fight process *think* it's a multiplayer host, so SF's own gameplay code (weapon spawn timer, killboxes, hit detection) runs server-authoritatively. The plugin intercepts SF's host broadcasts and forwards them through our own v25 UDP socket to real clients.

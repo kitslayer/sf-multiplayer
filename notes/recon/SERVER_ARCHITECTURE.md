@@ -1,5 +1,7 @@
 # StickFightDedicatedSrv — current architecture (as of 2026-05-21)
 
+> ⚠️ **Historical record (2026-05-21).** Describes the now-abandoned Go `sfdsrv`/`StickFightDedicatedSrv` server (now in [`legacy/`](../../legacy)); not the current BepInEx/Harmony headless host. Kept for reference; current state in [NEXT_STEPS.md](../../NEXT_STEPS.md).
+
 Distilled from a read of all `.go` files under `~/sf-multiplayer/StickFightDedicatedSrv/` on the dev laptop. Treat as a quick orientation map for the next session; the source code is the ground truth.
 
 ## Process model

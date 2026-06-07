@@ -1,5 +1,7 @@
 # Other bugs / oddities noticed while diagnosing the headline issue
 
+> ⚠️ **Historical record (2026-05).** All findings below concern the abandoned Go `sfdsrv`/`StickFightDedicatedSrv` server (now in [`legacy/`](../../legacy)); not the current BepInEx/Harmony headless host. Kept for reference; current state in [NEXT_STEPS.md](../../NEXT_STEPS.md).
+
 Not the 3-second-cycle root cause, but worth recording.
 
 ## 1. Killbox arrays empty in every dumped map JSON

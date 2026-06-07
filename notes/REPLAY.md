@@ -1,5 +1,7 @@
 # Match replay system (Tier-2, full-pose) — design + format spec
 
+> ⚠️ **Historical record (2026-05).** Kept for reference; current state in [NEXT_STEPS.md](../NEXT_STEPS.md). (Unbuilt design proposal; references to coordinating with ALKA predate ALKA's departure.)
+
 **Status:** design (branch `feature/replay`). Goal: record every match centrally
 and play it back with **perfect forward / backward / slow-mo / scrub** and full
 posed stick-figure fidelity.

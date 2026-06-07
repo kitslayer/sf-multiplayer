@@ -9,7 +9,7 @@ Stock SF has **three** separate sync mechanisms for non-player world state. Most
 | Mechanism | Used by | Wire | Authority |
 |---|---|---|---|
 | **NetworkSyncableObject** (NSO) | Boxes, crates, ice, chains, ragdolls, any free-moving prop | `ObjectUpdate` (26) channel 10 5Hz, plus our v26 `WorldStateSnapshot` 30Hz | The instance with `mHasControl=true` (static field — see Finding 6 in AUDIT_2026-05-23.md) |
-| **MapInfoSyncableBase** | `GhostPlatform`, `MoveAlongPathUsingForce`, `PillarHandler`, `PlayMoveAnimations` | `MapInfoSync` (33) channel 0 5Hz | The host (`IsServer && IsNetworkMatch`) |
+| **MapInfoSyncableBase** | `GhostPlatform`, `MoveAlongPathUsingForce`, `PillarHandler`, `PlayMoveAnimations` | stock `MapInfoSync` (33) channel 0 5Hz, **plus** our v26 `WorldStateSnapshot` mapSync (positions, v26.5) + mapState (`GetData()` payloads, v26.6) sections at 30Hz | The host (`IsServer && IsNetworkMatch`) |
 | **DestructiblePiece** events | Anything destructible (riding on top of either of the above) | `ObjectSimpleDestruction` (28) / `ObjectInvokeDestructionEvent` (29) / `ObjectDestructionCollision` (30) channel 11 event-driven | Whichever side detected the breaking collision |
 
 ## NetworkSyncableObject (NSO)
@@ -88,10 +88,10 @@ A separate sync system that pre-dates the NSO architecture (or developed in para
 - Not investigated in detail. Probably plays an Animator at a synced state.
 
 ### Known issues
-- **P0-12** — Vector2 key precision can cause silent lookup failure on clients
-- **P0-14** (HIGH severity) — `MoveAlongPathUsingForce` and `PillarHandler` drift across clients
+- **P0-12** (FIXED) — Vector2 key precision could cause silent lookup failure on clients; both sides now quantize the key to 0.01.
+- **P0-14** (FIXED) — `MoveAlongPathUsingForce` and `PillarHandler` drifted across clients; now server-authoritative.
 
-See `BUGS_BACKLOG.md`. The architecturally clean fix is to bypass `MapInfoSync` entirely for these objects and broadcast their positions via v26 `WorldStateSnapshot` (new section keyed by `transform.GetInstanceID()`).
+See `BUGS_BACKLOG.md`. **The fix shipped** (v26.5 + v26.6): the oracle broadcasts each `MapInfoSyncableBase`'s position (mapSync section) and `GetData()` state (mapState section) inside the v26 `WorldStateSnapshot`, and the client applies them. The snapshot keys these objects by their `m_StartPos` **Vector2** (the same key stock SF's `MapInfoSync` uses, quantized by P0-12) — **not** `transform.GetInstanceID()`, because Unity assigns instance IDs per-process so they never match across server and client.
 
 ## DestructiblePiece events
 
@@ -125,13 +125,13 @@ Riding on top of either NSO (boxes, ice) or non-NSO objects, `DestructiblePiece`
 | Ice randomly breaks for no reason | DestructiblePiece | P0-15 (lerp-collision) or P0-11 (filter masking real break) |
 | Box "vanishes" on one client only | DestructiblePiece | P0-11 (server-originated destruction filter eating real event) |
 | Chain swings differently per client | NSO (positional) or DestructiblePiece (visual) | Usually fine — chains tend to settle |
-| Moving platform at different position per client | MapInfoSyncableBase (`MoveAlongPathUsingForce`) | P0-14 (local physics drift) — needs v26 snapshot section |
-| Pressure pillar at different height per client | MapInfoSyncableBase (`PillarHandler`) | P0-14 (spring integrator drift) |
+| Moving platform at different position per client | MapInfoSyncableBase (`MoveAlongPathUsingForce`) | P0-14 (FIXED — now in v26.5/v26.6 mapSync/mapState snapshot); if still drifting, check the object is being collected + the Vector2 key matches |
+| Pressure pillar at different height per client | MapInfoSyncableBase (`PillarHandler`) | P0-14 (FIXED — server-authoritative via snapshot) |
 | Flickering platform on/off out of sync | MapInfoSyncableBase (`GhostPlatform`) | P0-12 (Vector2 key precision failure) |
 | Workshop map object behaves weirdly | depends on what the prefab is | Identify base class via decompile first |
 
 ## Open architectural questions
 
 1. **Is `m_HardSync` worth promoting?** Setting NSOs as `m_HardSync` skips the kinematic-on-client step. Combined with our outbound snapshot, this might be a cleaner pathway than the current `SkipPrefix` blanket-skip.
-2. **Should MapInfoSyncableBase fold into the v26 snapshot?** Yes — see P0-14. The protocol bump (v26.5) is small (one new section); the implementation is identical in shape to the existing NSO section.
+2. ~~**Should MapInfoSyncableBase fold into the v26 snapshot?**~~ **DONE** (v26.5 positions + v26.6 state). Keyed by `m_StartPos` Vector2, not `transform.GetInstanceID()` (per-process IDs don't match cross-machine). See the MapInfoSyncableBase "Known issues" above.
 3. **Are there other `MapInfoSyncableBase`-derived classes I haven't catalogued?** Search returned 4 (`GhostPlatform`, `MoveAlongPathUsingForce`, `PillarHandler`, `PlayMoveAnimations`). Need to verify by checking every map JSON for unrecognized GameObject types.

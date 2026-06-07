@@ -143,7 +143,7 @@ Our oracle replaces three vanilla SF mechanisms (force-sync, layer-flip kill, le
 2. **Layer-flip kill** is minor — just exclude `IgnorePlayerWhenOffScreen`-having NSOs from `TickNsoFallGuard`.
 3. **Level-editor tag** is a forward-looking concern for workshop map support.
 
-Each of these merits a TODO entry in [`../NEXT_STEPS.md`](../NEXT_STEPS.md) or a follow-up commit — none are blocking the current scope but all are real gaps vs. vanilla-quality reproduction.
+Each of these merits a TODO entry in [`NEXT_STEPS.md`](../../NEXT_STEPS.md) or a follow-up commit — none are blocking the current scope but all are real gaps vs. vanilla-quality reproduction.
 
 ## Methodology / how to repro
 

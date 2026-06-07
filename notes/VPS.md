@@ -1,6 +1,8 @@
 # VPS deployment guide
 
-How to host an sf-multiplayer Path A server on a Linux VPS. Mirrors what ALKA's `docs/VPS.md` does for his hybrid architecture, but for our single-Unity-process model.
+How to host an sf-multiplayer Path A server on a Linux VPS — the single-Unity-process headless-host model. (See also [`DEPLOY.md`](DEPLOY.md) for the systemd-unit + rsync update runbook.)
+
+> The live player-facing server is `69.53.117.43` (game UDP 1337, lobby browser TCP 8080). Substitute that, or your own VPS's public IP, wherever a placeholder like `<vps-public-ip>` / `SERVER` appears below.
 
 ## What's needed
 
@@ -126,9 +128,10 @@ A simple `journalctl -u 'sf-lobby@*' -f` works if you used systemd.
 
 ## Known limits (Path A v1)
 
-- One oracle per lobby (no in-process sharding yet — see [`notes/phase6/12-PHASE6.13-sharding.md`](phase6/12-PHASE6.13-sharding.md))
-- No web-based lobby browser yet. Players need to know the lobby's port out-of-band (Discord, server browser plugin coming).
+- One oracle per lobby (no in-process sharding yet — see [`phase6/12-PHASE6.13-sharding.md`](phase6/12-PHASE6.13-sharding.md)). Multi-process multi-lobby is shipped + live.
 - No workshop-map support (only the 123 pre-dumped Landfall scenes).
+
+The lobby browser shipped: `serve-lobbies.py` exposes the registry over HTTP (TCP 8080) and the in-game `SFServerBrowser` plugin (F2) reads it, and `sf-router` (UDP 1337) fronts every lobby on one public port so players no longer need a per-lobby port out-of-band. See [`ROUTER.md`](ROUTER.md) + [`MULTI_LOBBY_LIVE.md`](MULTI_LOBBY_LIVE.md).
 
 ## When something breaks
 

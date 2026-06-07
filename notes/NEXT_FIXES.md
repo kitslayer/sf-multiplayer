@@ -1,5 +1,14 @@
 # Next fixes — prioritized
 
+> **HISTORICAL (2026-05-23) — all five fixes below have since shipped or been superseded.** This was the recommended fix order right after the 2026-05-23 audit found five open P0 bugs. Status as of now (cross-check [`BUGS_BACKLOG.md`](BUGS_BACKLOG.md) + [`../NEXT_STEPS.md`](../NEXT_STEPS.md), which are the source of truth):
+> - **P0-15** (destruction guard) — shipped; the dynamic-NSO revert in `4affabc` also made it largely moot (kinematic NSOs don't fire NSO-on-NSO collisions).
+> - **P0-11** (Y-aware destruction filter) — the Y-aware version forwarded chain stress-breaks and was **reverted** (`4affabc`); back to drop-all of server-originated 28/29/30. See P0-11b.
+> - **P0-13** (keyframe to new endpoints) — shipped.
+> - **P0-12** (quantize MapInfoSync Vector2 keys) — shipped.
+> - **P0-14** (MapInfoSyncable in the snapshot) — shipped as **v26.5 (positions) + v26.6 (state)**. NOTE: the on-the-wire entry below was the *proposal*; the shipped format differs (see the corrected box in section 5).
+>
+> Keep this file for the reasoning/fix-shapes; don't treat it as a live TODO.
+
 After the 2026-05-23 audit found five open P0 bugs, this is the recommended fix order. Each entry is small enough to ship in one session and either fully fixes the issue or makes meaningful progress.
 
 The findings are documented in [`AUDIT_2026-05-23.md`](AUDIT_2026-05-23.md); root causes are listed in [`BUGS_BACKLOG.md`](BUGS_BACKLOG.md). This doc is the "what to do" companion to those "what's wrong" docs.
@@ -102,18 +111,34 @@ static Vector2 QuantizeKey(Vector2 v) =>
 
 **Cause**: stock SF only syncs abstract state (waypoint index, value); every client integrates physics locally with non-deterministic results. Detail in `AUDIT_2026-05-23.md` Finding 3a.
 
-**Fix shape**: server-authoritative position broadcast. Extend v26 `WorldStateSnapshot` with a new section after the projectile section:
+**Fix shape**: server-authoritative position broadcast. Extend v26 `WorldStateSnapshot` with a new section after the projectile section.
+
+> **As shipped (corrected — see PROTOCOL.md for the canonical layout):** the entry is keyed by the object's `m_StartPos` **Vector2**, NOT `transform.GetInstanceID()` — Unity assigns instance IDs per-process so they never match across server and client. Two sections were added, not one:
+> ```
+> u16 mapSyncCount (LE)                 -- v26.5: positions
+> for each MapInfoSyncableBase (20 bytes):
+>   f32 startX (LE)   -- m_StartPos.x (the key; quantized 0.01 by P0-12)
+>   f32 startY (LE)   -- m_StartPos.y
+>   f32 posX (LE)
+>   f32 posY (LE)
+>   f32 posZ (LE)
+> u16 mapStateCount (LE)                -- v26.6: GetData() payloads
+> for each (9 + dataLen bytes):
+>   f32 startX, f32 startY, u8 dataLen, dataLen bytes
+> ```
+
+The original proposal was a single 16-byte `instanceID`-keyed position section:
 
 ```
 u16 mapSyncCount (LE)
 for each MapInfoSyncableBase (16 bytes):
-  u32 instanceID (transform.GetInstanceID())
+  u32 instanceID (transform.GetInstanceID())   -- did NOT survive cross-process; replaced by the Vector2 key above
   f32 posX (LE)
   f32 posY (LE)
   f32 posZ (LE)
 ```
 
-On the client, a new lerp dict applies the position to the matching object (look up by `transform.GetInstanceID()`). Patch `MapInfoSyncableBase.Update` to skip local force/spring integration on non-host (set `Rigidbody.isKinematic = true` for the duration of the network match — restore on match end).
+On the client, a lerp dict applies the position to the matching object (looked up by the `m_StartPos` Vector2). `MapInfoSyncableBase.Update` is patched to skip local force/spring integration on non-host so the snapshot stream isn't fought.
 
 **Risk**: medium. The integration on `MoveAlongPathUsingForce` and `PillarHandler` is what makes them feel right physically. Going kinematic means motion is server-driven; smoothness depends on snapshot rate (30Hz). Could feel laggy.
 

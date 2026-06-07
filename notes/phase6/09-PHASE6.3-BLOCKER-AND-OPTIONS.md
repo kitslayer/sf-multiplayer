@@ -1,5 +1,7 @@
 # Phase 6.3 blocker — client connection protocol mismatch
 
+> ⚠️ **Historical (2026-05).** Phase design doc. Current state: [NEXT_STEPS.md](../../NEXT_STEPS.md).
+
 **Status: blocker identified; design options sketched; needs operator decision before code.**
 
 ## What we tried

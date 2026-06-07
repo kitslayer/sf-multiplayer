@@ -1,5 +1,7 @@
 # Replay system — full execution plan (Tier-2 central, full-pose)
 
+> ⚠️ **Historical record (2026-05).** Kept for reference; current state in [NEXT_STEPS.md](../NEXT_STEPS.md). (Unbuilt design proposal; references to coordinating with ALKA predate ALKA's departure.)
+
 Companion to `REPLAY.md` (the format spec). This is the grounded, file:line-level
 build plan, from three code investigations. Branch: `feature/replay` (off current
 `main`). Goal: every match recorded centrally; viewer with **perfect
