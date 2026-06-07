@@ -674,12 +674,41 @@ namespace SFHeadlessHost
                     Log.LogInfo($"[v26.6] PostMapLoad collider refresh: woke {woken} dynamic rigidbody(s).");
                 }
                 catch (Exception e) { Log.LogWarning($"[v26.6] PostMapLoad collider refresh: {e.Message}"); }
+                EnsureServerSafetyFloor();  // P0-23 opt-in stopgap (SF_SERVER_SAFETY_FLOOR=1)
                 ScheduleAuthRigRespawnAfterMapLoad("PostMapLoad");
             }
             finally
             {
                 FinishOracleMapLoad("PostMapLoad");
             }
+        }
+
+        // P0-23 EXPERIMENT (opt-in: SF_SERVER_SAFETY_FLOOR=1). If the [BOX-DIAG]
+        // floor probe shows no floor under the play area, the headless server's
+        // map has no ground collider and boxes fall to the void. As a stopgap,
+        // drop one large static collider under the play area so crates have
+        // something to rest on. Crude — flat, single Y (SF_SERVER_FLOOR_Y, default
+        // 0), layer 0 (Default) — won't match multi-level contours and only catches
+        // boxes whose layer collides with Default. Confirms the hypothesis + stops
+        // the void-churn; the real fix depends on what [BOX-DIAG] reports.
+        private static GameObject _serverSafetyFloor;
+        private void EnsureServerSafetyFloor()
+        {
+            try
+            {
+                if (Environment.GetEnvironmentVariable("SF_SERVER_SAFETY_FLOOR") != "1") return;
+                float y = 0f;
+                var ys = Environment.GetEnvironmentVariable("SF_SERVER_FLOOR_Y");
+                if (!string.IsNullOrEmpty(ys))
+                    float.TryParse(ys, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out y);
+                if ((object)_serverSafetyFloor != null) UnityEngine.Object.Destroy(_serverSafetyFloor);
+                _serverSafetyFloor = new GameObject("SF_ServerSafetyFloor");
+                _serverSafetyFloor.transform.position = new Vector3(0f, y, 0f);
+                var bc = _serverSafetyFloor.AddComponent<BoxCollider>();
+                bc.size = new Vector3(2000f, 1f, 2000f);
+                Log.LogInfo($"[P0-23] Server safety floor created at y={y:0.0} (SF_SERVER_SAFETY_FLOOR=1; 2000x1x2000, layer 0).");
+            }
+            catch (Exception e) { Log.LogWarning($"[P0-23] safety floor: {e.Message}"); }
         }
 
         /// <summary>Open-B: re-chain NSO inventory → auth rig spawn after every map load / round advance.</summary>
