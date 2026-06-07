@@ -1,5 +1,7 @@
 # Open questions for the next session
 
+> ⚠️ **Mostly deprecated (2026-06-06).** Written during the abandoned Go `sfdsrv` effort (now in [`legacy/`](../../legacy)); a few items may still apply. Current state: [`NEXT_STEPS.md`](../../NEXT_STEPS.md).
+
 Things this session noticed but did not (could not, given the no-code rule) resolve.
 
 ## Confirmed-but-unresolved

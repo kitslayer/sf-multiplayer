@@ -2,7 +2,7 @@
 
 Where the project is and what's coming next. Refreshed continuously — see [`WHATS_NEW.md`](WHATS_NEW.md) for the running session log, [`notes/PROTOCOL.md`](notes/PROTOCOL.md) for the wire-format spec.
 
-> **Update (2026-06):** single-port multi-lobby (router + control plane + in-game browser) and the box-physics fixes are merged to `main` and deployed live — see [`WHATS_NEW.md`](WHATS_NEW.md) and [`notes/MULTI_LOBBY_LIVE.md`](notes/MULTI_LOBBY_LIVE.md) for current state + capacity. Sections below dated 2026-05-23 are partially superseded.
+> **Current state (2026-06-06) — this file + [`README.md`](README.md) are the source of truth; the other status docs are historical snapshots.** Live server: **`69.53.117.43`** (game UDP 1337, lobby browser TCP 8080). Maintainer: kit (solo; ALKA departed). Merged to `main` + live: single-port multi-lobby (router + control plane + in-game browser), box-physics fixes, and an audit-fix pass (installer/router/serve-lobbies hardening, host snapshot-serializer dedup + projectiles-on-FixedUpdate, P0-23 floor diagnostic). See [`WHATS_NEW.md`](WHATS_NEW.md) for the running log. Sections below dated 2026-05-23 are partially superseded.
 
 ## Current state
 

@@ -1,12 +1,14 @@
 # sf-multiplayer · project state
 
+> ⚠️ **Superseded (2026-06-06).** Point-in-time snapshot — the living current-state doc is [`NEXT_STEPS.md`](NEXT_STEPS.md). Live server: `69.53.117.43`.
+
 > **As of 2026-05-23 night** — for sharing with ALKA + SF comp Discord. Tone is "what comp players need to know" + "where the project actually is."
 >
 > Live status mirror: [`STATUS.md`](STATUS.md) (updated continuously while work happens).
 
 ## TL;DR
 
-A centralized server for Stick Fight that **works end-to-end on a real server** (192.168.1.115 right now), with a **one-click Windows installer/launcher**, and a **one-line Linux installer**. Server has known crash issues (documented, not yet patched). Code is on GitHub: https://github.com/kitslayer/sf-multiplayer
+A centralized server for Stick Fight that **works end-to-end on a real server** (69.53.117.43 right now), with a **one-click Windows installer/launcher**, and a **one-line Linux installer**. Server has known crash issues (documented, not yet patched). Code is on GitHub: https://github.com/kitslayer/sf-multiplayer
 
 ## What works today
 
@@ -21,7 +23,7 @@ A centralized server for Stick Fight that **works end-to-end on a real server** 
 - ✅ **In-game admin chat** — `/help`, `/start`, `/restart`, `/next`, `/map <N>`, `/listmaps`, `/players`, `/lobbies`, `/tickrate <Hz>`, `/weapons <list>`, `/kick <slot>`, `/anticheat <on|off>`, `/code`, `/ping`, `/version`.
 - ✅ **Lobby browser** — HTTP `/lobbies` JSON endpoint + standalone GUI app + dark-themed web page.
 - ✅ **One-click client install** — Windows `SFLauncher.exe` auto-installs BepInEx + plugins on first run; Linux `sflauncher.sh` does the same in one command.
-- ✅ **Production server (192.168.1.115)** — running 24/7 under systemd auto-restart. Connect with `-address 192.168.1.115 -port 1337` in Steam launch options.
+- ✅ **Production server (69.53.117.43)** — running 24/7 under systemd auto-restart. Connect with `-address 69.53.117.43 -port 1337` in Steam launch options.
 
 ## Known issues being tracked
 
@@ -125,7 +127,7 @@ Full timeline in [`notes/SESSION_2026-05-23.md`](notes/SESSION_2026-05-23.md).
 ## What's safe to share with comp Discord
 
 - The `dist/` folder content (one-click installers + plugins) — totally safe to share
-- The server IP if you want others to test: `-address 192.168.1.115 -port 1337`
+- The server IP if you want others to test: `-address 69.53.117.43 -port 1337`
 - A pointer to https://github.com/kitslayer/sf-multiplayer for anyone who wants to read code
 
 ## What's NOT safe to share yet

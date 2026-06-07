@@ -1,5 +1,7 @@
 # Phase 6 — Headless Unity as the Server
 
+> ⚠️ **Partly superseded (2026-06-06).** Original Phase-6 design doc (the Path-A pivot below did happen and shipped). Current state: [`NEXT_STEPS.md`](../../NEXT_STEPS.md).
+
 > **2026-05-22 path update:** the project pivoted from "oracle as physics consultant + Go server in the data path" (the original Phase 6 design, sometimes called Path D below) to **"oracle IS the server, no Go bridge"** (Path A). The headless Unity instance now speaks the v25 protocol directly to real Steam clients via raw UDP. The Go dedicated server is no longer in the active data path. See [`10-PHASE6.5-host-side-gameplay.md`](10-PHASE6.5-host-side-gameplay.md) for what's live and the seven Harmony patches that make it work.
 
 **Goal:** run a headless Unity instance of Stick Fight itself as the multiplayer server. Real Movement.cs, real ConfigurableJoint ragdolls, real killboxes, real weapon prefabs — Unity is the source of truth for physics AND the network endpoint.

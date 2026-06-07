@@ -107,8 +107,6 @@ Server's physics rate is now configurable live via `/tickrate N` chat command (r
 
 ## Architecture additions
 
-## Architecture additions
-
 - **Phase 6.10 — Server-authoritative state snapshots** (msgType 39)
   Wire protocol: `u32 serverTick, u8 playerCount, [u8 slot, f32 x, f32 y, f32 z] × N, u16 nsoCount, [u16 id, f32 x, f32 y, f32 z, f32 rotZ] × M`. 30Hz broadcast from oracle to every spawned client.
 

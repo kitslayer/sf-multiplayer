@@ -1,5 +1,7 @@
 # Design — Verification plan for the flag-logic fix
 
+> ⚠️ **Deprecated (2026-06-06).** Targets the abandoned Go `sfdsrv` server (now in [`legacy/StickFightDedicatedSrv/`](../../legacy/StickFightDedicatedSrv)); the current server is the BepInEx/Harmony headless host. Kept for historical reference.
+
 How the next session should confirm the fix actually fixes the 3-second-match-cycle bug.
 
 ## Pre-flight (without modifying code)

@@ -1,5 +1,7 @@
 # Live status — for monitoring while away
 
+> ⚠️ **Superseded (2026-06-06).** Historical phone-monitoring scratchpad — current state lives in [`NEXT_STEPS.md`](NEXT_STEPS.md) + [`README.md`](README.md). Live server: `69.53.117.43`.
+
 Updated continuously by Claude as work progresses. Latest commit at top. Check this from phone to see what's happening.
 
 ## Active goal (from /goal)
@@ -16,7 +18,7 @@ Updated continuously by Claude as work progresses. Latest commit at top. Check t
 - ✅ Crash investigation complete; findings in [`notes/CRASH_INVESTIGATION.md`](notes/CRASH_INVESTIGATION.md)
 - ✅ Per-lobby log listener bug fixed
 - ✅ Stopped all local oracles per goal directive
-- ✅ **Phase 6 oracle DEPLOYED + RUNNING on .115** (192.168.1.115)
+- ✅ **Phase 6 oracle DEPLOYED + RUNNING on .115** (69.53.117.43)
   - Port 1337 UDP/TCP bound
   - UDP ping verified from laptop
   - Per-lobby plugin log streaming heartbeats
@@ -70,7 +72,7 @@ Send them the `dist/` folder from this repo. Inside:
 - `SFLauncher.exe` — real Windows GUI lobby browser, double-click to launch
 - `README.md` — quickstart
 
-In SFLauncher: paste `http://192.168.1.115:8080/lobbies`, hit Refresh, pick a lobby, click Connect. The launch options get copied to clipboard and Steam opens. They click Play. Done.
+In SFLauncher: paste `http://69.53.117.43:8080/lobbies`, hit Refresh, pick a lobby, click Connect. The launch options get copied to clipboard and Steam opens. They click Play. Done.
 
 (They only need to redo the install-sf-client.bat step if plugins update — usually never.)
 
@@ -78,13 +80,13 @@ In SFLauncher: paste `http://192.168.1.115:8080/lobbies`, hit Refresh, pick a lo
 
 Open `deploy/server-browser.html` in any browser (save it locally first). Enter:
 ```
-http://192.168.1.115:8080/lobbies
+http://69.53.117.43:8080/lobbies
 ```
 and click "refresh". You'll see the MAIN lobby on .115. Click "copy linux" or "copy windows" to grab the launch options.
 
 Steam launch options for your Stick Fight (paste in Steam → Properties → Launch Options):
 ```
-WINEDLLOVERRIDES="winhttp=n,b" %command% -address 192.168.1.115 -port 1337
+WINEDLLOVERRIDES="winhttp=n,b" %command% -address 69.53.117.43 -port 1337
 ```
 (Or for Windows clients, drop the WINEDLLOVERRIDES part.)
 
