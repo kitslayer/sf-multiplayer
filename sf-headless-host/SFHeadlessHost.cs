@@ -4929,6 +4929,18 @@ namespace SFHeadlessHost
         // once confirmed + client-side dedup (suppress the vanilla local throw hit) is in.
         private bool _throwAuthShadow = true;
 
+        // Server-emitted bullet damage opt-in (see HandleClientFireWeapon).
+        private static bool? _bulletDamageCache;
+        private static bool BulletDamageEnabled
+        {
+            get
+            {
+                if (_bulletDamageCache == null)
+                    _bulletDamageCache = Environment.GetEnvironmentVariable("SFHEADLESS_BULLET_DAMAGE") == "1";
+                return _bulletDamageCache.Value;
+            }
+        }
+
         // PktClientFireWeapon body (v26.3 — client → server):
         //   u8  ownerSlot
         //   u8  weaponType  (passthrough byte; meaning is whatever the client sends)
@@ -4980,6 +4992,15 @@ namespace SFHeadlessHost
                 Velocity    = dir * speed,
                 BornAt      = Time.realtimeSinceStartup,
                 LifetimeSec = DefaultProjectileLifetime,
+                // v0.4.0 — bullet damage SHADOW by default, like throws. The
+                // sphere hit test runs against RTT-lagged ghost rigs, so
+                // client-side misses registered as server hits and the emitted
+                // PlayerTookDamage rendered hit feedback WITHOUT the victim's
+                // HP authority changing — "fake hits" (live report 2026-06-11,
+                // 4 spurious emissions in one session). Stock client-side
+                // damage remains authoritative; flip SFHEADLESS_BULLET_DAMAGE=1
+                // to re-enable for hit-reg tuning sessions.
+                ShadowOnly  = !BulletDamageEnabled,
             };
             _projectiles.Add(p);
             Log.LogInfo($"[P6.17] Fire registered: id={p.Id} slot={ownerSlot} w={weaponType} pos={p.Position} vel={p.Velocity.magnitude:0.0}u/s");
@@ -5034,7 +5055,7 @@ namespace SFHeadlessHost
                 if (hitSlot >= 0)
                 {
                     if (p.ShadowOnly)
-                        Log.LogInfo($"[throw-auth] SHADOW HIT: thrown id={p.Id} owner-slot={p.OwnerSlot} → would damage slot {hitSlot} (server swept-sphere @ fixed tick — FPS-INDEPENDENT; no damage emitted in shadow mode)");
+                        Log.LogInfo($"[{(p.IsThrown ? "throw-auth" : "bullet-auth")}] SHADOW HIT: id={p.Id} owner-slot={p.OwnerSlot} → would damage slot {hitSlot} (server swept-sphere; no damage emitted in shadow mode)");
                     else
                         EmitServerDamage(hitSlot, p.OwnerSlot, p.WeaponType, p.Velocity);
                     _projectiles.RemoveAt(i);
