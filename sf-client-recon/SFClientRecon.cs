@@ -62,7 +62,7 @@ namespace SFClientRecon
     {
         public const string PluginGuid = "com.stickfightdev.client-recon";
         public const string PluginName = "SFClientRecon";
-        public const string PluginVersion = "0.5.3";
+        public const string PluginVersion = "0.6.0";
 
         internal static ManualLogSource Log;
         // Verbose per-tick diagnostics OFF by default — they spammed the log and
@@ -149,6 +149,9 @@ namespace SFClientRecon
         {
             public ushort Id;
             public float X, Y, Z, RotZ;
+            // v26.7 — NSO up-vector (stock SF's rotation representation; tipping
+            // is about world X). NaN when the host didn't send the section.
+            public float UpY, UpZ;
         }
 
         private void Awake()
@@ -486,6 +489,8 @@ namespace SFClientRecon
                         Y    = BitConverter.ToSingle(pkt, o + 6),
                         Z    = BitConverter.ToSingle(pkt, o + 10),
                         RotZ = BitConverter.ToSingle(pkt, o + 14),
+                        UpY  = float.NaN,
+                        UpZ  = float.NaN,
                     });
                     o += nsoEntrySize;
                 }
@@ -537,6 +542,50 @@ namespace SFClientRecon
 
             List<MapStateSnapEntry> mapStateList = null;
             ParseMapStateSection(pkt, ref o, bodyOff + bodyLen, out mapStateList);
+
+            // v26.7 — NSO up-vector appendix: [u16 count][u16 id, f32 upY,
+            // f32 upZ]×count. Stock SF syncs NSO rotation as the up-vector's
+            // y/z (tipping is about world X; eulerAngles.z carries ~nothing
+            // for it), so this section is the real crate orientation. Optional
+            // trailing section — absent on older hosts, in which case every
+            // entry keeps UpY/UpZ = NaN and rotation falls back to RotZ.
+            if (o + 2 <= bodyOff + bodyLen)
+            {
+                ushort upCount = (ushort)(pkt[o] | (pkt[o + 1] << 8));
+                o += 2;
+                int upEntrySize = 10;
+                int maxUp = (bodyOff + bodyLen - o) / upEntrySize;
+                if (upCount > maxUp) upCount = (ushort)(maxUp < 0 ? 0 : maxUp);
+                if (upCount > 0 && nsoList != null && nsoList.Count > 0)
+                {
+                    var upById = new Dictionary<ushort, Vector2>(upCount);
+                    for (int i = 0; i < upCount; i++)
+                    {
+                        if (o + upEntrySize > bodyOff + bodyLen) break;
+                        ushort uid = (ushort)(pkt[o] | (pkt[o + 1] << 8));
+                        upById[uid] = new Vector2(
+                            BitConverter.ToSingle(pkt, o + 2),
+                            BitConverter.ToSingle(pkt, o + 6));
+                        o += upEntrySize;
+                    }
+                    for (int i = 0; i < nsoList.Count; i++)
+                    {
+                        Vector2 up;
+                        if (!upById.TryGetValue(nsoList[i].Id, out up)) continue;
+                        var e2 = nsoList[i];
+                        e2.UpY = up.x;
+                        e2.UpZ = up.y;
+                        nsoList[i] = e2;
+                    }
+                }
+                else
+                {
+                    // Still advance past the section so any future trailing
+                    // section stays aligned.
+                    int skip = upCount * upEntrySize;
+                    if (o + skip <= bodyOff + bodyLen) o += skip;
+                }
+            }
 
             // NB: explicit Monitor.Enter(obj)/Exit, NOT lock(){}. The C# `lock`
             // keyword compiles to Monitor.Enter(obj, ref bool), an overload that
@@ -717,6 +766,11 @@ namespace SFClientRecon
             public Quaternion RenderRot;
             public float LastRecvAt;     // realtime the latest snapshot was applied
             public bool HasRender;
+            // True when Rot was built from the v26.7 up-vector (full in-plane
+            // orientation). False = RotZ-only legacy rotation — the reconciler
+            // must NOT rotation-correct against it (a crate tipped about X has
+            // eulerAngles.z ≈ 0, so RotZ-only would "un-tip" every fallen crate).
+            public bool HasFullRot;
         }
         private readonly Dictionary<ushort, PoseTarget> _nsoTargets = new Dictionary<ushort, PoseTarget>();
         // Briefly make pushed crates non-kinematic for local collision feedback
@@ -749,8 +803,12 @@ namespace SFClientRecon
         // felt sluggish / "lentas". 6 m/s lets a deliberate push be responsive
         // while still well under a bullet's fling speed (which the blast cap and
         // the server governor catch).
-        private const float CrateMaxHoriz       = 2.5f;   // m/s — player-push CAP only (not the physics logic). Lower = "no las empuja tanto"
-        private const float CrateMaxHorizBlast  = 13.0f;  // m/s — explosion cap (when vert velocity present)
+        // v0.6.0 — caps mirror SFBoxFix's GovernCrateVelocity exactly. The
+        // client used to cap harder (2.5) than the server (6.0); under
+        // reconciliation an asymmetric cap means the authority moves crates
+        // faster than the prediction allows → constant forward-drag corrections.
+        private const float CrateMaxHoriz       = 6.0f;   // m/s — SFBoxFix.CrateMaxHoriz
+        private const float CrateMaxHorizBlast  = 14.0f;  // m/s — SFBoxFix.CrateMaxHorizBlast
         private const float CrateVertTrigger    = 2.0f;   // |v.y| above this enables the explosion cap
         private const float CrateMaxUp          = 9.0f;   // m/s upward — lets explosions launch crates
         private const float CrateMaxFall        = 30.0f;  // m/s downward — natural gravity fall
@@ -815,8 +873,12 @@ namespace SFClientRecon
                     }
 
                     // AIR TUMBLE — falling fast with little spin ⇒ add a gentle,
-                    // deterministic Z tumble so it rotates as it falls (synced axis).
-                    if (v.y < -CrateAirTumbleSpeed && rb.angularVelocity.sqrMagnitude < CrateAirTumbleMaxAngSqr)
+                    // deterministic tumble so it rotates as it falls. LEGACY MODE
+                    // ONLY: in reconcile mode this torque exists on no other sim —
+                    // the server's real tumble now arrives via the v26.7 up-vector,
+                    // and injecting our own would just be orientation divergence.
+                    if (!CrateReconcileActive
+                        && v.y < -CrateAirTumbleSpeed && rb.angularVelocity.sqrMagnitude < CrateAirTumbleMaxAngSqr)
                     {
                         float sign = ((rb.GetInstanceID() & 1) == 0) ? 1f : -1f;
                         rb.AddTorque(new Vector3(sign * rb.mass * CrateAirTumbleTorque, 0f, 0f), ForceMode.Force);
@@ -1109,6 +1171,9 @@ namespace SFClientRecon
             if (!_running) return;
             if (!IsMatchActive()) return;
             try { ClampCrateVelocities(); } catch { }
+            // v0.6.0 — steer predicted crates toward the oracle's authoritative
+            // pose (runs in the physics step; velocity-based, see SfNsoClientPush).
+            try { ReconcilePushableCrates(); } catch { }
         }
 
         private void SmoothTowardTargets()
@@ -1178,19 +1243,16 @@ namespace SFClientRecon
                         // to tug-of-war with.
                         if (entry.Pushable && (object)rb != null)
                         {
-                            // PURE LOCAL PHYSICS. We deliberately apply NO server
-                            // position to pushable ground crates. Every previous
-                            // reconciliation scheme (position teleport OR corrective
-                            // velocity) injected motion the player never caused →
-                            // crates exploded on contact, slid, drifted, moved on
-                            // their own, or tunnelled. Letting the local Unity
-                            // simulation fully own them (dynamic + grip friction +
-                            // continuous collision, configured at cache build) gives
-                            // exact vanilla behaviour: they only move when the
-                            // player or another body pushes them, they stack, and
-                            // they never self-correct. The server learns their
-                            // positions from the outgoing relay (TickNsoClientPushRelay)
-                            // instead of pushing positions back at us.
+                            // Pushable crates are NOT render-lerped here. They run
+                            // dynamic local physics (instant push feel) and, in the
+                            // default v0.6.0 mode, converge to the oracle's
+                            // authoritative pose via ReconcilePushableCrates in
+                            // FixedUpdate — velocity-steered with a deadband, not
+                            // position-written, because every position-write scheme
+                            // tried in May 2026 injected penetration/phantom motion
+                            // (crates exploded, slid, drifted). In legacy mode
+                            // (SF_CRATES_LOCAL_PHYSICS=1) they take no server input
+                            // at all and the 5Hz relay reports them upward instead.
                             continue;
                         }
 
@@ -1331,6 +1393,10 @@ namespace SFClientRecon
         private void ApplyNsoSnapshot(List<NsoSnapEntry> snap, uint tick)
         {
             if (snap.Count == 0) return;
+            // Map transition — both scenes briefly coexist with colliding NSO
+            // ids; snapshots in flight may still describe the OLD map. Don't
+            // record targets (or rebuild the cache) until the window passes.
+            if (Time.realtimeSinceStartup < _reconSuppressUntil) return;
             try
             {
                 if ((object)_nsoType == null)
@@ -1422,7 +1488,8 @@ namespace SFClientRecon
                         var rootT = nsoComp.transform.root;
                         if ((object)rootT != null) _recentLerpAt[rootT.GetInstanceID()] = nowTs;
                     }
-                    Quaternion newRot = Quaternion.Euler(0f, 0f, e.RotZ);
+                    bool hasFullRot;
+                    Quaternion newRot = BuildNsoRotation(e, out hasFullRot);
                     float nowRt = Time.realtimeSinceStartup;
                     PoseTarget pt;
                     if (_nsoTargets.TryGetValue(e.Id, out pt) && pt != null && pt.HasRender)
@@ -1444,6 +1511,7 @@ namespace SFClientRecon
                         }
                         pt.Pos = newTarget;
                         pt.Rot = newRot;
+                        pt.HasFullRot = hasFullRot;
                         pt.LastRecvAt = nowRt;
                     }
                     else
@@ -1452,7 +1520,8 @@ namespace SFClientRecon
                         {
                             Pos = newTarget, Rot = newRot, Vel = Vector3.zero,
                             RenderPos = newTarget, RenderRot = newRot,
-                            LastRecvAt = nowRt, HasRender = true
+                            LastRecvAt = nowRt, HasRender = true,
+                            HasFullRot = hasFullRot
                         };
                         _nsoTargets[e.Id] = pt;
                     }
@@ -1462,6 +1531,25 @@ namespace SFClientRecon
                     Log.LogInfo($"[P6.14] NSO snap tick={tick} targeted {applied}/{snap.Count}");
             }
             catch (Exception ex) { Log.LogWarning($"[P6.14 NSO apply] {ex.Message}"); }
+        }
+
+        // Reconstruct the server rotation exactly like stock LerpLocalDummy
+        // (NetworkSyncableObject.cs:273-274): the up-vector tilts within the
+        // Y-Z play plane and the rotation is LookRotation(Cross(right, up), up).
+        // Falls back to the legacy eulerZ when the v26.7 section was absent.
+        private static Quaternion BuildNsoRotation(NsoSnapEntry e, out bool hasFullRot)
+        {
+            if (!float.IsNaN(e.UpY) && !float.IsNaN(e.UpZ))
+            {
+                var up = new Vector3(0f, e.UpY, e.UpZ);
+                if (up.sqrMagnitude > 0.0001f)
+                {
+                    hasFullRot = true;
+                    return Quaternion.LookRotation(Vector3.Cross(Vector3.right, up), up);
+                }
+            }
+            hasFullRot = false;
+            return Quaternion.Euler(0f, 0f, e.RotZ);
         }
 
         private static bool IsWeaponNsoRootClient(GameObject root)
