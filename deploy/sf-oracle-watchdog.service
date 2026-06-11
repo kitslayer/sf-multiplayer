@@ -1,0 +1,15 @@
+# Oneshot run by sf-oracle-watchdog.timer. Restarts sf-oracle when its UDP
+# port goes deaf despite the unit being "active" (the 2026-06-10 wedge mode).
+# Install at: /etc/systemd/system/sf-oracle-watchdog.service
+[Unit]
+Description=sf-oracle liveness watchdog (UDP probe → restart on deaf port)
+Documentation=https://github.com/kitslayer/sf-multiplayer
+After=sf-oracle.service
+
+[Service]
+Type=oneshot
+# Needs to restart sf-oracle.service. The sfdev sudoers already scopes
+# systemctl restart sf-oracle; running the watchdog as root (default) is
+# simplest since it's a tiny system unit.
+ExecStart=/home/miles/sf-multiplayer/deploy/sf-oracle-watchdog.sh
+Nice=10

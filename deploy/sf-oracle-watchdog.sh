@@ -34,15 +34,16 @@ fi
 
 # Give a freshly-(re)started oracle time to load Wine + Unity + the scene
 # before we expect it to answer Pings, or we'd restart-loop it during spin-up.
-ts="$(systemctl show "$UNIT" -p ActiveEnterTimestampMonotonic --value 2>/dev/null)"
-if [ -n "$ts" ] && [ "$ts" != "0" ]; then
-    now_us="$(awk '/^now/{print $2}' /proc/timer_list 2>/dev/null | head -1)"
-    if [ -n "$now_us" ]; then
-        age_sec=$(( ( now_us/1000 - ts ) / 1000000 ))
-        if [ "$age_sec" -ge 0 ] && [ "$age_sec" -lt "$GRACE_SEC" ]; then
-            log "unit active only ${age_sec}s (< ${GRACE_SEC}s warm-up) — skipping probe."
-            exit 0
-        fi
+# ActiveEnterTimestampMonotonic is microseconds-since-boot; /proc/uptime is
+# seconds-since-boot (world-readable). Both are monotonic, so the difference
+# is the unit's active age, immune to wall-clock/NTP jumps.
+ts_us="$(systemctl show "$UNIT" -p ActiveEnterTimestampMonotonic --value 2>/dev/null)"
+up_sec="$(awk '{print int($1)}' /proc/uptime 2>/dev/null)"
+if [ -n "$ts_us" ] && [ "$ts_us" != "0" ] && [ -n "$up_sec" ]; then
+    age_sec=$(( up_sec - ts_us / 1000000 ))
+    if [ "$age_sec" -ge 0 ] && [ "$age_sec" -lt "$GRACE_SEC" ]; then
+        log "unit active only ${age_sec}s (< ${GRACE_SEC}s warm-up) — skipping probe."
+        exit 0
     fi
 fi
 

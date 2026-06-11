@@ -1,0 +1,15 @@
+# Fires the oracle liveness watchdog every 2 minutes.
+# Install at: /etc/systemd/system/sf-oracle-watchdog.timer  then:
+#   systemctl daemon-reload && systemctl enable --now sf-oracle-watchdog.timer
+[Unit]
+Description=Run sf-oracle liveness watchdog every 2 minutes
+Documentation=https://github.com/kitslayer/sf-multiplayer
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=2min
+AccuracySec=15s
+Unit=sf-oracle-watchdog.service
+
+[Install]
+WantedBy=timers.target
