@@ -277,22 +277,17 @@ namespace SFClientRecon
             // frame-rate tax. The oracle has the same guard in SFHeadlessHost;
             // it must live HERE too because p2-style clients don't load the
             // host plugin (and its patch suite is batchmode-gated anyway).
-            try
-            {
-                var ppType = AccessTools.TypeByName("P2PPackageHandler");
-                var isPkt = (object)ppType != null ? AccessTools.Method(ppType, "IsPacketAvailable") : null;
-                if ((object)isPkt != null)
-                {
-                    var harmonyPp = new Harmony(PluginGuid + ".pp-null-guard");
-                    harmonyPp.Patch(isPkt, prefix: new HarmonyMethod(AccessTools.Method(typeof(Plugin), nameof(IsPacketAvailableNullGuardPrefix))));
-                    Log.LogInfo("Patched P2PPackageHandler.IsPacketAvailable (null-channels guard — kills the per-frame NRE storm).");
-                }
-                else Log.LogWarning("[pp-null-guard] IsPacketAvailable not found.");
-            }
-            catch (Exception e) { Log.LogWarning($"[pp-null-guard] install failed: {e.Message}"); }
+            // NRE-storm fix attempt history (2026-06-11): a Harmony PREFIX on
+            // P2PPackageHandler.IsPacketAvailable broke the v25 handshake
+            // ("Connecting to the server..." hang) — and so did a FINALIZER,
+            // so the breakage comes from patching that method AT ALL (it is
+            // the patched DLL's packet pump). The storm is now fixed at the
+            // SOURCE instead: TickChannelNullFill (Update) fills null channel
+            // slots with empty queue instances, so stock code sees "empty
+            // queue = no packet" with zero patching. DO NOT Harmony-patch
+            // IsPacketAvailable on clients.
 
             InstallClientTerrainPatches();
-            // (IsPacketAvailableNullGuardPrefix lives below, after Update().)
             InstallOracleLobbyConnectPatches();
             InstallNsoClientPushPatches();
             // Per-type ONLY (transpiles the 3 gimmick types' Update; never touches
@@ -688,6 +683,8 @@ namespace SFClientRecon
                 if (QualitySettings.vSyncCount != 0) QualitySettings.vSyncCount = 0;
             }
             try { TickOracleAutoConnect(); } catch { }
+            try { TickDebugConsole(); } catch { }
+            try { TickChannelNullFill(); } catch { }
             List<SnapshotEntry> snap;
             List<NsoSnapEntry>  nsoSnap;
             List<MapSyncSnapEntry> mapSyncSnap;
@@ -805,42 +802,59 @@ namespace SFClientRecon
             catch { }
         }
 
-        // Prefix on P2PPackageHandler.IsPacketAvailable. In oracle-connect
-        // mode the Steam P2P channel array never initializes, so the stock
-        // per-frame packet poll (SyncableObjectManager.LateUpdate →
-        // ListenForPackages) threw ~150 NREs/s per client. Report "no packet"
-        // instead of letting the original NRE. FieldInfo cached — this is on
-        // the per-frame hot path.
-        private static FieldInfo _ppChannelsField;
-        private static bool _ppChannelsLookupTried;
-        internal static bool IsPacketAvailableNullGuardPrefix(object __instance, int channel, ref bool __result)
+        // v0.6.0 — kill the per-frame NRE storm AT THE SOURCE. In
+        // oracle-connect mode some P2PPackageHandler channel queue slots are
+        // never created, so the stock per-frame packet poll
+        // (SyncableObjectManager.LateUpdate → ListenForPackages →
+        // IsPacketAvailable) threw ~150 NREs/s per client. Filling the null
+        // slots with empty queue instances gives stock code exactly the
+        // semantics it expects ("empty queue → no packet") without Harmony-
+        // patching the packet pump (which broke the v25 handshake — see the
+        // install-site comment). Re-checked every 5s: scene/reconnect churn
+        // can recreate the handler.
+        private static FieldInfo _ppChannelsFillField;
+        private static bool _ppChannelsFillLookupTried;
+        private static Type _ppTypeForFill;
+        private float _chanFillNextAt = -1f;
+        private int _chanFillTotal;
+        private void TickChannelNullFill()
         {
+            float now = Time.realtimeSinceStartup;
+            if (_chanFillNextAt > 0f && now < _chanFillNextAt) return;
+            _chanFillNextAt = now + 5f;
             try
             {
-                if (!_ppChannelsLookupTried)
+                if ((object)_ppTypeForFill == null) _ppTypeForFill = AccessTools.TypeByName("P2PPackageHandler");
+                if ((object)_ppTypeForFill == null) return;
+                var inst = UnityEngine.Object.FindObjectOfType(_ppTypeForFill);
+                if (!RefOk(inst)) return;
+                if (!_ppChannelsFillLookupTried)
                 {
-                    _ppChannelsLookupTried = true;
-                    _ppChannelsField = AccessTools.Field(__instance.GetType(), "channels");
+                    _ppChannelsFillLookupTried = true;
+                    _ppChannelsFillField = AccessTools.Field(_ppTypeForFill, "channels");
                 }
-                if ((object)_ppChannelsField == null) { __result = false; return false; }
-                var channels = _ppChannelsField.GetValue(__instance) as Array;
-                if (channels == null || channel < 0 || channel >= channels.Length)
+                if ((object)_ppChannelsFillField == null) return;
+                var channels = _ppChannelsFillField.GetValue(inst) as Array;
+                if (channels == null) return;
+                var elemType = channels.GetType().GetElementType();
+                if ((object)elemType == null || elemType.IsAbstract) return;
+                int filled = 0;
+                for (int i = 0; i < channels.Length; i++)
                 {
-                    __result = false;
-                    return false;
+                    if (channels.GetValue(i) != null) continue;
+                    object q;
+                    try { q = Activator.CreateInstance(elemType); }
+                    catch { return; }   // no parameterless ctor — bail quietly
+                    channels.SetValue(q, i);
+                    filled++;
                 }
-                if (channels.GetValue(channel) == null)
+                if (filled > 0)
                 {
-                    __result = false;
-                    return false;
+                    _chanFillTotal += filled;
+                    Log.LogInfo($"[chan-fill] Filled {filled} null channel slot(s) with empty {elemType.Name} (total {_chanFillTotal}) — NRE storm source removed.");
                 }
             }
-            catch
-            {
-                __result = false;
-                return false;
-            }
-            return true;
+            catch { }
         }
 
         // Smoothing targets — apply each frame in Update via exponential lerp.
@@ -2233,11 +2247,50 @@ namespace SFClientRecon
             catch (Exception e) { Log.LogWarning($"[P6.11 apply] {e.Message}"); }
         }
 
+        private static Type _mmTypeForSlot;
+        private static FieldInfo _mmLocalPlayerIndexField;
+        private static bool _mmSlotLookupTried;
+
         private int FindLocalSlot()
         {
             if (_localSlot >= 0) return _localSlot;
             try
             {
+                // v0.6.0 — THE authoritative source: the patched DLL writes the
+                // slot the server assigned into MultiplayerManager.mLocalPlayerIndex
+                // during ClientInit. The legacy paths below were both broken in
+                // server-auth mode: mHasControl is always false here, and the
+                // first-NetworkPlayer fallback is ORDER-DEPENDENT — both clients
+                // found player 0 first, both claimed slot 0, the server's
+                // _slotV26Endpoint[0] flip-flopped 40×/s between them, and slot
+                // 1's whole snapshot stream went to the :1339 default port where
+                // no player listens (seen live on the wire, 2026-06-11). That
+                // silently disabled reconciliation for one client per match.
+                if (!_mmSlotLookupTried)
+                {
+                    _mmSlotLookupTried = true;
+                    _mmTypeForSlot = AccessTools.TypeByName("MultiplayerManager");
+                    if ((object)_mmTypeForSlot != null)
+                        _mmLocalPlayerIndexField = AccessTools.Field(_mmTypeForSlot, "mLocalPlayerIndex");
+                }
+                if ((object)_mmLocalPlayerIndexField != null)
+                {
+                    var mm = UnityEngine.Object.FindObjectOfType(_mmTypeForSlot);
+                    if (RefOk(mm))
+                    {
+                        int idx = (byte)_mmLocalPlayerIndexField.GetValue(mm);
+                        // 0 is a real slot, but it's also the field's default
+                        // value before ClientInit. Trust nonzero immediately;
+                        // trust 0 only once we've seen the server's snapshots
+                        // flowing (proof the handshake completed).
+                        if (idx > 0 || _snapsReceived > 0)
+                        {
+                            _localSlot = idx;
+                            Log.LogInfo($"[P6.11] Discovered localSlot={_localSlot} (MultiplayerManager.mLocalPlayerIndex).");
+                            return _localSlot;
+                        }
+                    }
+                }
                 EnsureControllerRefs();
                 if ((object)_ctrlTypeForNp != null)
                 {

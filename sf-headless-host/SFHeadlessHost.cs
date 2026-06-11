@@ -978,6 +978,80 @@ namespace SFHeadlessHost
                 Instance.RunPostMapLoadServerInit(scene);
         }
 
+        // === File-driven live debug console (v0.4.0, batchmode only) ===
+        // Write commands — one per line — into /tmp/sf-cmd-oracle.txt; replies
+        // land in the plugin log tee (SFHEADLESS_LOGFILE) within ~0.5s. Gives
+        // an outside operator on-demand live crate/rig state from the
+        // AUTHORITY sim, diffable against the clients' own `boxes` dumps.
+        // Commands: boxes | rigs | help
+        private float _oracleDbgNextPollAt = -1f;
+        private const string OracleDbgCmdPath = "/tmp/sf-cmd-oracle.txt";
+        private void TickOracleDebugConsole()
+        {
+            if (!_batchModeHost) return;
+            float now = Time.realtimeSinceStartup;
+            if (_oracleDbgNextPollAt > 0f && now < _oracleDbgNextPollAt) return;
+            _oracleDbgNextPollAt = now + 0.5f;
+            try
+            {
+                if (!System.IO.File.Exists(OracleDbgCmdPath)) return;
+                string text = System.IO.File.ReadAllText(OracleDbgCmdPath);
+                if (string.IsNullOrEmpty(text) || text.Trim().Length == 0) return;
+                System.IO.File.WriteAllText(OracleDbgCmdPath, "");   // consume
+                string[] lines = text.Split('\n');
+                foreach (var raw in lines)
+                {
+                    string cmd = raw.Trim();
+                    if (cmd.Length == 0) continue;
+                    if (cmd == "boxes") { OracleDumpBoxes(); continue; }
+                    if (cmd == "rigs") { OracleDumpRigs(); continue; }
+                    Log.LogInfo("[dbg] commands: boxes | rigs | help");
+                }
+            }
+            catch (Exception e) { Log.LogWarning($"[dbg] poll error: {e.Message}"); }
+        }
+
+        private void OracleDumpBoxes()
+        {
+            EnsureNsoSrvCache();
+            var sb = new System.Text.StringBuilder();
+            sb.Append("[dbg] ORACLE BOXES id p=(y,z) v slp kin\n");
+            int n = 0;
+            foreach (var ent in _nsoSrvEntries)
+            {
+                if (!ent.Pushable) continue;
+                var rb = ent.Rb;
+                if ((object)rb == null || !ent.Comp) continue;
+                Vector3 p;
+                try { p = rb.position; } catch { continue; }
+                sb.Append("  #").Append(ent.Id)
+                  .Append(" p=(").Append(p.y.ToString("0.0")).Append(",").Append(p.z.ToString("0.0"))
+                  .Append(") v=").Append(rb.velocity.magnitude.ToString("0.00"))
+                  .Append(" slp=").Append(rb.IsSleeping() ? "1" : "0")
+                  .Append(" kin=").Append(rb.isKinematic ? "1" : "0").Append("\n");
+                n++;
+            }
+            sb.Append("[dbg] total ").Append(n).Append(" pushable crates (authority)");
+            Log.LogInfo(sb.ToString());
+        }
+
+        private void OracleDumpRigs()
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.Append("[dbg] ORACLE RIGS:\n");
+            int n = 0;
+            foreach (var kv in SlotToRig)
+            {
+                var rig = kv.Value;
+                if ((object)rig == null) continue;
+                sb.Append("  slot=").Append(kv.Key)
+                  .Append(" pos=").Append(rig.transform.position.ToString("0.00")).Append("\n");
+                n++;
+            }
+            sb.Append("[dbg] total ").Append(n).Append(" rigs");
+            Log.LogInfo(sb.ToString());
+        }
+
         // Scene gate for id-keyed NSO state. Empty (lobby, pre-first-map) = no
         // filtering.
         private static string _currentMapSceneName;
@@ -1593,16 +1667,18 @@ namespace SFHeadlessHost
         // Generic skip-prefix: return false to skip the original method.
         internal static bool SkipPrefix() => false;
 
-        // channels[channel] can be null → NullRef/frame storms in
-        // ListenForPackages. v0.4.0: no longer batchmode-gated — the SAME
-        // null-channels NRE fired ~90k times on a CLIENT sitting disconnected
-        // from a restarted oracle (SyncableObjectManager.LateUpdate →
-        // ListenForPackages → IsPacketAvailable, every channel, every frame).
-        // FieldInfo is cached: this sits on the per-frame packet-poll path.
+        // Headless oracle ONLY: channels[channel] can be null → 40k+
+        // NullRef/frame in ListenForPackages. BATCHMODE-GATED ON PURPOSE —
+        // do NOT widen to clients: the patched DLL lazily creates channel
+        // queues INSIDE IsPacketAvailable, and a prefix-skip there blocks
+        // the v25 handshake entirely ("Connecting to the server..." hang,
+        // live-debugged 2026-06-11). Clients get an NRE-suppressing
+        // FINALIZER from SFClientRecon instead.
         private static FieldInfo _ppChannelsField;
         private static bool _ppChannelsLookupTried;
         internal static bool IsPacketAvailableHeadlessPrefix(object __instance, int channel, ref bool __result)
         {
+            if (!_batchModeHost) return true;
             try
             {
                 if (!_ppChannelsLookupTried)
@@ -1818,6 +1894,7 @@ namespace SFHeadlessHost
         private string _updateErrorFirstStackTrace;
         private void Update()
         {
+            try { TickOracleDebugConsole(); } catch { }
             try
             {
                 StepBoot();
