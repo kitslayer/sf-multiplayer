@@ -396,7 +396,7 @@ namespace SFClientRecon
         // ghosts of the previous map. A real server-side void-rescue also
         // looks like this, so a persistent big error is accepted after 1.2s.
         private const float ReconIdentityBound    = 8f;
-        private const float ReconIdentityAcceptSec = 1.2f;
+        private const float ReconIdentityAcceptSec = 2.0f;   // was 1.2 — too eager during slow boss-map transitions
         internal static float _reconSuppressUntil;  // set on MapChange; transition guard
         private readonly Dictionary<ushort, float> _reconBigErrSince = new Dictionary<ushort, float>();
         private int _reconHardSnaps;
@@ -441,7 +441,15 @@ namespace SFClientRecon
                         continue;
                     }
                     if (now - bigSince < ReconIdentityAcceptSec) continue;
-                    // Persistent → legit (void-rescue / server respawn): snap.
+                    // Persistence alone is NOT enough: during a wrong-scene
+                    // window every crate shows a persistent ~37u error and a
+                    // time-based acceptance mass-teleported the whole field
+                    // toward the previous map's layout (live, 2026-06-11).
+                    // The only legitimate >8u correction is a void-rescue —
+                    // and in a rescue OUR copy has fallen too. A crate in
+                    // normal play space with a far-away target is an identity
+                    // mismatch, never to be "corrected".
+                    if (rb.position.y > -20f) continue;
                     _reconBigErrSince.Remove(kv.Key);
                 }
                 else

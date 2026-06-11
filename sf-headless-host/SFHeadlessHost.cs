@@ -321,6 +321,12 @@ namespace SFHeadlessHost
                 // teleporting the fallen server crates back up.
                 if (_batchModeHost)
                 {
+                    SceneManager.sceneLoaded += OnOracleSceneLoadedTrackMap;
+                    Log.LogInfo("[v26.7] Oracle map-scene tracker registered (sceneLoaded hook).");
+                }
+
+                if (_batchModeHost)
+                {
                     var cullType = AccessTools.TypeByName("IgnorePlayerWhenOffScreen");
                     var cullUpd = (object)cullType != null ? AccessTools.Method(cullType, "Update") : null;
                     if ((object)cullUpd != null)
@@ -1060,6 +1066,34 @@ namespace SFHeadlessHost
             if (string.IsNullOrEmpty(_currentMapSceneName)) return true;
             try { return comp.gameObject.scene.name == _currentMapSceneName; }
             catch { return true; }
+        }
+
+        // v0.4.0 — track EVERY map-scene load directly. The settle coroutine
+        // also updates _currentMapSceneName, but rounds that take the
+        // stale-settle-skip / ForceCompleteMapLoad path bypass it entirely —
+        // the oracle then filtered all NSO caches to the PREVIOUS map for the
+        // whole round: broadcast old-scene crates (clients saw uniform 22-37u
+        // errors), empty fall-guard, `boxes` dump showing 0 pushables mid-
+        // match (caught live via the debug console, 2026-06-11).
+        private static void OnOracleSceneLoadedTrackMap(Scene sc, LoadSceneMode mode)
+        {
+            try
+            {
+                if (!_batchModeHost) return;
+                if (sc.name == "MainScene") return;
+                _currentMapSceneName = sc.name;
+                var inst = Instance;
+                if ((object)inst != null)
+                {
+                    inst._nsoLastBroadcastPos.Clear();
+                    inst._nsoLastMovedAt.Clear();
+                    inst._nsoSpawnPos.Clear();
+                    inst.RebuildNsoIndexCache();
+                    inst._nsoCacheLastRebuildAt = Time.realtimeSinceStartup;
+                }
+                Log.LogInfo($"[v26.7] Map scene tracked → '{sc.name}' (NSO caches reset).");
+            }
+            catch (Exception e) { Log.LogWarning($"[v26.7] scene-track: {e.Message}"); }
         }
 
         // After settle, seed snapshot tracking so quiescent crates still broadcast once.

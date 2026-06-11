@@ -8,6 +8,7 @@ using BepInEx;
 using BepInEx.Logging;
 using HarmonyLib;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 namespace SFClientRecon
 {
@@ -159,6 +160,14 @@ namespace SFClientRecon
             Log = Logger;
             Instance = this;
             InstallUnityConsoleTee();
+            // v0.6.0 — track the current map scene (mirrors the oracle's
+            // _currentMapSceneName). NSO ids are PER-MAP and collide while
+            // both map scenes coexist during the additive transition; the
+            // cache rebuild must only accept objects from the newest map or
+            // the reconciler matches snapshot ids against LAST round's
+            // objects (~40u away) and teleports them (observed live:
+            // crates=162 on a 90-crate map, meanErr=37, thousands of snaps).
+            SceneManager.sceneLoaded += OnSceneLoadedTrackMapScene;
             foreach (var arg in Environment.GetCommandLineArgs())
             {
                 if (arg == "-batchmode" || arg == "-nographics")
@@ -1535,13 +1544,16 @@ namespace SFClientRecon
                     {
                         foreach (var nso in all)
                         {
+                            var c = nso as Component;
+                            if ((object)c == null) continue;
+                            // PER-MAP ids: never cache an NSO from a stale
+                            // coexisting scene (see Awake comment).
+                            if (!SceneMatchesCurrentMapClient(c)) continue;
                             ushort id = 0;
                             if ((object)_nsoIndexProp != null)
                                 id = (ushort)_nsoIndexProp.GetValue(nso, null);
                             else if ((object)_nsoIndexField != null)
                                 id = (ushort)_nsoIndexField.GetValue(nso);
-                            var c = nso as Component;
-                            if ((object)c == null) continue;
                             var go = c.gameObject;
                             bool skip = IsWeaponNsoRootClient(go)
                                      || IsIceOnlyDestructibleRoot(go)
@@ -1651,6 +1663,24 @@ namespace SFClientRecon
                     Log.LogInfo($"[P6.14] NSO snap tick={tick} targeted {applied}/{snap.Count}");
             }
             catch (Exception ex) { Log.LogWarning($"[P6.14 NSO apply] {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        // Current map scene tracking — see the Awake comment. Empty (menu,
+        // pre-first-map) = no filtering.
+        private static string _clientMapSceneName;
+        private static void OnSceneLoadedTrackMapScene(Scene sc, LoadSceneMode mode)
+        {
+            try
+            {
+                if (sc.name != "MainScene") _clientMapSceneName = sc.name;
+            }
+            catch { }
+        }
+        private static bool SceneMatchesCurrentMapClient(Component c)
+        {
+            if (string.IsNullOrEmpty(_clientMapSceneName)) return true;
+            try { return c.gameObject.scene.name == _clientMapSceneName; }
+            catch { return true; }
         }
 
         // Reconstruct the server rotation exactly like stock LerpLocalDummy
@@ -2250,22 +2280,61 @@ namespace SFClientRecon
         private static Type _mmTypeForSlot;
         private static FieldInfo _mmLocalPlayerIndexField;
         private static bool _mmSlotLookupTried;
+        private static FieldInfo _npHasLocalControlField;
+        private static bool _npLocalCtlLookupTried;
 
         private int FindLocalSlot()
         {
             if (_localSlot >= 0) return _localSlot;
             try
             {
-                // v0.6.0 — THE authoritative source: the patched DLL writes the
-                // slot the server assigned into MultiplayerManager.mLocalPlayerIndex
-                // during ClientInit. The legacy paths below were both broken in
-                // server-auth mode: mHasControl is always false here, and the
-                // first-NetworkPlayer fallback is ORDER-DEPENDENT — both clients
-                // found player 0 first, both claimed slot 0, the server's
-                // _slotV26Endpoint[0] flip-flopped 40×/s between them, and slot
-                // 1's whole snapshot stream went to the :1339 default port where
-                // no player listens (seen live on the wire, 2026-06-11). That
-                // silently disabled reconciliation for one client per match.
+                // v0.6.0 — slot discovery, most-authoritative first. History:
+                // mHasControl scanning is always-false in server-auth mode; the
+                // first-NetworkPlayer fallback is order-dependent (every client
+                // claimed slot 0 → the server's _slotV26Endpoint[0] flip-flopped
+                // 40×/s and slot 1's snapshot stream went to the :1339 default
+                // port — seen on the wire 2026-06-11); and
+                // MultiplayerManager.mLocalPlayerIndex is NOT populated by the
+                // patched DLL in oracle mode (both clients read the default 0 —
+                // the decompile shows the stock path only).
+                //
+                // (1) The local player's NetworkPlayer carries
+                // mHasLocalControl=true in online matches (the field Phase-5
+                // PlayerSync used successfully); its Controller.playerID is the
+                // server-assigned slot.
+                EnsureControllerRefs();
+                if (!_npLocalCtlLookupTried)
+                {
+                    _npLocalCtlLookupTried = true;
+                    var npT = AccessTools.TypeByName("NetworkPlayer");
+                    if ((object)npT != null)
+                        _npHasLocalControlField = AccessTools.Field(npT, "mHasLocalControl");
+                }
+                if ((object)_npHasLocalControlField != null)
+                {
+                    var npTypeScan = AccessTools.TypeByName("NetworkPlayer");
+                    var npsScan = (object)npTypeScan != null ? UnityEngine.Object.FindObjectsOfType(npTypeScan) : null;
+                    if (npsScan != null)
+                    {
+                        foreach (var np in npsScan)
+                        {
+                            try
+                            {
+                                if (!(bool)_npHasLocalControlField.GetValue(np)) continue;
+                            }
+                            catch { continue; }
+                            int slotNp;
+                            if (TryGetPlayerSlotFromNetworkPlayer(np, out slotNp))
+                            {
+                                _localSlot = slotNp;
+                                Log.LogInfo($"[P6.11] Discovered localSlot={_localSlot} (NetworkPlayer.mHasLocalControl).");
+                                return _localSlot;
+                            }
+                        }
+                    }
+                }
+                // (2) mLocalPlayerIndex — trust only a NONZERO value (zero is
+                // indistinguishable from the never-set default here).
                 if (!_mmSlotLookupTried)
                 {
                     _mmSlotLookupTried = true;
@@ -2279,11 +2348,7 @@ namespace SFClientRecon
                     if (RefOk(mm))
                     {
                         int idx = (byte)_mmLocalPlayerIndexField.GetValue(mm);
-                        // 0 is a real slot, but it's also the field's default
-                        // value before ClientInit. Trust nonzero immediately;
-                        // trust 0 only once we've seen the server's snapshots
-                        // flowing (proof the handshake completed).
-                        if (idx > 0 || _snapsReceived > 0)
+                        if (idx > 0)
                         {
                             _localSlot = idx;
                             Log.LogInfo($"[P6.11] Discovered localSlot={_localSlot} (MultiplayerManager.mLocalPlayerIndex).");
@@ -2291,7 +2356,6 @@ namespace SFClientRecon
                         }
                     }
                 }
-                EnsureControllerRefs();
                 if ((object)_ctrlTypeForNp != null)
                 {
                     var ctrls = UnityEngine.Object.FindObjectsOfType(_ctrlTypeForNp);
@@ -2306,18 +2370,10 @@ namespace SFClientRecon
                         }
                     }
                 }
-                var npType = AccessTools.TypeByName("NetworkPlayer");
-                if ((object)npType != null)
-                {
-                    foreach (var np in UnityEngine.Object.FindObjectsOfType(npType))
-                    {
-                        if (TryGetPlayerSlotFromNetworkPlayer(np, out _localSlot))
-                        {
-                            Log.LogInfo($"[P6.11] Discovered localSlot={_localSlot} (NetworkPlayer+Controller).");
-                            return _localSlot;
-                        }
-                    }
-                }
+                // NOTE: the old "first NetworkPlayer found" fallback is GONE on
+                // purpose — it's order-dependent and was the source of every
+                // client claiming slot 0. Returning -1 (inputs wait for spawn)
+                // is strictly better than caching a wrong slot.
             }
             catch (Exception e) { Log.LogWarning($"FindLocalSlot: {e.Message}"); }
             return -1;
