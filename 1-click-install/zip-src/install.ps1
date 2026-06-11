@@ -1,11 +1,12 @@
 # ===================================================================
-#  sf-multiplayer  -  Stick Fight Oracle  -  Instalador 1-Click
+#  sf-multiplayer  -  Stick Fight Oracle  -  1-Click Installer
 #  kitslayer
 #
-#  Detecta Stick Fight en cualquier biblioteca de Steam, hace BACKUP de tu
-#  Assembly-CSharp.dll original y COPIA el contenido de StickFight-DropIn\
-#  dentro de tu carpeta de Stick Fight (BepInEx + plugins + Assembly-CSharp
-#  parcheado). No borra nada tuyo salvo lo que reemplaza (con backup).
+#  Finds Stick Fight in any Steam library, BACKS UP your original
+#  Assembly-CSharp.dll, and copies the contents of StickFight-DropIn\
+#  into your Stick Fight folder (BepInEx + plugins + patched
+#  Assembly-CSharp). Nothing of yours is deleted except what gets
+#  replaced — and that is backed up first.
 # ===================================================================
 $ErrorActionPreference = 'Stop'
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -16,7 +17,7 @@ function Banner {
     Write-Host ''
     Write-Host '   sf-multiplayer   x   Stick Fight Oracle' -ForegroundColor Yellow
     Write-Host '   -----------------------------------------------------' -ForegroundColor DarkGray
-    Write-Host '   Instalador 1-Click   |   kitslayer' -ForegroundColor DarkGray
+    Write-Host '   1-Click Installer   |   kitslayer' -ForegroundColor DarkGray
     Write-Host ''
 }
 
@@ -39,55 +40,58 @@ function Find-StickFight {
 }
 
 Banner
-if (-not (Test-Path $Drop)) { throw "Falta la carpeta StickFight-DropIn junto a este instalador." }
+if (-not (Test-Path $Drop)) { throw "The StickFight-DropIn folder is missing next to this installer. Extract the WHOLE zip first - don't run the .bat from inside the zip preview." }
 
-Write-Host '[1/4] Buscando Stick Fight...' -ForegroundColor Cyan
+Write-Host '[1/4] Looking for Stick Fight...' -ForegroundColor Cyan
 $Sf = Find-StickFight
 if (-not $Sf) {
-    Write-Host '      No lo encontre automaticamente.' -ForegroundColor Yellow
-    $Sf = Read-Host '      Pega la ruta de la carpeta StickFightTheGame'
-    if (-not (Test-Path (Join-Path $Sf 'StickFight.exe'))) { throw 'Ruta invalida (no hay StickFight.exe).' }
+    Write-Host "      Couldn't find it automatically." -ForegroundColor Yellow
+    $Sf = Read-Host '      Paste the path to your StickFightTheGame folder'
+    if (-not (Test-Path (Join-Path $Sf 'StickFight.exe'))) { throw 'Invalid path (no StickFight.exe there).' }
 }
 Write-Host "      OK  $Sf" -ForegroundColor Green
 
-# Si esta corriendo, avisar (el DLL estaria bloqueado)
+# If the game is running, the DLL would be locked.
 $proc = Get-Process StickFight -ErrorAction SilentlyContinue
-if ($proc) { throw 'Stick Fight esta ABIERTO. Cerralo y volve a ejecutar el instalador.' }
+if ($proc) { throw 'Stick Fight is RUNNING. Close it and run the installer again.' }
 
-Write-Host '[2/4] Backup de tu Assembly-CSharp.dll original...' -ForegroundColor Cyan
+Write-Host '[2/4] Backing up your original Assembly-CSharp.dll...' -ForegroundColor Cyan
 $asm = Join-Path $Sf 'StickFight_Data\Managed\Assembly-CSharp.dll'
 $bak = "$asm.vanilla.bak"
-if ((Test-Path $asm) -and -not (Test-Path $bak)) { Copy-Item $asm $bak -Force; Write-Host '      Guardado: Assembly-CSharp.dll.vanilla.bak' -ForegroundColor Green }
-elseif (Test-Path $bak) { Write-Host '      Backup ya existe (no lo piso).' -ForegroundColor Green }
+if ((Test-Path $asm) -and -not (Test-Path $bak)) { Copy-Item $asm $bak -Force; Write-Host '      Saved: Assembly-CSharp.dll.vanilla.bak' -ForegroundColor Green }
+elseif (Test-Path $bak) { Write-Host '      Backup already exists (leaving it alone).' -ForegroundColor Green }
 
 if (Test-Path (Join-Path $Sf 'MelonLoader')) {
-    Write-Host '      AVISO: tenes MelonLoader. Convive con BepInEx; si el menu online falla, renombra version.dll temporalmente.' -ForegroundColor Yellow
+    Write-Host '      NOTE: you have MelonLoader. It coexists with BepInEx; if the online menu misbehaves, temporarily rename version.dll.' -ForegroundColor Yellow
 }
 
-Write-Host '[3/4] Copiando el mod dentro de Stick Fight...' -ForegroundColor Cyan
-# Copia recursiva del contenido del drop-in dentro de la carpeta del juego (merge).
+Write-Host '[3/4] Copying the mod into Stick Fight...' -ForegroundColor Cyan
+# Recursive merge-copy of the drop-in contents into the game folder.
 Copy-Item (Join-Path $Drop '*') $Sf -Recurse -Force
-Write-Host '      OK  BepInEx + plugins + Assembly-CSharp parcheado instalados.' -ForegroundColor Green
+Write-Host '      OK  BepInEx + plugins + patched Assembly-CSharp installed.' -ForegroundColor Green
 
-Write-Host '[4/4] Opciones de lanzamiento + acceso directo...' -ForegroundColor Cyan
+Write-Host '[4/4] Launch options + desktop shortcut...' -ForegroundColor Cyan
 $launchArgs = '-address 69.53.117.43 -port 1337'
-$bat = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Jugar-StickFight.bat'
+$bat = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Play-StickFight.bat'
 @"
 @echo off
 title sf-multiplayer  Stick Fight Oracle
 start "" "$Sf\StickFight.exe" $launchArgs
 "@ | Set-Content $bat -Encoding ASCII
-Write-Host "      Acceso directo: $bat" -ForegroundColor Green
+Write-Host "      Shortcut: $bat" -ForegroundColor Green
 
 Write-Host ''
 Write-Host '===================================================================' -ForegroundColor Green
-Write-Host '   INSTALACION COMPLETA  -  sf-multiplayer' -ForegroundColor Yellow
+Write-Host '   INSTALL COMPLETE  -  sf-multiplayer' -ForegroundColor Yellow
 Write-Host '===================================================================' -ForegroundColor Green
 Write-Host ''
-Write-Host '  Jugar:  doble clic en el escritorio  Jugar-StickFight.bat' -ForegroundColor White
-Write-Host '          (o en Steam -> Stick Fight -> Propiedades -> Opciones de' -ForegroundColor Gray
-Write-Host "           lanzamiento:  $launchArgs )" -ForegroundColor Cyan
-Write-Host '  En el juego: PLAY ONLINE -> QUICK MATCH. En el lobby: /start' -ForegroundColor White
+Write-Host '  Play:  double-click  Play-StickFight.bat  on your desktop' -ForegroundColor White
+Write-Host '         (or in Steam -> Stick Fight -> Properties -> Launch' -ForegroundColor Gray
+Write-Host "          Options:  $launchArgs )" -ForegroundColor Cyan
+Write-Host '  In game: PLAY ONLINE -> QUICK MATCH. In the lobby type: /start' -ForegroundColor White
 Write-Host ''
-Write-Host '  Revertir: DESINSTALAR-sf-multiplayer.bat' -ForegroundColor DarkGray
+Write-Host '  Not working? Check BepInEx\LogOutput.log exists in the game' -ForegroundColor Gray
+Write-Host '  folder after one launch - see README.txt, "TROUBLESHOOTING".' -ForegroundColor Gray
+Write-Host ''
+Write-Host '  Revert: UNINSTALL-sf-multiplayer.bat' -ForegroundColor DarkGray
 Write-Host ''

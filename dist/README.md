@@ -1,7 +1,7 @@
 # sf-multiplayer client bundle
 
 > ⚠️ **Players: use the [root 1-click installer zip](../sf-multiplayer-StickFight-Installer.zip) instead of this folder.**
-> The `SFLauncher.exe` / `sflauncher.sh` flow in here is an **older generation** that installs the server-side `SFHeadlessHost.dll` and does **not** install the patched `Assembly-CSharp` the client needs to connect — so it produces installs that won't reach the server. It's kept for reference until rebuilt. The zip (`INSTALAR-sf-multiplayer.bat`, or `1-click-install/` for the online installer) ships the correct payload: patched assembly + `SFClientRecon` + `SFServerBrowser`, with a backup + uninstaller.
+> The `SFLauncher.exe` / `sflauncher.sh` flow in here is an **older generation** that installs the server-side `SFHeadlessHost.dll` and does **not** install the patched `Assembly-CSharp` the client needs to connect — so it produces installs that won't reach the server. It's kept for reference until rebuilt. The zip (`INSTALL-sf-multiplayer.bat`, or `1-click-install/` for the online installer) ships the correct payload: patched assembly + `SFClientRecon` + `SFServerBrowser`, with a backup + uninstaller.
 
 **For comp players: one click, you're in a lobby.**
 

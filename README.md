@@ -3,7 +3,7 @@
 ## Try it: [sf-multiplayer 1-Click Installer (.zip)](https://github.com/kitslayer/sf-multiplayer/raw/main/sf-multiplayer-StickFight-Installer.zip)
 
 Self-contained — BepInEx, the client plugins and the patched `Assembly-CSharp` are all inside.
-Unzip → run **`INSTALAR-sf-multiplayer.bat`** → launch Stick Fight. That's it.
+Unzip → run **`INSTALL-sf-multiplayer.bat`** → launch Stick Fight. That's it.
 
 `SFClientRecon 0.5.3` · `SFServerBrowser 0.5.3` · native uGUI lobby (**F2**) · smooth crates
 

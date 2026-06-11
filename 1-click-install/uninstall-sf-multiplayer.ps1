@@ -63,9 +63,11 @@ foreach ($cfg in @('BepInEx\config\sf-oracle-endpoint.txt','BepInEx\config\alka-
     if (Test-Path $cf) { Remove-Item $cf -Force }
 }
 
-# 5) Remove the desktop shortcut.
-$bat = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Jugar-StickFight.bat'
-if (Test-Path $bat) { Remove-Item $bat -Force }
+# 5) Remove the desktop shortcut (current name + the old Spanish one from earlier installs).
+foreach ($name in @('Play-StickFight.bat','Jugar-StickFight.bat')) {
+    $b = Join-Path ([Environment]::GetFolderPath('Desktop')) $name
+    if (Test-Path $b) { Remove-Item $b -Force }
+}
 
 Write-Host ''
 Write-Host 'Done. Stick Fight is back to how it was before the mod — your other mods are untouched.' -ForegroundColor Green

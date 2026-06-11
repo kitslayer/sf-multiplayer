@@ -1,9 +1,9 @@
 @echo off
-:: sf-multiplayer - Stick Fight Oracle - Instalador 1-Click
-title sf-multiplayer  -  Instalar
+:: sf-multiplayer - Stick Fight Oracle - 1-Click Installer
+title sf-multiplayer  -  Install
 net session >nul 2>&1
 if %errorlevel% neq 0 (
-    echo Pidiendo permisos de administrador...
+    echo Requesting administrator permission...
     powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
     exit /b
 )
