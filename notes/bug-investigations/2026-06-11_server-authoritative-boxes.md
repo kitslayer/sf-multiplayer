@@ -82,6 +82,18 @@ Four live rounds with kit (laptop oracle + 2 Goldberg mirrors). Each round expos
 
 **Verified:** idle convergence, wire compat (0.5.x client vs 0.4.0 host), all patches install (`Patched IgnorePlayerWhenOffScreen.Update (headless cull kill)`).
 
-**NOT yet verified live (session ended before a clean run on the final build):** push feel with vanilla mass, settling, round transitions after the identity fix, bullet crate-kicks (never fired in test), explosions, late-join keyframe. Run the matrix above before any .115 deploy.
+### Evening session (same day) — pipeline VERIFIED WORKING live
 
-**Open observations to attribute next session:** P1 logged ~25k NullReferenceExceptions while sitting disconnected from a restarted oracle (clients do NOT re-handshake after an oracle restart — restart clients with it); one `TypeLoadException: IteratorStateMachineAttribute` from SFHeadlessHost loading client-side (likely long-standing; Mono 2.0 iterator attribute reflection).
+After five more root-caused fixes (commits `689791f`…`f93f8c1`), sustained healthy play across many rounds and transitions: **meanErr 0.06–0.10, maxErr <0.2, hard-snap counters frozen between rounds, void=0 on live maps**; combat envelope meanErr ~0.5 / maxErr ~2 with quick recovery (explosion parity is the known residual). First live bullet crate-kick fired. The fixes, each evidence-driven (wire sniffer / live debug console / console tees):
+
+1. **FindLocalSlot** (3 iterations): every client claimed slot 0 → slot 0's v26 endpoint flip-flopped 40×/s and slot 1's snapshots went to dead port :1339 (seen on the wire). Final: `NetworkPlayer.mHasLocalControl` → `Controller.playerID`; `mLocalPlayerIndex` only if nonzero (patched DLL never sets it in oracle mode); Controller path gated to offline; order-dependent fallback deleted.
+2. **Oracle map-scene tracking** via `sceneLoaded` hook: stale-settle-skip rounds left all NSO caches filtered to the previous map (authority broadcast old-scene crates → uniform 22–37u client errors; debug console caught "0 pushable crates" mid-match).
+3. **Client NSO cache scene filter** (mirror of the oracle's) + **grounded rescue gate**: a >8u correction is accepted only when our own crate fell below y=-20 — time-based acceptance had mass-teleported fields toward the previous map's layout.
+4. **NRE storm source-fix**: null P2PPackageHandler channel slots filled with empty queues (~150 NREs/s on every client, chronic FPS tax). Harmony-patching `IsPacketAvailable` on clients is FORBIDDEN (suspected packet-pump interference; see commit history).
+5. **Server bullet damage → SHADOW** ("fake hits"): the swept-sphere hit test against RTT-lagged ghost rigs emitted PlayerTookDamage on client-side misses — particles without HP change. Bullets now follow the throw-auth shadow pattern; `SFHEADLESS_BULLET_DAMAGE=1` re-enables.
+
+**Tooling added** (made the above findable): per-instance Unity console tees (`/tmp/sf-console-<port>.log`, timestamped), file-driven live debug console (`/tmp/sf-cmd-{1340,1342,oracle}.txt` → `boxes | box <id> | rigs`), `Mono2Polyfills.cs` in the host (kills the per-boot TypeLoadException).
+
+**Operational rules learned (also in private memory):** verify builds with "Build succeeded" + `strings -el` (UTF-16) probes of log literals — a failed build once shipped a stale DLL silently; after kills, verify port ownership with `ss -ulpn` (zombie wineservers share UDP ports and eat handshakes); clients need a human menu-click to connect (auto-connect's log lies) and do NOT re-handshake after an oracle restart.
+
+**Still open before .115:** explosion→crate parity (local blasts vs server); crate-kick classification uses `transform.root` (map root — should classify the rb's own subtree); pre-connect Controller slot-0 window (cosmetic); SFBoxFix dead code strip; server-browser local test (needs `SF_LOBBY_ENDPOINT=http://…:8080` on clients + `serve-lobbies.py` + `SF_LOBBY_CODE=MAIN` on the oracle — researched, not yet run); late-join keyframe test.
