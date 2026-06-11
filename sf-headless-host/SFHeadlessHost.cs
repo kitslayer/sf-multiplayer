@@ -296,12 +296,14 @@ namespace SFHeadlessHost
                     (object)mmType != null ? AccessTools.Method(mmType, "ReadyUp") : null,
                     postfix: nameof(ReadyUpPostfix));
 
+                // v0.4.0 — installed on BOTH oracle and clients (was batchmode-
+                // only; clients hit the identical null-channels NRE storm).
                 var ppTypeHeadless = AccessTools.TypeByName("P2PPackageHandler");
-                if (_batchModeHost && (object)ppTypeHeadless != null)
+                if ((object)ppTypeHeadless != null)
                 {
                     var isPkt = AccessTools.Method(ppTypeHeadless, "IsPacketAvailable");
                     if ((object)isPkt != null)
-                        TryPatch(harmony, "P2PPackageHandler.IsPacketAvailable (headless null-guard)",
+                        TryPatch(harmony, "P2PPackageHandler.IsPacketAvailable (null-channels guard)",
                             isPkt, prefix: nameof(IsPacketAvailableHeadlessPrefix));
                 }
 
@@ -1591,13 +1593,24 @@ namespace SFHeadlessHost
         // Generic skip-prefix: return false to skip the original method.
         internal static bool SkipPrefix() => false;
 
-        // Headless oracle: channels[channel] can be null → 40k+ NullRef/frame in ListenForPackages.
+        // channels[channel] can be null → NullRef/frame storms in
+        // ListenForPackages. v0.4.0: no longer batchmode-gated — the SAME
+        // null-channels NRE fired ~90k times on a CLIENT sitting disconnected
+        // from a restarted oracle (SyncableObjectManager.LateUpdate →
+        // ListenForPackages → IsPacketAvailable, every channel, every frame).
+        // FieldInfo is cached: this sits on the per-frame packet-poll path.
+        private static FieldInfo _ppChannelsField;
+        private static bool _ppChannelsLookupTried;
         internal static bool IsPacketAvailableHeadlessPrefix(object __instance, int channel, ref bool __result)
         {
-            if (!_batchModeHost) return true;
             try
             {
-                var chField = AccessTools.Field(__instance.GetType(), "channels");
+                if (!_ppChannelsLookupTried)
+                {
+                    _ppChannelsLookupTried = true;
+                    _ppChannelsField = AccessTools.Field(__instance.GetType(), "channels");
+                }
+                var chField = _ppChannelsField;
                 if ((object)chField == null) { __result = false; return false; }
                 var channels = chField.GetValue(__instance) as Array;
                 if (channels == null || channel < 0 || channel >= channels.Length)
@@ -4622,9 +4635,8 @@ namespace SFHeadlessHost
                         if (!_nsoByIndexCache.TryGetValue(id, out comp) || (object)comp == null)
                             continue;
                     }
-                    if (!IsPushableCrateNso(comp.gameObject)) continue;
                     var p = comp.transform.position;
-                    // Only act on crates that have left the playable area. A crate
+                    // Only act on NSOs that have left the playable area. A crate
                     // below the void threshold is never in legitimate play (no
                     // player push or throw arc lives down there) — it tunneled the
                     // floor due to server physics. The previous version SKIPPED
@@ -4633,6 +4645,32 @@ namespace SFHeadlessHost
                     // downward-velocity guards fired on exactly the crates we
                     // needed to rescue, and the guard never did anything.
                     if (p.y >= NsoFallResetY) continue;
+                    if (!IsPushableCrateNso(comp.gameObject))
+                    {
+                        // v0.4.0 — tracked NON-crate NSOs (ice debris etc.)
+                        // knocked into the void fell forever: the rescue below
+                        // is crates-only and the stale-NSO freezer deliberately
+                        // skips fall-guard-tracked ids, so nothing owned this
+                        // case (observed live: 7 bodies at y=-1366 and counting).
+                        // Stock SF's host killboxes such debris; parking it
+                        // kinematic is our equivalent.
+                        var rbsNp = comp.GetComponentsInChildren<Rigidbody>();
+                        if (rbsNp != null)
+                        {
+                            int frozeNp = 0;
+                            foreach (var rbn in rbsNp)
+                            {
+                                if ((object)rbn == null || rbn.isKinematic) continue;
+                                rbn.velocity = Vector3.zero;
+                                rbn.angularVelocity = Vector3.zero;
+                                rbn.isKinematic = true;
+                                frozeNp++;
+                            }
+                            if (frozeNp > 0)
+                                Log.LogInfo($"[BOXES] Froze void debris idx={id} Y={p.y:0.0} ({frozeNp} rb)");
+                        }
+                        continue;
+                    }
                     if (resetsThisTick >= NsoFallMaxResetPerTick) break;
 
                     Vector3 spawn = kv.Value;

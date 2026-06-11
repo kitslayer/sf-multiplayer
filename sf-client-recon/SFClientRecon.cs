@@ -158,6 +158,7 @@ namespace SFClientRecon
         {
             Log = Logger;
             Instance = this;
+            InstallUnityConsoleTee();
             foreach (var arg in Environment.GetCommandLineArgs())
             {
                 if (arg == "-batchmode" || arg == "-nographics")
@@ -268,7 +269,30 @@ namespace SFClientRecon
             }
             catch (Exception e) { Log.LogWarning($"[crate-cull] patch failed: {e.Message}"); }
 
+            // v0.6.0 — null-channels guard on P2PPackageHandler.IsPacketAvailable.
+            // In oracle-connect mode the Steam P2P channel array never
+            // initializes, so SyncableObjectManager.LateUpdate's per-frame
+            // packet poll threw ~150 NullReferenceExceptions PER SECOND on
+            // every client (22k+/session in output_log) — a chronic hidden
+            // frame-rate tax. The oracle has the same guard in SFHeadlessHost;
+            // it must live HERE too because p2-style clients don't load the
+            // host plugin (and its patch suite is batchmode-gated anyway).
+            try
+            {
+                var ppType = AccessTools.TypeByName("P2PPackageHandler");
+                var isPkt = (object)ppType != null ? AccessTools.Method(ppType, "IsPacketAvailable") : null;
+                if ((object)isPkt != null)
+                {
+                    var harmonyPp = new Harmony(PluginGuid + ".pp-null-guard");
+                    harmonyPp.Patch(isPkt, prefix: new HarmonyMethod(AccessTools.Method(typeof(Plugin), nameof(IsPacketAvailableNullGuardPrefix))));
+                    Log.LogInfo("Patched P2PPackageHandler.IsPacketAvailable (null-channels guard — kills the per-frame NRE storm).");
+                }
+                else Log.LogWarning("[pp-null-guard] IsPacketAvailable not found.");
+            }
+            catch (Exception e) { Log.LogWarning($"[pp-null-guard] install failed: {e.Message}"); }
+
             InstallClientTerrainPatches();
+            // (IsPacketAvailableNullGuardPrefix lives below, after Update().)
             InstallOracleLobbyConnectPatches();
             InstallNsoClientPushPatches();
             // Per-type ONLY (transpiles the 3 gimmick types' Update; never touches
@@ -735,6 +759,88 @@ namespace SFClientRecon
                 _lastInputWarnAt = Time.realtimeSinceStartup;
                 Log.LogWarning("[P6.12] No local slot yet — PlayerInput not sent. Wait for spawn.");
             }
+        }
+
+        // v0.6.0 — full Unity console tee. Subscribes to the engine's log
+        // callback and streams EVERY console line (all log levels, stack
+        // traces on errors, TIMESTAMPED — which output_log.txt lacks) to a
+        // per-instance file, so the live console can be followed from outside
+        // the process and correlated across instances. Path is unique per
+        // instance via the v26 listen port (p1=1340, p2=1342, default 1339).
+        private static System.IO.StreamWriter _consoleTee;
+        private static readonly object _consoleTeeLock = new object();
+        private void InstallUnityConsoleTee()
+        {
+            try
+            {
+                string port = Environment.GetEnvironmentVariable("SFCLIENTRECON_PORT");
+                if (string.IsNullOrEmpty(port)) port = "1339";
+                string path = "/tmp/sf-console-" + port + ".log";
+                _consoleTee = new System.IO.StreamWriter(path, false) { AutoFlush = true };
+                Application.logMessageReceivedThreaded += OnUnityLogMessage;
+                Log.LogInfo($"Unity console tee → {path}");
+            }
+            catch (Exception e) { Log.LogWarning($"[console-tee] {e.Message}"); }
+        }
+
+        private static void OnUnityLogMessage(string condition, string stackTrace, LogType type)
+        {
+            var w = _consoleTee;
+            if (w == null) return;
+            try
+            {
+                System.Threading.Monitor.Enter(_consoleTeeLock);
+                try
+                {
+                    w.Write(DateTime.Now.ToString("HH:mm:ss.fff"));
+                    w.Write(" [");
+                    w.Write(type.ToString());
+                    w.Write("] ");
+                    w.WriteLine(condition);
+                    if ((type == LogType.Exception || type == LogType.Error) && !string.IsNullOrEmpty(stackTrace))
+                        w.WriteLine(stackTrace);
+                }
+                finally { System.Threading.Monitor.Exit(_consoleTeeLock); }
+            }
+            catch { }
+        }
+
+        // Prefix on P2PPackageHandler.IsPacketAvailable. In oracle-connect
+        // mode the Steam P2P channel array never initializes, so the stock
+        // per-frame packet poll (SyncableObjectManager.LateUpdate →
+        // ListenForPackages) threw ~150 NREs/s per client. Report "no packet"
+        // instead of letting the original NRE. FieldInfo cached — this is on
+        // the per-frame hot path.
+        private static FieldInfo _ppChannelsField;
+        private static bool _ppChannelsLookupTried;
+        internal static bool IsPacketAvailableNullGuardPrefix(object __instance, int channel, ref bool __result)
+        {
+            try
+            {
+                if (!_ppChannelsLookupTried)
+                {
+                    _ppChannelsLookupTried = true;
+                    _ppChannelsField = AccessTools.Field(__instance.GetType(), "channels");
+                }
+                if ((object)_ppChannelsField == null) { __result = false; return false; }
+                var channels = _ppChannelsField.GetValue(__instance) as Array;
+                if (channels == null || channel < 0 || channel >= channels.Length)
+                {
+                    __result = false;
+                    return false;
+                }
+                if (channels.GetValue(channel) == null)
+                {
+                    __result = false;
+                    return false;
+                }
+            }
+            catch
+            {
+                __result = false;
+                return false;
+            }
+            return true;
         }
 
         // Smoothing targets — apply each frame in Update via exponential lerp.
@@ -1530,7 +1636,7 @@ namespace SFClientRecon
                 if (VerboseDiag && (_snapsApplied == 1 || _snapsApplied % 90 == 0))
                     Log.LogInfo($"[P6.14] NSO snap tick={tick} targeted {applied}/{snap.Count}");
             }
-            catch (Exception ex) { Log.LogWarning($"[P6.14 NSO apply] {ex.Message}"); }
+            catch (Exception ex) { Log.LogWarning($"[P6.14 NSO apply] {ex.GetType().Name}: {ex.Message}"); }
         }
 
         // Reconstruct the server rotation exactly like stock LerpLocalDummy
