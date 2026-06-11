@@ -184,6 +184,12 @@ Implementation lives in [`sf-headless-host/SFHeadlessHost.cs`](sf-headless-host/
 
 ## Development status
 
+> **Heads up on doc freshness:** this project moves fast and some of the notes
+> and READMEs linked below lag behind the code — facts in this top-level README
+> are kept current, but deeper docs may describe an older iteration. They'll be
+> brought up to date as the server gets closer to complete; when in doubt, the
+> commit history and `WHATS_NEW.md` are the freshest sources.
+
 - [`WHATS_NEW.md`](WHATS_NEW.md) — running session log (start here)
 - [`NEXT_STEPS.md`](NEXT_STEPS.md) — current state + remaining work
 - [`notes/ARCHITECTURE.md`](notes/ARCHITECTURE.md) — full system overview
