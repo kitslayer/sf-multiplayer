@@ -1,5 +1,8 @@
 # sf-multiplayer client bundle
 
+> ⚠️ **Players: use the [root 1-click installer zip](../sf-multiplayer-StickFight-Installer.zip) instead of this folder.**
+> The `SFLauncher.exe` / `sflauncher.sh` flow in here is an **older generation** that installs the server-side `SFHeadlessHost.dll` and does **not** install the patched `Assembly-CSharp` the client needs to connect — so it produces installs that won't reach the server. It's kept for reference until rebuilt. The zip (`INSTALAR-sf-multiplayer.bat`, or `1-click-install/` for the online installer) ships the correct payload: patched assembly + `SFClientRecon` + `SFServerBrowser`, with a backup + uninstaller.
+
 **For comp players: one click, you're in a lobby.**
 
 ## Windows
@@ -30,8 +33,11 @@ Subsequent launches just open the lobby browser directly (install step is skippe
 | `sflauncher.sh` | Linux/macOS one-click installer + browser launcher. |
 | `install-sf-client.bat` | (Optional Windows) install-only batch. SFLauncher.exe already does this; provided for users who want to install without the GUI. |
 | `install-sf-client.sh` | (Optional Linux) install-only script. Same as above. |
-| `SFHeadlessHost.dll` | Server-side plugin (auto-deployed by the installers). |
-| `SFClientRecon.dll` | Client-side plugin (auto-deployed by the installers). |
+| `SFClientRecon.dll` | Client-side plugin: snapshot reconciliation + input + lobby SELECT. |
+| `SFServerBrowser.dll` | Client-side plugin: in-game SERVERS menu (F3) + uGUI lobby (F2). |
+| `SFBoxFix.dll` | Client-side plugin: crate physics smoothing. |
+| `Assembly-CSharp.srv.v25.dll` | Patched game assembly (CLI `-address`/`-port` connect target). The piece the `dist/` scripts wrongly omit. |
+| `SFHeadlessHost.dll` | **Server-side** plugin — runs on the oracle, NOT a player's machine. Present here only for operators. |
 
 ## Troubleshooting
 

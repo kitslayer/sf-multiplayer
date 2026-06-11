@@ -2,7 +2,11 @@
 
 Where the project is and what's coming next. Refreshed continuously — see [`WHATS_NEW.md`](WHATS_NEW.md) for the running session log, [`notes/PROTOCOL.md`](notes/PROTOCOL.md) for the wire-format spec.
 
-> **Current state (2026-06-06) — this file + [`README.md`](README.md) are the source of truth; the other status docs are historical snapshots.** Live server: **`69.53.117.43`** (game UDP 1337, lobby browser TCP 8080). Maintainer: kit (solo; ALKA departed). Merged to `main` + live: single-port multi-lobby (router + control plane + in-game browser), box-physics fixes, and an audit-fix pass (installer/router/serve-lobbies hardening, host snapshot-serializer dedup + projectiles-on-FixedUpdate, P0-23 floor diagnostic). See [`WHATS_NEW.md`](WHATS_NEW.md) for the running log. Sections below dated 2026-05-23 are partially superseded.
+> **Current state (2026-06-11) — this file + [`README.md`](README.md) are the source of truth; the other status docs are historical snapshots.** Live server: **`69.53.117.43`** (game UDP 1337, router UDP 1338, lobby browser TCP 8080). Maintainer: kit (solo; ALKA departed, access fully revoked). Live build: `SFHeadlessHost 0.3.11`, `SFClientRecon 0.5.3`, `SFServerBrowser 0.5.3`, `SFBoxFix 0.2.4`.
+>
+> **Latest (2026-06-11): full-repo review + security/crash-containment pass** — see [`notes/REVIEW_2026-06-10.md`](notes/REVIEW_2026-06-10.md) for the audit and [`WHATS_NEW.md`](WHATS_NEW.md) for what shipped. Landed + deployed: slot↔source binding on player input/fire (no more driving other players), rate-guard sweep+cap, admin-gated chat commands, client drops non-server packets + clamps snapshot allocs, and crash containment (`RuntimeMaxSec` + `sf-oracle-watchdog` timer + honest `/healthz`) for the deterministic ~24h native crash.
+>
+> **Top still-open** (tracked in GitHub issues #2–#5 + the review): the ~24h crash *root cause* (now contained, not fixed — float-`+Inf` accumulator hypothesis in [`notes/CRASH_INVESTIGATION.md`](notes/CRASH_INVESTIGATION.md)); client `_localSlot` discovery never adopting `mLocalPlayerIndex` (#5/C-P1-B); the dist/ installer generation being broken (use the root zip); LICENSE-vs-tree contradiction on the patched assembly; real 2-client live verification of OPEN-1..6 (#4). Earlier audit-fix pass (2026-06-06): installer/router/serve-lobbies hardening, host snapshot-serializer dedup + projectiles-on-FixedUpdate, P0-23 floor diagnostic. Sections below dated 2026-05-23 are partially superseded.
 
 ## Current state
 
@@ -147,8 +151,8 @@ Prebuilt client artifacts — the patched `Assembly-CSharp.srv.v25.dll`, `SFClie
 - [`sf-headless-host/SFHeadlessHost.cs`](sf-headless-host/SFHeadlessHost.cs) — the live plugin (~6,400 lines; map-terrain helper in [`sf-headless-host/SfMapTerrainHost.cs`](sf-headless-host/SfMapTerrainHost.cs), ~1,280). Key entry points: `Awake()` (installs the Harmony patches), `SfDispatch` (inbound v25/v26 packet router), `HandlePlayerInput` (v26 `PktPlayerInput`), `HandlePlayerUpdate` (v25 position relay), `SpawnAuthoritativePlayersForAllClients` / `TrySpawnPlayer` / `ConfigureAuthoritativeRig` (server-authoritative rigs), `BuildWorldStateBody` (30Hz snapshot serializer), `TickProjectiles` (server-side projectile sim + hit reg)
 - [`notes/phase6/10-PHASE6.5-host-side-gameplay.md`](notes/phase6/10-PHASE6.5-host-side-gameplay.md) — current host-side patch set + rationale
 - [`notes/phase6/11-PHASE6.6-pickup-and-physics.md`](notes/phase6/11-PHASE6.6-pickup-and-physics.md) — pickup forwarding + diagnosis of why boxes initially didn't move
-- [`refs/decompiled/Assembly-CSharp/MultiplayerManager.cs`](refs/) — host-side dispatcher
-- [`refs/decompiled/Assembly-CSharp/NetworkSyncableObject.cs`](refs/) — the sync pattern (good reference for snapshot design)
+- `refs/decompiled/Assembly-CSharp/MultiplayerManager.cs` — host-side dispatcher *(local-only: `refs/` is the decompiled game source, gitignored for copyright — build it per the README, not on GitHub)*
+- `refs/decompiled/Assembly-CSharp/NetworkSyncableObject.cs` — the sync pattern, good reference for snapshot design *(local-only, same as above)*
 
 ## How to test locally
 
