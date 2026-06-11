@@ -57,7 +57,7 @@ if [ ! -d "$SF_PATH/BepInEx" ] || [ ! -f "$SF_PATH/winhttp.dll" ]; then
   TMP=$(mktemp -d)
   trap "rm -rf $TMP" EXIT
   if command -v curl >/dev/null 2>&1; then
-    curl -sSL "$BEPINEX_URL" -o "$TMP/bep.zip"
+    curl -fsSL "$BEPINEX_URL" -o "$TMP/bep.zip"
   elif command -v wget >/dev/null 2>&1; then
     wget -q "$BEPINEX_URL" -O "$TMP/bep.zip"
   else

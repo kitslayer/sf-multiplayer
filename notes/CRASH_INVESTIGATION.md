@@ -2,6 +2,21 @@
 
 Started 2026-05-23 night. Hard fault inside `StickFight.exe` while running under Proton/Wine. **7 distinct crash dumps in `/home/miles/sf-mirror-local/2026-05-23_*/` from this single day's testing.**
 
+## ⚠️ Update 2026-06-11 — it's PERIODIC, and there's a new clue + a mitigation
+
+Two findings from the 2026-06-10 review change the picture:
+
+1. **The crash is time-periodic, not gameplay-triggered.** On the live `.115` oracle it has fired **once per day at ~24h02m of process uptime** (22 occurrences logged; failure clock drifts +2m33s/day — Jun 1 17:58 → Jun 10 18:21, exactly tracking the restart→restart interval). Same `0x0057ed26` signature every time. A bug that fires on a fixed *uptime* clock regardless of player activity points at an **accumulating timer/counter**, not an event race.
+2. **`0x7f800004` is the float +Infinity bit pattern.** The faulting write is to `0x7f800004`; `0x7f800000` is exactly the IEEE-754 single-precision `+Inf` encoding. The instruction is `lock xadd [eax], ecx` with `EAX=0x7f800004` — i.e. a value that *should* be an object pointer is instead `(+Inf bits) + 4`. Working hypothesis: a `float` accumulator (a timer, an interpolation `t`, a counter) reaches `+Inf` after ~24h, gets reinterpreted/truncated into a pointer, and the atomic refcount increment on that garbage address faults. Next dump analysis should hunt for an un-reset `float` that grows monotonically with wall-clock uptime.
+3. **New failure MODE observed 2026-06-10:** after one daily crash the process **wedged instead of exiting** — alive 7h with CPU frozen, UDP port bound but deaf — so `Restart=on-failure` never fired and every monitor (systemd, `/healthz`, sf-monitor) reported it healthy while nobody could join.
+
+**Mitigations now deployed (`deploy/`):**
+- `sf-oracle.service.d/restart-daily.conf` — `RuntimeMaxSec=82800` (+10min jitter) + `Restart=always`: a clean restart ~1h inside the crash-free window turns the daily hard-crash into a ~25s blip.
+- `sf-oracle-watchdog.{sh,service,timer}` — every 2 min, UDP-Pings the oracle (via `healthcheck.py`) and restarts the unit if it's `active` but deaf past a 120s warm-up. This is what catches the wedge that `Restart=`/`RuntimeMaxSec` cannot (they need the process to exit).
+- `serve-lobbies.py` `/healthz` now does a real UDP probe and reports `lobbiesResponsive` + `status:"degraded"` (503) when a lobby is alive-but-deaf.
+
+These contain the symptom; the root cause (the +Inf accumulator) is still open. Fresh `crash.dmp` + `error.log` land daily in `~/sf-oracle/install/2026-*/` on `.115` — analyze one with the float-timer hypothesis.
+
 ## TL;DR
 
 The oracle is crashing **deterministically at the same x86 instruction address** during gameplay. Same bytes, same access violation, 5 separate crash dirs match perfectly. It's not a race; it's a code path. **Cause unknown without symbols.** Until we know more, do NOT speculate-patch — every revert and partial-fix this session has caused other regressions.

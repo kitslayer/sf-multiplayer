@@ -86,7 +86,7 @@ fi
 
 # ---- tooling check ----
 if command -v curl >/dev/null 2>&1; then
-  DL() { curl -sSL -o "$2" "$1"; }
+  DL() { curl -fsSL -o "$2" "$1"; }
 elif command -v wget >/dev/null 2>&1; then
   DL() { wget -q -O "$2" "$1"; }
 else

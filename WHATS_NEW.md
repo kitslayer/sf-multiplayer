@@ -1,3 +1,16 @@
+# What's new — 2026-06-11 security + crash-containment pass
+
+Full-repo review (`notes/REVIEW_2026-06-10.md`) plus the fixes that came out of it. Shipped + deployed live to `.115`.
+
+- **Security (host `SFHeadlessHost` 0.3.11):** `PktPlayerInput`/`PktClientFireWeapon` (msgType 40/41) now require the sending **source address to match the slot's handshaken owner** — a stranger can no longer drive or redirect another player's rig/snapshot stream (this also closes the ~20× keyframe amplification reflector). The per-source rate-guard table is now swept by last-touch and hard-capped (was an unbounded-growth OOM vector under a spoofed flood). Destructive chat commands (`/kick`, `/anticheat`, `/tickrate <hz>`) are gated behind `/admin <pass>` (`SF_ADMIN_PASS`) or `SF_ADMIN_STEAMIDS`. Chat text is control-char-sanitized before logging. A 5th client is now rejected instead of crammed into slot 0; client-asserted projectile speed is clamped.
+- **Security (client `SFClientRecon` 0.5.3):** the v26 UDP socket now **drops datagrams from any source other than the server** (was: anyone could inject snapshots/banners/SELECT-ACKs to teleport objects, spoof "banned" banners, or stall joins), and every snapshot section count is clamped to the packet's real capacity before allocating (was a multi-MB-per-packet GC-storm vector on the 32-bit game). The RX thread no longer dies permanently on a transient Windows `SocketException`.
+- **Crash containment** (the deterministic ~24h native crash — see [`notes/CRASH_INVESTIGATION.md`](notes/CRASH_INVESTIGATION.md), now updated with the periodicity + float-`+Inf` clue): `RuntimeMaxSec=82800`+`Restart=always` drop-in turns the daily hard-crash into a clean restart; a new `sf-oracle-watchdog` timer UDP-Pings the oracle every 2 min and restarts it if it's `active` but deaf (the 2026-06-10 wedge); `/healthz` now probes the port for real and reports `lobbiesResponsive`/`degraded`.
+- **Ops/packaging:** `deploy/start-oracle-server.sh` made executable (fresh `systemctl start` was failing `203/EXEC`); `deploy/stop-all-lobbies.bat` kills registered/`-batchmode` PIDs instead of `/IM StickFight.exe` (was killing a player's own game); installer `curl` calls now use `--fail`; the root installer zip's plugin payload refreshed to match `dist/` (was a version behind), and its scripts extracted to `1-click-install/zip-src/` so they're reviewable.
+
+> Removed the leftover sfdev-owned `SFOracleSocketHost.dll` (a benign rx-diagnostic, no source in repo) from the live oracle, and replaced the stale ALKA-built `SFBoxFix.dll` with the repo build (crate physics now matches what clients ship).
+
+---
+
 # What's new — single-port multi-lobby (merged to `main`)
 
 Single-port multi-lobby front-door so one server hosts many lobbies and players
@@ -40,7 +53,7 @@ capacity + ops), [`notes/ROUTER.md`](notes/ROUTER.md),
 
 Other key references:
 - [`notes/ARCHITECTURE.md`](notes/ARCHITECTURE.md) — system overview
-- [`notes/PROTOCOL.md`](notes/PROTOCOL.md) — wire-format spec (currently v26.5)
+- [`notes/PROTOCOL.md`](notes/PROTOCOL.md) — wire-format spec (currently v26.6)
 - [`notes/OBJECT_SYNC.md`](notes/OBJECT_SYNC.md) — how SF's three world-object sync mechanisms interact
 - [`notes/BUGS_BACKLOG.md`](notes/BUGS_BACKLOG.md) — bug incident log with the new "Open — needs verification" section
 - [`notes/AUDIT_2026-05-23.md`](notes/AUDIT_2026-05-23.md) — deep audit with 8 findings

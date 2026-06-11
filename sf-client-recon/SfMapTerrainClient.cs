@@ -626,6 +626,10 @@ namespace SFClientRecon
             if (o + 2 > bodyEnd) return;
             ushort count = (ushort)(pkt[o] | (pkt[o + 1] << 8));
             o += 2;
+            // C-P0-A — clamp to the body's physical capacity (min 9 bytes per
+            // entry) before reserving list capacity from a hostile count.
+            int maxCount = (bodyEnd - o) / 9;
+            if (count > maxCount) count = (ushort)(maxCount < 0 ? 0 : maxCount);
             list = new List<MapStateSnapEntry>(count);
             for (int i = 0; i < count; i++)
             {

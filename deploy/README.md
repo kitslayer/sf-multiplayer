@@ -24,6 +24,9 @@ Windows wrappers for the lobby management scripts. The Linux equivalents at the 
 | `SF_ORACLE_INSTALL` | `C:\Program Files (x86)\Steam\steamapps\common\StickFightTheGame` | Your Stick Fight install (must have `BepInEx/` + `SFHeadlessHost.dll` in plugins) |
 | `SF_BASE_PORT` | `1337` | First UDP port to try |
 | `SF_LOBBIES_DIR` | `%TEMP%\sf-lobbies` | Registry directory |
+| `SF_ANTICHEAT_ENFORCE` | `0` | `1` = drop rate-limit-violating packets (observe-only by default) |
+| `SF_ADMIN_PASS` | _(unset)_ | Password for in-game `/admin <pass>`; unlocks `/kick`, `/anticheat`, `/tickrate <hz>`. Unset = those commands are unavailable to everyone (fail closed). |
+| `SF_ADMIN_STEAMIDS` | _(unset)_ | Comma-separated SteamID64s auto-granted admin. SteamIDs are client-asserted in this protocol, so prefer `SF_ADMIN_PASS` for real trust. |
 
 ## Quickstart on Windows
 

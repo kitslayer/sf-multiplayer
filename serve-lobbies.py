@@ -36,6 +36,8 @@ import os
 import random
 import re
 import signal
+import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -256,11 +258,27 @@ class LobbyHandler(BaseHTTPRequestHandler):
             self._send(200, "application/json", body)
             return
         if self.path in ("/healthz", "/healthz/"):
-            # Simple liveness probe for monitoring (Prometheus, Uptime Robot,
-            # etc.). 200 if process is up + registry is readable.
-            alive_count = sum(1 for l in _merge_static(_load_lobbies_cached()) if l.get("alive"))
-            body = json.dumps({"status": "ok", "lobbiesAlive": alive_count}).encode()
-            self._send(200, "application/json", body)
+            # Liveness probe for monitoring (Prometheus, Uptime Robot, etc.).
+            # `lobbiesAlive` = registry pid exists; `lobbiesResponsive` = the
+            # UDP game port actually answered a Ping. status="degraded" when a
+            # lobby is alive-but-deaf (the 2026-06-10 wedge) so a monitor sees
+            # it even though the process is technically up.
+            lobbies = _merge_static(_load_lobbies_cached())
+            alive_count = sum(1 for l in lobbies if l.get("alive"))
+            responsive = 0
+            for l in lobbies:
+                if not l.get("alive"):
+                    continue
+                try:
+                    if _udp_responsive(int(l.get("port", "0"))):
+                        responsive += 1
+                except (ValueError, TypeError):
+                    pass
+            status = "ok" if (alive_count == 0 or responsive > 0) else "degraded"
+            code = 200 if status == "ok" else 503
+            body = json.dumps({"status": status, "lobbiesAlive": alive_count,
+                               "lobbiesResponsive": responsive}).encode()
+            self._send(code, "application/json", body)
             return
         self._send(404, "text/plain", b"Not found. Try GET /  or  GET /lobbies  or  GET /healthz\n")
 
@@ -453,6 +471,43 @@ def create_lobby(max_players: int = 4, public: bool = True, mode: int = 0) -> tu
     except OSError:
         pass
     return code, port, None
+
+
+# --- UDP liveness probe (for /healthz reporting only) -------------------------
+# `alive` (pid exists) is NOT enough: on 2026-06-10 the oracle process stayed
+# alive but its game loop was dead and the UDP port unanswering ("wedged"), and
+# /healthz still reported it up. This probe sends a v25 Ping (msgType 0) and
+# waits briefly for any reply — the same check healthcheck.py / the systemd
+# watchdog use. Results are cached per port so browser/monitor polling can't
+# fan out into a probe storm. Kept SEPARATE from `alive` on purpose: the reaper
+# tears down any non-`alive` lobby, and a momentary non-response (e.g. mid map
+# load) must not trigger a teardown — only a restart by the watchdog.
+_probe_cache: dict = {}
+_probe_lock = threading.Lock()
+
+def _udp_responsive(port: int, host: str = "127.0.0.1", ttl: float = 5.0,
+                    timeout: float = 0.4) -> bool:
+    now = time.time()
+    with _probe_lock:
+        c = _probe_cache.get(port)
+        if c and now - c[0] < ttl:
+            return c[1]
+    ok = False
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.settimeout(timeout)
+        ts = int(now) & 0xFFFFFFFF
+        ping = struct.pack("<I", ts) + bytes([0]) + struct.pack("<Q", 0) + bytes([0])
+        sock.sendto(ping, (host, port))
+        data, _ = sock.recvfrom(2048)
+        ok = len(data) >= 14
+    except OSError:
+        ok = False
+    finally:
+        sock.close()
+    with _probe_lock:
+        _probe_cache[port] = (now, ok)
+    return ok
 
 
 def _static_lobbies() -> list[dict]:

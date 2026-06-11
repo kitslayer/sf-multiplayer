@@ -62,7 +62,7 @@ namespace SFClientRecon
     {
         public const string PluginGuid = "com.stickfightdev.client-recon";
         public const string PluginName = "SFClientRecon";
-        public const string PluginVersion = "0.5.2";
+        public const string PluginVersion = "0.5.3";
 
         internal static ManualLogSource Log;
         // Verbose per-tick diagnostics OFF by default — they spammed the log and
@@ -349,6 +349,8 @@ namespace SFClientRecon
             GUI.color = prev;
         }
 
+        private uint _rxRejects;
+        private uint _rxSockErrs;
         private void RxLoop()
         {
             var ep = new IPEndPoint(IPAddress.Any, 0);
@@ -357,9 +359,34 @@ namespace SFClientRecon
                 try
                 {
                     byte[] pkt = _socket.Receive(ref ep);
+                    // C-P0-A — the socket is bound on 0.0.0.0 and the server's
+                    // address is public knowledge; without this check ANY host
+                    // that can reach our port can inject snapshots/banners/
+                    // SELECT-ACKs (teleport objects, spoof "banned" banners,
+                    // stall lobby joins). Address-only compare: the oracle and
+                    // the router share the address, but reply ports vary.
+                    if (_serverEp != null && !ep.Address.Equals(_serverEp.Address))
+                    {
+                        _rxRejects++;
+                        if (_rxRejects == 1 || _rxRejects % 500 == 0)
+                            Log.LogWarning($"RX: dropped packet from non-server source {ep} (server={_serverEp.Address}, total dropped {_rxRejects})");
+                        continue;
+                    }
                     HandlePacket(pkt);
                 }
-                catch (SocketException) { break; }
+                catch (SocketException e)
+                {
+                    // C-P1-A — on Windows, an ICMP port-unreachable for a
+                    // datagram WE sent surfaces as a SocketException on the
+                    // next Receive (WSAECONNRESET). Breaking here killed the
+                    // snapshot listener for the rest of the session while TX
+                    // kept flowing — "connected but frozen". Keep listening
+                    // unless we're actually shutting down.
+                    if (!_running) break;
+                    _rxSockErrs++;
+                    if (_rxSockErrs == 1 || _rxSockErrs % 100 == 0)
+                        Log.LogWarning($"RX socket: {e.Message} (continuing, total {_rxSockErrs})");
+                }
                 catch (ObjectDisposedException) { break; }
                 catch (Exception e) { Log.LogWarning($"RX: {e.Message}"); }
             }
@@ -416,8 +443,14 @@ namespace SFClientRecon
             uint tick = (uint)(pkt[bodyOff] | (pkt[bodyOff + 1] << 8) | (pkt[bodyOff + 2] << 16) | (pkt[bodyOff + 3] << 24));
             byte playerCount = pkt[bodyOff + 4];
             int o = bodyOff + 5;
-            var list = new List<SnapshotEntry>(playerCount);
             int playerEntrySize = 1 + 12 + 4;  // slot + 3 floats + u32 lastInputSeq (v26.2)
+            // C-P0-A — clamp every section count to what the body can actually
+            // hold BEFORE sizing the list: counts are attacker-influencable and
+            // a u16 of 65535 would reserve megabytes per datagram on a 32-bit
+            // process even though the parse loop itself stays in bounds.
+            int maxPlayers = (bodyOff + bodyLen - o) / playerEntrySize;
+            if (playerCount > maxPlayers) playerCount = (byte)(maxPlayers < 0 ? 0 : maxPlayers);
+            var list = new List<SnapshotEntry>(playerCount);
             for (int i = 0; i < playerCount; i++)
             {
                 if (o + playerEntrySize > bodyOff + bodyLen) break;
@@ -439,8 +472,10 @@ namespace SFClientRecon
             {
                 ushort nsoCount = (ushort)(pkt[o] | (pkt[o + 1] << 8));
                 o += 2;
-                nsoList = new List<NsoSnapEntry>(nsoCount);
                 int nsoEntrySize = 2 + 16;
+                int maxNso = (bodyOff + bodyLen - o) / nsoEntrySize;
+                if (nsoCount > maxNso) nsoCount = (ushort)(maxNso < 0 ? 0 : maxNso);
+                nsoList = new List<NsoSnapEntry>(nsoCount);
                 for (int i = 0; i < nsoCount; i++)
                 {
                     if (o + nsoEntrySize > bodyOff + bodyLen) break;
@@ -482,6 +517,8 @@ namespace SFClientRecon
                 ushort mapSyncCount = (ushort)(pkt[o] | (pkt[o + 1] << 8));
                 o += 2;
                 int mapSyncEntrySize = 20;
+                int maxMapSync = (bodyOff + bodyLen - o) / mapSyncEntrySize;
+                if (mapSyncCount > maxMapSync) mapSyncCount = (ushort)(maxMapSync < 0 ? 0 : maxMapSync);
                 mapSyncList = new List<MapSyncSnapEntry>(mapSyncCount);
                 for (int i = 0; i < mapSyncCount; i++)
                 {
