@@ -76,7 +76,7 @@ namespace SFHeadlessHost
     {
         public const string PluginGuid = "com.stickfightdev.headless-host";
         public const string PluginName = "SFHeadlessHost";
-        public const string PluginVersion = "0.3.10";
+        public const string PluginVersion = "0.3.11";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance;
@@ -2098,6 +2098,8 @@ namespace SFHeadlessHost
             public uint LastInputSeq;
             // Phase 6.15.1 — has the server-emitted welcome chat been sent yet?
             public bool SentWelcome;
+            // H-P0-3 — granted via /admin <pass> (or SF_ADMIN_STEAMIDS match).
+            public bool IsAdmin;
         }
         private readonly Dictionary<string, SfClient> _sfClients = new Dictionary<string, SfClient>();
         private float _lastStateEmit;
@@ -2254,6 +2256,22 @@ namespace SFHeadlessHost
                     ResetMatchStateForLobby();
                 }
             }
+            // H-P0-2 — prune rate guards by their own last-touch, independent of
+            // _sfClients membership. Guards are keyed per source ENDPOINT and are
+            // created for msgType 40/41 sources that never get an _sfClients
+            // entry, so the per-client removal above never reaps them — a
+            // spoofed-source flood would grow the dict without bound.
+            List<string> guardsToRemove = null;
+            foreach (var kv in _rateGuards)
+            {
+                if (kv.Value.LastTouch < cutoff)
+                {
+                    if (guardsToRemove == null) guardsToRemove = new List<string>();
+                    guardsToRemove.Add(kv.Key);
+                }
+            }
+            if (guardsToRemove != null)
+                foreach (var k in guardsToRemove) _rateGuards.Remove(k);
         }
 
         private void ResetMatchStateForLobby()
@@ -2732,16 +2750,68 @@ namespace SFHeadlessHost
         // raw UTF-8 (verified from decompiled NetworkPlayer.OnTalked). If the
         // text starts with '/' we treat it as a server command. Format mirrors
         // ALKA's MOD_CLIENT.md (/code, /room, /ping, /start initially).
+        // === H-P0-3 — admin gating for destructive chat commands ===
+        // Two ways to be admin: (a) your handshake SteamID is listed in
+        // SF_ADMIN_STEAMIDS (comma-separated SteamID64s), or (b) you run
+        // /admin <password> matching SF_ADMIN_PASS this session. With neither
+        // env set, the gated commands are simply unavailable (fail closed).
+        // SteamIDs are client-asserted in this protocol (no auth ticket), so
+        // the password path is the stronger one; the ID list is convenience
+        // for trusted regulars on a server whose operator accepts that risk.
+        private static HashSet<ulong> _adminSteamIds;
+        private static string _adminPass;
+        private static bool _adminEnvLoaded;
+        private static void EnsureAdminEnvLoaded()
+        {
+            if (_adminEnvLoaded) return;
+            _adminEnvLoaded = true;
+            _adminSteamIds = new HashSet<ulong>();
+            string ids = Environment.GetEnvironmentVariable("SF_ADMIN_STEAMIDS");
+            if (!string.IsNullOrEmpty(ids))
+            {
+                foreach (var part in ids.Split(','))
+                {
+                    ulong sid;
+                    if (ulong.TryParse(part.Trim(), out sid) && sid != 0) _adminSteamIds.Add(sid);
+                }
+            }
+            string pass = Environment.GetEnvironmentVariable("SF_ADMIN_PASS");
+            _adminPass = string.IsNullOrEmpty(pass) ? null : pass;
+        }
+        private static bool IsAdminSender(SfClient sender)
+        {
+            EnsureAdminEnvLoaded();
+            if (sender.IsAdmin) return true;
+            return sender.SteamID != 0 && _adminSteamIds.Contains(sender.SteamID);
+        }
+        // H-P1-4 — chat text is attacker-controlled; embedded control chars
+        // (\n, \r, ESC) would let a player forge log lines (which feed
+        // sf-monitor) or splatter terminal escapes. Replace with spaces and
+        // cap the length before anything logs or parses it.
+        private static string SanitizeChatText(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return raw;
+            int cap = raw.Length > 256 ? 256 : raw.Length;
+            var sb = new System.Text.StringBuilder(cap);
+            for (int i = 0; i < cap; i++)
+            {
+                char c = raw[i];
+                sb.Append(c < ' ' ? ' ' : c);
+            }
+            return sb.ToString();
+        }
+
         private void TryProcessChatCommand(SfClient sender, byte[] data, int off, int len)
         {
             try
             {
                 if (len == 0) return;
-                string text = System.Text.Encoding.UTF8.GetString(data, off, len);
+                string text = SanitizeChatText(System.Text.Encoding.UTF8.GetString(data, off, len));
                 if (string.IsNullOrEmpty(text) || text[0] != '/') return;
                 var space = text.IndexOf(' ');
                 string cmd = (space < 0 ? text : text.Substring(0, space)).ToLowerInvariant();
-                Log.LogInfo($"[chat] slot={sender.Slot} command='{text}'");
+                // Don't echo /admin arguments (the password) into the log.
+                Log.LogInfo($"[chat] slot={sender.Slot} command='{(cmd == "/admin" ? "/admin ***" : text)}'");
                 switch (cmd)
                 {
                     case "/code":
@@ -2831,8 +2901,34 @@ namespace SFHeadlessHost
                     case "/lobbies":
                         SendChatToPlayer(sender, ListOtherLobbiesFromRegistry());
                         break;
+                    case "/admin":
+                    {
+                        EnsureAdminEnvLoaded();
+                        string arg = (space < 0 ? "" : text.Substring(space + 1).Trim());
+                        if ((object)_adminPass == null)
+                        {
+                            SendChatToPlayer(sender, "Admin login is not configured on this server.");
+                        }
+                        else if (arg == _adminPass)
+                        {
+                            sender.IsAdmin = true;
+                            Log.LogInfo($"[chat] slot={sender.Slot} (steamID={sender.SteamID}) authenticated as admin.");
+                            SendChatToPlayer(sender, "Admin granted for this session.");
+                        }
+                        else
+                        {
+                            Log.LogWarning($"[chat] slot={sender.Slot} (steamID={sender.SteamID}) failed /admin auth.");
+                            SendChatToPlayer(sender, "Wrong password.");
+                        }
+                        break;
+                    }
                     case "/kick":
                     {
+                        if (!IsAdminSender(sender))
+                        {
+                            SendChatToPlayer(sender, "/kick is admin-only. Authenticate with /admin <password>.");
+                            break;
+                        }
                         string arg = (space < 0 ? "" : text.Substring(space + 1).Trim());
                         if (string.IsNullOrEmpty(arg) || !int.TryParse(arg, out int targetSlot) || targetSlot < 0 || targetSlot > 3)
                         {
@@ -2854,6 +2950,11 @@ namespace SFHeadlessHost
                     }
                     case "/anticheat":
                     {
+                        if (!IsAdminSender(sender))
+                        {
+                            SendChatToPlayer(sender, "/anticheat is admin-only. Authenticate with /admin <password>.");
+                            break;
+                        }
                         string arg = (space < 0 ? "" : text.Substring(space + 1).Trim()).ToLowerInvariant();
                         if (arg == "on" || arg == "1" || arg == "true" || arg == "enforce")
                         {
@@ -2926,6 +3027,10 @@ namespace SFHeadlessHost
                             int hz = (fd > 0f) ? (int)System.Math.Round(1.0 / fd) : 0;
                             SendChatToPlayer(sender, $"Server physics tickrate: {hz}Hz (fixedDeltaTime={fd:0.0000}s). Snapshot broadcast: 30Hz.");
                         }
+                        else if (!IsAdminSender(sender))
+                        {
+                            SendChatToPlayer(sender, "Setting /tickrate is admin-only. Authenticate with /admin <password>.");
+                        }
                         else
                         {
                             int hz;
@@ -2945,7 +3050,7 @@ namespace SFHeadlessHost
                         break;
                     }
                     case "/help":
-                        SendChatToPlayer(sender, "Commands: /code /ping /start /restart /next /map /listmaps /players /lobbies /tickrate /weapons /kick /anticheat /version /help");
+                        SendChatToPlayer(sender, "Commands: /code /ping /start /restart /next /map /listmaps /players /lobbies /weapons /tickrate /version /help — admin (/admin <pass>): /kick /anticheat /tickrate <hz>");
                         break;
                     default:
                         SendChatToPlayer(sender, "Unknown command. Type /help");
@@ -3007,7 +3112,15 @@ namespace SFHeadlessHost
             public Queue<float> Object     = new Queue<float>();
             public int Violations;
             public float LastViolationLog;
+            // H-P0-2 — last packet seen from this endpoint; SweepStaleClients
+            // prunes guards whose LastTouch went cold.
+            public float LastTouch;
         }
+        // Hard ceiling on distinct tracked source endpoints. When full (active
+        // spoofed flood), packets from NEW sources are dropped outright —
+        // fail-closed beats unbounded memory growth.
+        private const int MaxRateGuardEntries = 256;
+        private uint _rateGuardCapDrops;
         private const int MaxAllPerSec        = 240;   // vanilla ≈ 80-100
         private const int MaxPlayerUpdPerSec  = 120;   // vanilla ≈ 60
         private const int MaxDamagePerSec     = 30;    // vanilla bursts <10
@@ -3021,12 +3134,36 @@ namespace SFHeadlessHost
             try
             {
                 string key = from.ToString();
+                float now = Time.realtimeSinceStartup;
                 if (!_rateGuards.TryGetValue(key, out var g))
                 {
+                    if (_rateGuards.Count >= MaxRateGuardEntries)
+                    {
+                        // Emergency prune of guards idle >10s, then re-check.
+                        List<string> stale = null;
+                        foreach (var kv in _rateGuards)
+                        {
+                            if (kv.Value.LastTouch < now - 10f)
+                            {
+                                if (stale == null) stale = new List<string>();
+                                stale.Add(kv.Key);
+                            }
+                        }
+                        if (stale != null) foreach (var k in stale) _rateGuards.Remove(k);
+                        if (_rateGuards.Count >= MaxRateGuardEntries)
+                        {
+                            // Still saturated — active flood. Refuse to track or
+                            // process packets from brand-new sources.
+                            _rateGuardCapDrops++;
+                            if (_rateGuardCapDrops == 1 || _rateGuardCapDrops % 1000 == 0)
+                                Log.LogWarning($"[anticheat] rate-guard table full ({MaxRateGuardEntries}) — dropping packet from new source {key} (total cap-drops {_rateGuardCapDrops})");
+                            return true;
+                        }
+                    }
                     g = new RateGuard();
                     _rateGuards[key] = g;
                 }
-                float now = Time.realtimeSinceStartup;
+                g.LastTouch = now;
                 RotateQueue(g.All, now);
                 g.All.Enqueue(now);
                 if (g.All.Count > MaxAllPerSec) { ReportViolation(g, key, "total", g.All.Count); overLimit = true; }
@@ -3643,6 +3780,15 @@ namespace SFHeadlessHost
 
             // Assign a slot only if eviction didn't reuse one.
             int slot = cli.Slot >= 0 ? cli.Slot : AllocSlot(cli);
+            if (slot < 0)
+            {
+                // H-P1-2 — all 4 slots taken: don't send ClientInit (the client
+                // will keep retrying / time out) and don't keep a tracked entry
+                // that would receive broadcasts for a player who never joined.
+                Log.LogWarning($"[SF] Server full — rejecting ClientRequestingIndex from {cli.Addr} steamID={cli.SteamID}.");
+                _sfClients.Remove(cli.Addr.ToString());
+                return;
+            }
             cli.Slot = slot;
             Log.LogInfo($"[SF] ClientRequestingIndex from {cli.Addr} steamID={cli.SteamID} players={playerCount}; assigning slot {slot}; building ClientInit.");
 
@@ -3917,6 +4063,28 @@ namespace SFHeadlessHost
             ax = Mathf.Clamp(ax, -1f, 1f);
             ay = Mathf.Clamp(ay, -1f, 1f);
 
+            // H-P0-1 — slot ↔ source binding. Only the handshaken client that
+            // owns this slot may drive it or move its snapshot endpoint. The
+            // v26 socket uses a different PORT than the game socket, so we
+            // bind at ADDRESS granularity. This also gates the P0-13 keyframe
+            // reply (H-P1-1: ~20x amplification to spoofed sources otherwise).
+            // Known residual: clients sharing one address (same NAT / same
+            // machine / router-forwarded flows, which all arrive from the
+            // router's address) can still cross-drive each other's slots —
+            // the router's per-IP flow caps and the rate guards bound that.
+            SfClient owner = null;
+            foreach (var kv in _sfClients)
+            {
+                if (kv.Value.Slot == slot) { owner = kv.Value; break; }
+            }
+            if (owner == null || (object)owner.Addr == null || (object)from == null
+                || !owner.Addr.Address.Equals(from.Address))
+            {
+                _inputPacketsDropped++;
+                if (_inputPacketsDropped == 1 || _inputPacketsDropped % 200 == 0)
+                    Log.LogWarning($"[P6.12] Dropped PlayerInput for slot {slot} from non-owner {from} (owner addr={(owner == null || (object)owner.Addr == null ? "<none>" : owner.Addr.Address.ToString())}) — total dropped {_inputPacketsDropped}");
+                return;
+            }
             SlotInputs[slot] = new InputFrame
             {
                 StickX  = sx,
@@ -3925,40 +4093,29 @@ namespace SFHeadlessHost
                 AimY    = ay,
                 Buttons = (int)btns,
             };
-            // Find the SfClient owning this slot to stamp LastInputSeq AND refresh
-            // LastSeen. Without the LastSeen update, a client that finished the
-            // lobby handshake and is streaming v26 PlayerInput at 60Hz still got
-            // swept as "stale" (the game-socket LastSeen went cold) → the player
-            // dropped from the server seconds after connecting. v26 input IS proof
-            // of life.
-            foreach (var kv in _sfClients)
-            {
-                if (kv.Value.Slot == slot)
-                {
-                    kv.Value.LastInputSeq = seq;
-                    kv.Value.LastSeen = Time.realtimeSinceStartup;
-                    break;
-                }
-            }
+            // Stamp LastInputSeq AND refresh LastSeen on the owner. Without the
+            // LastSeen update, a client that finished the lobby handshake and is
+            // streaming v26 PlayerInput at 60Hz still got swept as "stale" (the
+            // game-socket LastSeen went cold) → the player dropped from the
+            // server seconds after connecting. v26 input IS proof of life.
+            owner.LastInputSeq = seq;
+            owner.LastSeen = Time.realtimeSinceStartup;
             // Record this client's v26 source addr — server snapshots get sent
             // back to this same IP:port (client uses single bidirectional socket).
-            if ((object)from != null)
+            if (!_slotV26Endpoint.TryGetValue(slot, out var existing) || !existing.Equals(from))
             {
-                if (!_slotV26Endpoint.TryGetValue(slot, out var existing) || !existing.Equals(from))
+                _slotV26Endpoint[slot] = from;
+                Log.LogInfo($"[P6.12] Slot {slot} v26 endpoint → {from}");
+                // P0-13 — send a full-keyframe snapshot to this new
+                // endpoint so it learns the current position of every
+                // NSO, not just the ones currently moving. The regular
+                // snapshot stream filters at-rest NSOs; without this
+                // keyframe a late-joining client would never learn the
+                // box positions until something pushed them.
+                if (_matchStarted)
                 {
-                    _slotV26Endpoint[slot] = from;
-                    Log.LogInfo($"[P6.12] Slot {slot} v26 endpoint → {from}");
-                    // P0-13 — send a full-keyframe snapshot to this new
-                    // endpoint so it learns the current position of every
-                    // NSO, not just the ones currently moving. The regular
-                    // snapshot stream filters at-rest NSOs; without this
-                    // keyframe a late-joining client would never learn the
-                    // box positions until something pushed them.
-                    if (_matchStarted)
-                    {
-                        try { SendKeyframeSnapshotToEndpoint(from); }
-                        catch (Exception ex) { Log.LogWarning($"[P0-13] keyframe send failed: {ex.Message}"); }
-                    }
+                    try { SendKeyframeSnapshotToEndpoint(from); }
+                    catch (Exception ex) { Log.LogWarning($"[P0-13] keyframe send failed: {ex.Message}"); }
                 }
             }
             _inputPacketsRx++;
@@ -4496,6 +4653,11 @@ namespace SFHeadlessHost
         private uint _nextProjId = 1;
         private const float DefaultProjectileSpeed = 60f;     // SF-units/s for pistol
         private const float DefaultProjectileLifetime = 3f;   // 3s before expire
+        // Ceiling on client-asserted projectile speed (issue #2). Fastest stock
+        // bullets are well under 120u/s; an uncapped value lets a hostile
+        // client tunnel projectiles through wall-occlusion linecasts or blow
+        // up the swept-sphere math.
+        private const float MaxProjectileSpeed = 200f;
 
         // === Phase 6.18 — server-authoritative thrown weapons (fixes the high-FPS "whiff") ===
         // The client's ThrownWeapon.LateUpdate hit-check is a per-render-frame raycast, so
@@ -4534,7 +4696,21 @@ namespace SFHeadlessHost
             float dz = BitConverter.ToSingle(data, off + 22);
             float speed = BitConverter.ToSingle(data, off + 26);
             if (ownerSlot > 3) { Log.LogWarning($"[P6.17] Fire reject — bad slot {ownerSlot}"); return; }
+            // H-P0-1 (type 41 leg) — same slot ↔ source-address binding as
+            // PlayerInput: only the slot owner's address may fire for it.
+            SfClient fireOwner = null;
+            foreach (var kv in _sfClients)
+            {
+                if (kv.Value.Slot == ownerSlot) { fireOwner = kv.Value; break; }
+            }
+            if (fireOwner == null || (object)fireOwner.Addr == null || (object)from == null
+                || !fireOwner.Addr.Address.Equals(from.Address))
+            {
+                Log.LogWarning($"[P6.17] Fire reject — slot {ownerSlot} from non-owner {from}");
+                return;
+            }
             if (speed <= 0f || float.IsNaN(speed) || float.IsInfinity(speed)) speed = DefaultProjectileSpeed;
+            if (speed > MaxProjectileSpeed) speed = MaxProjectileSpeed;
             var dir = new Vector3(dx, dy, dz);
             if (dir.sqrMagnitude < 0.01f) { Log.LogWarning($"[P6.17] Fire reject — zero/NaN direction"); return; }
             dir.Normalize();
@@ -5294,7 +5470,11 @@ namespace SFHeadlessHost
                 foreach (var kv in _sfClients) if (kv.Value.Slot == s) { taken = true; break; }
                 if (!taken) return s;
             }
-            return 0; // overflow — should reject in real impl
+            // H-P1-2 — server full. Returning 0 here crammed a 5th client into
+            // slot 0: channel routing (slot*2+2 / slot*2+3), SlotToRig[0] and
+            // the snapshot endpoint all collided for both occupants. Caller
+            // drops the join instead.
+            return -1;
         }
 
         // Serialize a packet with the 14-byte wrapper and send to one client.
