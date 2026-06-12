@@ -5,7 +5,7 @@
 Self-contained — BepInEx, the client plugins and the patched `Assembly-CSharp` are all inside.
 Unzip → run **`INSTALL-sf-multiplayer.bat`** → launch Stick Fight. That's it.
 
-`SFClientRecon 0.5.3` · `SFServerBrowser 0.5.3` · native uGUI lobby (**F2**) · smooth crates
+`SFClientRecon 0.6.0` · `SFServerBrowser 0.5.3` · native uGUI lobby (**F2**) · server-synced crates
 
 Something not working? See [Install troubleshooting](#install-troubleshooting).
 
