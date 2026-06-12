@@ -23,7 +23,7 @@ A real Stick Fight Unity binary runs headlessly on the server, with a BepInEx pl
 │                                    │  ◄────  │        (prefix → forward to v25)   │
 │                                    │  v26    │      • Controller.Update input    │
 │                                    │  snap   │        injection prefix            │
-│                                    │  30Hz   │                                    │
+│                                    │  60Hz   │                                    │
 └────────────────────────────────────┘         └────────────────────────────────────┘
 ```
 
@@ -108,7 +108,7 @@ Small companion plugin. Bound at `SFCLIENTRECON_PORT` (default 1339 on Steam SF,
 
 Functions:
 
-1. **Receive** `WorldStateSnapshot` (msgType 39) at 30Hz:
+1. **Receive** `WorldStateSnapshot` (msgType 39) at 60Hz:
    - Parse player positions (slot, x, y, z, lastInputSeq)
    - Parse NSO positions (id, x, y, z, rotZ)
    - Parse projectile positions (id, slot, weaponType, x, y, z)
@@ -144,7 +144,7 @@ Every packet:
 
 | ID | Direction | Body shape | Purpose |
 |----|-----------|------------|---------|
-| 39 | server → all clients, 30Hz | `u32 tick, u8 nPlayers, [u8 slot, f32 x, f32 y, f32 z, u32 lastInputSeq]×n, u16 nNSOs, [u16 id, f32 x, f32 y, f32 z, f32 rotZ]×m, u16 nProjs, [u32 id, u8 slot, u8 wType, f32 x, f32 y, f32 z]×k, u16 nMapSync, [f32 startX, f32 startY, f32 x, f32 y, f32 z]×p, u16 nMapState, [f32 startX, f32 startY, u8 dataLen, dataLen bytes]×q` | Authoritative state snapshot. `WorldStateSnapshot`. The mapSync section (v26.5) carries `MapInfoSyncableBase` *positions* keyed by their `m_StartPos` Vector2; the mapState section (v26.6) carries their `GetData()` payloads (e.g. GhostPlatform on/off). |
+| 39 | server → all clients, 60Hz | `u32 tick, u8 nPlayers, [u8 slot, f32 x, f32 y, f32 z, u32 lastInputSeq]×n, u16 nNSOs, [u16 id, f32 x, f32 y, f32 z, f32 rotZ]×m, u16 nProjs, [u32 id, u8 slot, u8 wType, f32 x, f32 y, f32 z]×k, u16 nMapSync, [f32 startX, f32 startY, f32 x, f32 y, f32 z]×p, u16 nMapState, [f32 startX, f32 startY, u8 dataLen, dataLen bytes]×q` | Authoritative state snapshot. `WorldStateSnapshot`. The mapSync section (v26.5) carries `MapInfoSyncableBase` *positions* keyed by their `m_StartPos` Vector2; the mapState section (v26.6) carries their `GetData()` payloads (e.g. GhostPlatform on/off). |
 | 40 | client → server, 60Hz | `u32 seq, u8 slot, f32 stickX, f32 stickY, f32 aimX, f32 aimY, u32 buttons` | `PktPlayerInput` — player input for prediction+reconciliation |
 | 41 | client → server, event | `u8 slot, u8 wType, f32 oX, f32 oY, f32 oZ, f32 dX, f32 dY, f32 dZ, f32 speed` | `PktClientFireWeapon` — local Weapon.ActuallyShoot; server registers projectile |
 | 42 | server → all clients, event | UTF-8 banner text | `PktV26Announce` — recon plugin draws it for ~3s |
@@ -174,7 +174,7 @@ NSO POSITIONS (boxes, chains, ice, crates — NOT moving platforms; see below)
   Wire: oracle's NSO.TickSyncPos fires at 5Hz, calls
     SendMessageToAllClients(ObjectUpdate, channel=10). Our prefix forwards
     to v25 clients with channel preserved. v26 WorldStateSnapshot adds
-    a global 30Hz snapshot covering all moving NSOs with a 1s keepalive.
+    a global 60Hz snapshot covering all moving NSOs with a 1s keepalive.
   Server also reads incoming PktObjectUpdate from clients (legacy stock-SF
     pre-multiplayer-fix path) and applies to its NSOs via
     ApplyClientObjectUpdate, but with mHasControl=false on clients those

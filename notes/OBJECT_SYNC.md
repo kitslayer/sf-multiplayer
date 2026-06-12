@@ -8,8 +8,8 @@ Stock SF has **three** separate sync mechanisms for non-player world state. Most
 
 | Mechanism | Used by | Wire | Authority |
 |---|---|---|---|
-| **NetworkSyncableObject** (NSO) | Boxes, crates, ice, chains, ragdolls, any free-moving prop | `ObjectUpdate` (26) channel 10 5Hz, plus our v26 `WorldStateSnapshot` 30Hz | The instance with `mHasControl=true` (static field — see Finding 6 in AUDIT_2026-05-23.md) |
-| **MapInfoSyncableBase** | `GhostPlatform`, `MoveAlongPathUsingForce`, `PillarHandler`, `PlayMoveAnimations` | stock `MapInfoSync` (33) channel 0 5Hz, **plus** our v26 `WorldStateSnapshot` mapSync (positions, v26.5) + mapState (`GetData()` payloads, v26.6) sections at 30Hz | The host (`IsServer && IsNetworkMatch`) |
+| **NetworkSyncableObject** (NSO) | Boxes, crates, ice, chains, ragdolls, any free-moving prop | `ObjectUpdate` (26) channel 10 5Hz, plus our v26 `WorldStateSnapshot` 60Hz | The instance with `mHasControl=true` (static field — see Finding 6 in AUDIT_2026-05-23.md) |
+| **MapInfoSyncableBase** | `GhostPlatform`, `MoveAlongPathUsingForce`, `PillarHandler`, `PlayMoveAnimations` | stock `MapInfoSync` (33) channel 0 5Hz, **plus** our v26 `WorldStateSnapshot` mapSync (positions, v26.5) + mapState (`GetData()` payloads, v26.6) sections at 60Hz | The host (`IsServer && IsNetworkMatch`) |
 | **DestructiblePiece** events | Anything destructible (riding on top of either of the above) | `ObjectSimpleDestruction` (28) / `ObjectInvokeDestructionEvent` (29) / `ObjectDestructionCollision` (30) channel 11 event-driven | Whichever side detected the breaking collision |
 
 ## NetworkSyncableObject (NSO)
@@ -37,7 +37,7 @@ Both exist because those NSOs **need** local force application to look right; st
 ### Our oracle's NSO behavior
 - Oracle is `IsServer=true` (via Phase 6.5 Harmony patch). So oracle's NSOs all have `mHasControl=true` and DO broadcast `ObjectUpdate` via the host code path.
 - Our `SendBroadcastPrefix` (`SFHeadlessHost.cs:526`) intercepts the host-side `SendMessageToAllClients` call and forwards the packet over our v25 UDP socket to real clients.
-- Our v26 `WorldStateSnapshot` (msgType 39, 30Hz) adds a global NSO snapshot section as a higher-rate redundant sync, with position-delta inclusion filter + 1s keepalive after motion stops.
+- Our v26 `WorldStateSnapshot` (msgType 39, 60Hz) adds a global NSO snapshot section as a higher-rate redundant sync, with position-delta inclusion filter + 1s keepalive after motion stops.
 - We have an outbound Y < -30 filter for `ObjectUpdate` (`SFHeadlessHost.cs:597-606`) to avoid forwarding the "object fell off killbox" update.
 - Clients have a hybrid state since commit `6875908`: `DisableAllRigidBodies` is skipped (so NSOs stay dynamic for local push feedback) but `mHasControl` is NOT forced to true (so clients don't broadcast).
 

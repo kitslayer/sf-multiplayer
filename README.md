@@ -23,7 +23,7 @@ In stock Stick Fight one of the players *is* the host: their PC runs the match, 
 > - **Dedicated server, no P2P host** — the match lives on the oracle, not on a player's PC.
 > - **Server-authoritative simulation** — physics, killboxes, weapon spawns and damage all resolved on the server (client predicts locally, server reconciles — the CS:GO / Valorant model).
 > - **Anti-cheat** — damage is validated server-side with tick-history rewind; movement/fire is bounded; clients can't fabricate hits or teleport.
-> - **Less lag, more in-sync** — 60 Hz client input, 30 Hz authoritative snapshots, uncapped FPS, client-local crate physics for smoothness.
+> - **Less lag, more in-sync** — 60 Hz client input, 60 Hz authoritative snapshots, uncapped FPS, client-local crate physics for smoothness.
 > - **Multi-lobby** — one server runs many isolated matches at once; a single-port UDP router fronts them all.
 
 ## Features (the client mod)
@@ -112,10 +112,10 @@ StickFight.exe (graphical)                     StickFight.exe -batchmode -nograp
   + patched Assembly-CSharp.dll    v25 UDP       + SFHeadlessHost.dll
   + SFClientRecon.dll              ────────►       • v25 + v26 server (UDP 1337 / 1339)
                                    v26 input       • Harmony-patches MultiplayerManager
-                                   60Hz            • 30Hz WorldStateSnapshot broadcast
+                                   60Hz            • 60Hz WorldStateSnapshot broadcast
                                    ◄────────       • Server-authoritative NSOs, projectiles
                                    v26 snap        • Damage validation w/ tick-history rewind
-                                   30Hz
+                                   60Hz
 ```
 
 Real Stick Fight runs in `-batchmode -nographics`. It hosts the match using its own gameplay code; `SFHeadlessHost.dll` makes that code think it’s a multiplayer host. Clients connect on raw UDP. See [`notes/ARCHITECTURE.md`](notes/ARCHITECTURE.md) for the full overview, including authority model and channel routing.
@@ -176,7 +176,7 @@ SF’s stock `P2PPackageHandler.MsgType` enum has 38 entries (`Ping=0` … `Kick
 
 |ID|Direction              |Purpose                                                                                                                                 |
 |--|-----------------------|----------------------------------------------------------------------------------------------------------------------------------------|
-|39|server → clients @ 30Hz|`WorldStateSnapshot` — player positions w/ `lastInputSeq`, NSO positions, projectile positions, `MapInfoSyncableBase` platform positions|
+|39|server → clients @ 60Hz|`WorldStateSnapshot` — player positions w/ `lastInputSeq`, NSO positions, projectile positions, `MapInfoSyncableBase` platform positions|
 |40|client → server @ 60Hz |`PktPlayerInput` — stick + aim + buttons + sequence number                                                                              |
 |41|client → server, event |`PktClientFireWeapon` — emitted on local `Weapon.ActuallyShoot`                                                                         |
 

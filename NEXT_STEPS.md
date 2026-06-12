@@ -16,7 +16,7 @@ Live server end-to-end. Steam Stick Fight (Windows or Linux/Proton) connects to 
 - Handshake, spawn, auto-load to a Landfall map
 - Weapon pickup / throw / drop forwarded through SF's host-side handlers
 - Death + kill propagation + round advance, full 123-map rotation
-- Box pushing — server-authoritative. The oracle spawns a real authoritative `NetworkPlayer` rig per client (`SpawnAuthoritativePlayersForAllClients`, Phase 6.9) that pushes `NetworkSyncableObject`s on the server's own scene; box/crate positions are broadcast in the 30Hz `WorldStateSnapshot`, and clients run dynamic local NSOs so pushes feel responsive while converging on the server's view. (The old Phase 6.7 *mirror rig* was ripped out — see Phase 6.9 in the roadmap.)
+- Box pushing — server-authoritative. The oracle spawns a real authoritative `NetworkPlayer` rig per client (`SpawnAuthoritativePlayersForAllClients`, Phase 6.9) that pushes `NetworkSyncableObject`s on the server's own scene; box/crate positions are broadcast in the 60Hz `WorldStateSnapshot`, and clients run dynamic local NSOs so pushes feel responsive while converging on the server's view. (The old Phase 6.7 *mirror rig* was ripped out — see Phase 6.9 in the roadmap.)
 
 **Known broken / partial / untested-live:**
 
@@ -57,7 +57,7 @@ PER-FRAME (client side)
   4. Send PktPlayerInput { stickXY, aimXY, buttons, sequenceNum } to server
   5. Render at predicted positions
 
-EVERY 33ms (server → client)
+EVERY ~17ms (server → client)
   6. Receive PktWorldStateSnapshot { tick, players, NSOs, projectiles, lastInputSeq }
   7. Compare local-predicted position at sequenceNum=lastInputSeq vs server.position
   8. If divergence > threshold: snap-correct + REPLAY buffered inputs from
@@ -71,7 +71,7 @@ PER-FRAME (server side)
   10. SF's own Movement.cs (server-side, via InjectInputPrefix) advances
       the authoritative rig from those inputs
   11. SF's own physics advances NSO/projectile state on the oracle's scene
-  12. NSO.TickSyncPos (5Hz) broadcasts deltas; our v26 snapshot (30Hz)
+  12. NSO.TickSyncPos (5Hz) broadcasts deltas; our v26 snapshot (60Hz)
       broadcasts everything
   13. Validates incoming damage events against tick-history rewind buffer
 ```
@@ -148,7 +148,7 @@ Prebuilt client artifacts — the patched `Assembly-CSharp.srv.v25.dll`, `SFClie
 
 ## Where to start reading
 
-- [`sf-headless-host/SFHeadlessHost.cs`](sf-headless-host/SFHeadlessHost.cs) — the live plugin (~6,400 lines; map-terrain helper in [`sf-headless-host/SfMapTerrainHost.cs`](sf-headless-host/SfMapTerrainHost.cs), ~1,280). Key entry points: `Awake()` (installs the Harmony patches), `SfDispatch` (inbound v25/v26 packet router), `HandlePlayerInput` (v26 `PktPlayerInput`), `HandlePlayerUpdate` (v25 position relay), `SpawnAuthoritativePlayersForAllClients` / `TrySpawnPlayer` / `ConfigureAuthoritativeRig` (server-authoritative rigs), `BuildWorldStateBody` (30Hz snapshot serializer), `TickProjectiles` (server-side projectile sim + hit reg)
+- [`sf-headless-host/SFHeadlessHost.cs`](sf-headless-host/SFHeadlessHost.cs) — the live plugin (~6,400 lines; map-terrain helper in [`sf-headless-host/SfMapTerrainHost.cs`](sf-headless-host/SfMapTerrainHost.cs), ~1,280). Key entry points: `Awake()` (installs the Harmony patches), `SfDispatch` (inbound v25/v26 packet router), `HandlePlayerInput` (v26 `PktPlayerInput`), `HandlePlayerUpdate` (v25 position relay), `SpawnAuthoritativePlayersForAllClients` / `TrySpawnPlayer` / `ConfigureAuthoritativeRig` (server-authoritative rigs), `BuildWorldStateBody` (60Hz snapshot serializer), `TickProjectiles` (server-side projectile sim + hit reg)
 - [`notes/phase6/10-PHASE6.5-host-side-gameplay.md`](notes/phase6/10-PHASE6.5-host-side-gameplay.md) — current host-side patch set + rationale
 - [`notes/phase6/11-PHASE6.6-pickup-and-physics.md`](notes/phase6/11-PHASE6.6-pickup-and-physics.md) — pickup forwarding + diagnosis of why boxes initially didn't move
 - `refs/decompiled/Assembly-CSharp/MultiplayerManager.cs` — host-side dispatcher *(local-only: `refs/` is the decompiled game source, gitignored for copyright — build it per the README, not on GitHub)*
