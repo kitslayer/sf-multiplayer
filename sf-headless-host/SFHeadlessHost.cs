@@ -2348,6 +2348,9 @@ namespace SFHeadlessHost
         // position per slot, vs which the server's simulated rig is compared.
         private static readonly Dictionary<int, Vector3> _slotClaimedPos = new Dictionary<int, Vector3>();
         private static readonly Dictionary<int, float> _slotClaimedAt = new Dictionary<int, float>();
+        // Slots whose dynamic rig has been one-time-aligned to the client's spawn
+        // this life. Cleared per (re)spawn in ConfigureAuthoritativeRig.
+        private static readonly HashSet<int> _slotSeeded = new HashSet<int>();
 
         // Pending teleport target for the next sceneLoaded callback (set by
         // the loadMap bridge command). Applied to every spawned rig once the
@@ -4408,14 +4411,48 @@ namespace SFHeadlessHost
             float pz = rawZ / 100f;
             // Always record the client's claimed position — [AUTH-SYNC] compares
             // the server's simulated rig against it in shadow mode.
-            _slotClaimedPos[cli.Slot] = new Vector3(0f, py, pz);
+            var claim = new Vector3(0f, py, pz);
+            _slotClaimedPos[cli.Slot] = claim;
             _slotClaimedAt[cli.Slot] = Time.realtimeSinceStartup;
-            // AUTH-MOVEMENT Stage 1+: the rig is input-driven, NOT teleported to
-            // the client's claim. Skip the mirror teleport (the relay above still
-            // fans this packet to other clients for rendering). Stage 0/legacy:
-            // teleport the kinematic mirror exactly as before.
             if (AuthMovementStage < 1)
-                UpdateGhostRigPosition(cli.Slot, new Vector3(0f, py, pz));
+            {
+                // Stage 0/legacy: kinematic mirror — teleport every packet.
+                UpdateGhostRigPosition(cli.Slot, claim);
+            }
+            else if (!_slotSeeded.Contains(cli.Slot))
+            {
+                // AUTH-MOVEMENT: SEED ONCE per life. The rig spawns at (0,8,0)
+                // and the client spawns at the map's real point, so without an
+                // initial alignment the input-driven sim and the client start
+                // metres apart and [AUTH-SYNC] just measures that offset. Align
+                // the rig to the client's first claim once, then never touch its
+                // position again — it's pure simulation from here, and
+                // divergence now measures true sim-fidelity (drift from a common
+                // start). Re-armed each (re)spawn via ConfigureAuthoritativeRig.
+                SeedRigToPlayPlane(cli.Slot, claim);
+                _slotSeeded.Add(cli.Slot);
+            }
+            // else: input-driven, no teleport (relay above still renders to peers).
+        }
+
+        // One-time alignment of a dynamic ragdoll rig to a target Y-Z position.
+        // Shifts every body by the delta between the rig's current avg-of-rigs
+        // position and the target (Y-Z only — X is the unsynced depth axis, kept
+        // per-body so the ragdoll's pose/depth is preserved). Zeroes velocities.
+        private void SeedRigToPlayPlane(int slot, Vector3 target)
+        {
+            if (!SlotToRig.TryGetValue(slot, out var rig) || (object)rig == null) return;
+            if (!TryComputeRigAuthPos(rig, out var cur)) return;
+            float dY = target.y - cur.y, dZ = target.z - cur.z;
+            var shift = new Vector3(0f, dY, dZ);
+            var rbs = rig.GetComponentsInChildren<Rigidbody>();
+            foreach (var rb in rbs)
+            {
+                if ((object)rb == null) continue;
+                rb.position = rb.position + shift;
+                if (!rb.isKinematic) { rb.velocity = Vector3.zero; rb.angularVelocity = Vector3.zero; }
+            }
+            Log.LogInfo($"[AUTH-MOVE] Slot {slot}: SEEDED to client spawn (shift dY={dY:0.0} dZ={dZ:0.0}) — pure sim from here.");
         }
 
         // === Phase 6.9 — authoritative server-side player rigs ===
@@ -4570,6 +4607,9 @@ namespace SFHeadlessHost
                         }
                     }
                 }
+
+                // Re-arm the one-time spawn seed for this life (see HandlePlayerUpdate).
+                if (wantDynamic) _slotSeeded.Remove(slot);
 
                 if (wantDynamic)
                     Log.LogInfo($"[AUTH-MOVE] Slot {slot}: {dynSet} rbs DYNAMIC (input-driven), {npOff} NetworkPlayer disabled, {nsoOff} NSO disabled — floor@{ProbeFloorBelow(rig.transform.position)}.");
