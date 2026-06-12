@@ -90,7 +90,7 @@ Total = 5 (prefix) + N (body) + 9 (suffix) = **N + 14**. Minimum packet = 14 byt
 
 ### msgType 39 — `WorldStateSnapshot` (server → all clients, 30Hz)
 
-Current format is **v26.7**. Backward-incompatible with earlier client builds — older `SFClientRecon.dll` will misparse the trailing sections.
+Current format is **v26.7**. Sections are append-only and individually length-guarded: a v26.1+ section-aware client tolerates both missing trailing sections (older server) and unknown extra ones (newer server) — see the v26.7 compat note above. Only pre-section clients misparse.
 
 ```
 u32 serverTick (LE)
