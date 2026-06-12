@@ -2177,6 +2177,7 @@ namespace SFHeadlessHost
                     // arrived — analog sticks need their last value held so
                     // the rig keeps moving between input packets.
                     WriteInputsToRigs();
+                    if (AuthMovementStage >= 1) TickAuthSyncShadow();
                     // Emit a state snapshot at 30 Hz if anyone has pinged us.
                     if (_bridgePeer != null && Time.realtimeSinceStartup - _lastStateEmit >= (1.0f / 30.0f))
                     {
@@ -2342,6 +2343,11 @@ namespace SFHeadlessHost
             public int Buttons; // bit0=jump, bit1=fire, bit2=block, bit3=throw
         }
         private static readonly Dictionary<int, InputFrame> SlotInputs = new Dictionary<int, InputFrame>();
+
+        // AUTH-MOVEMENT shadow telemetry: the client's last-claimed PlayerUpdate
+        // position per slot, vs which the server's simulated rig is compared.
+        private static readonly Dictionary<int, Vector3> _slotClaimedPos = new Dictionary<int, Vector3>();
+        private static readonly Dictionary<int, float> _slotClaimedAt = new Dictionary<int, float>();
 
         // Pending teleport target for the next sceneLoaded callback (set by
         // the loadMap bridge command). Applied to every spawned rig once the
@@ -4389,7 +4395,16 @@ namespace SFHeadlessHost
             short rawZ = (short)(body[2] | (body[3] << 8));
             float py = rawY / 100f;
             float pz = rawZ / 100f;
-            UpdateGhostRigPosition(cli.Slot, new Vector3(0f, py, pz));
+            // Always record the client's claimed position — [AUTH-SYNC] compares
+            // the server's simulated rig against it in shadow mode.
+            _slotClaimedPos[cli.Slot] = new Vector3(0f, py, pz);
+            _slotClaimedAt[cli.Slot] = Time.realtimeSinceStartup;
+            // AUTH-MOVEMENT Stage 1+: the rig is input-driven, NOT teleported to
+            // the client's claim. Skip the mirror teleport (the relay above still
+            // fans this packet to other clients for rendering). Stage 0/legacy:
+            // teleport the kinematic mirror exactly as before.
+            if (AuthMovementStage < 1)
+                UpdateGhostRigPosition(cli.Slot, new Vector3(0f, py, pz));
         }
 
         // === Phase 6.9 — authoritative server-side player rigs ===
@@ -4487,17 +4502,24 @@ namespace SFHeadlessHost
                     }
                 }
 
-                // Make all body part rigidbodies kinematic — no gravity, no
-                // Movement-driven forces, just position-driven sweeps.
+                // AUTH-MOVEMENT Stage 1+ (SHADOW): leave the rig DYNAMIC so the
+                // injected input drives SF's own force-based Movement/gravity.
+                // Gated on a real floor under the spawn — never go dynamic over
+                // a void (the rig would fall forever). If no floor, fall back to
+                // the safe legacy kinematic mirror for this rig.
+                bool wantDynamic = AuthMovementStage >= 1
+                                   && HasFloorBelow(rig.transform.position, 200f);
                 var rbs = rig.GetComponentsInChildren<Rigidbody>();
-                int kinSet = 0;
+                int kinSet = 0, dynSet = 0;
                 foreach (var rb in rbs)
                 {
                     if ((object)rb == null) continue;
-                    rb.isKinematic = true;
+                    // Flip once, velocities zeroed (avoid a solver eject when a
+                    // teleported, interpenetrating ragdoll first goes dynamic).
                     rb.velocity = Vector3.zero;
                     rb.angularVelocity = Vector3.zero;
-                    kinSet++;
+                    rb.isKinematic = !wantDynamic;
+                    if (wantDynamic) dynSet++; else kinSet++;
                 }
 
                 // Disable NSO components on the rig — they'd otherwise
@@ -4515,7 +4537,35 @@ namespace SFHeadlessHost
                         if ((object)beh != null) { beh.enabled = false; nsoOff++; }
                     }
                 }
-                Log.LogInfo($"[P6.9 ghost] Slot {slot}: {kinSet} rbs kinematic, {nsoOff} NSO components disabled.");
+
+                // AUTH-MOVEMENT: silence the rig's own NetworkPlayer. With
+                // IsNetworkMatch force-true it doesn't self-destruct, and its
+                // Update/InitRigidBodies is a SECOND owner of isKinematic that
+                // would re-kinematic our dynamic body and lerp the root toward a
+                // (silent) network channel. Disable the Behaviour so the oracle
+                // is the sole driver. Only when going dynamic — legacy mirror
+                // mode leaves it as-is for bit-for-bit behavior.
+                int npOff = 0;
+                if (wantDynamic)
+                {
+                    var npType = AccessTools.TypeByName("NetworkPlayer");
+                    if ((object)npType != null)
+                    {
+                        var nps = rig.GetComponentsInChildren(npType);
+                        foreach (var np in nps)
+                        {
+                            var beh = np as Behaviour;
+                            if ((object)beh != null) { beh.enabled = false; npOff++; }
+                        }
+                    }
+                }
+
+                if (wantDynamic)
+                    Log.LogInfo($"[AUTH-MOVE] Slot {slot}: {dynSet} rbs DYNAMIC (input-driven), {npOff} NetworkPlayer disabled, {nsoOff} NSO disabled — floor@{ProbeFloorBelow(rig.transform.position)}.");
+                else if (AuthMovementStage >= 1)
+                    Log.LogWarning($"[AUTH-MOVE] Slot {slot}: NO FLOOR under spawn {rig.transform.position} — kept kinematic mirror (fallback). floor={ProbeFloorBelow(rig.transform.position)}");
+                else
+                    Log.LogInfo($"[P6.9 ghost] Slot {slot}: {kinSet} rbs kinematic, {nsoOff} NSO components disabled.");
             }
             catch (Exception e) { Log.LogWarning($"[P6.9 ConfigureAuthoritativeRig] {e.Message}"); }
         }
@@ -5611,6 +5661,29 @@ namespace SFHeadlessHost
                 return _acceptClientCratesCache.Value;
             }
         }
+
+        // Server-authoritative player movement — staged rollout (see
+        // notes/bug-investigations + the plan). Integer stage in
+        // SFHEADLESS_AUTH_MOVEMENT; 0 (or unset) = exact legacy kinematic-mirror
+        // behavior bit-for-bit. Stage 1 = SHADOW: rig dynamic + input-driven,
+        // server measures sim-vs-claim divergence, but snapshots STILL ship the
+        // client claim (zero live-player impact). Read once; flips take effect
+        // on next rig spawn (can't un-spawn physics history mid-life).
+        private static int _authMovementStageCache = -1;
+        internal static int AuthMovementStage
+        {
+            get
+            {
+                if (_authMovementStageCache < 0)
+                {
+                    int v = 0;
+                    var s = Environment.GetEnvironmentVariable("SFHEADLESS_AUTH_MOVEMENT");
+                    if (!string.IsNullOrEmpty(s)) int.TryParse(s, out v);
+                    _authMovementStageCache = v < 0 ? 0 : v;
+                }
+                return _authMovementStageCache;
+            }
+        }
         private void ApplyClientObjectUpdate(byte[] data, int off, int len)
         {
             if (len < 10) return;
@@ -6687,6 +6760,15 @@ namespace SFHeadlessHost
             return "NONE(no floor!)";
         }
 
+        // Boolean floor check for the auth-movement dynamic-flip gate: a solid
+        // (non-trigger) collider within maxDist straight down. Mirrors
+        // ProbeFloorBelow's raycast but returns a usable bool.
+        private static bool HasFloorBelow(Vector3 from, float maxDist)
+        {
+            return Physics.Raycast(from, Vector3.down, out RaycastHit hit, maxDist)
+                   && !hit.collider.isTrigger;
+        }
+
         // Sample crate physics state — if a floor IS found above but boxes still
         // fall, the box's own collider/layer/kinematic flag is the next suspect.
         private static string DescribeNsoPhysics(Component nso)
@@ -6696,6 +6778,109 @@ namespace SFHeadlessHost
             string rbs = (object)rb != null ? $"kinematic={rb.isKinematic}" : "no-rb";
             string cols = (object)col != null ? $"col.enabled={col.enabled},layer={col.gameObject.layer}" : "no-col";
             return $"{rbs},{cols}";
+        }
+
+        // Authoritative position of a multi-rigidbody player rig, matching what
+        // stock SF networks (NetworkPlayer.CreateNetworkPositionPackage): the
+        // average of all body rigidbodies' positions plus a 0.05s velocity
+        // lookahead. Stage 1 swaps this into the snapshot; Stage 0 only measures
+        // it. Returns false if the rig has no usable rigidbodies.
+        private static bool TryComputeRigAuthPos(GameObject rig, out Vector3 pos)
+        {
+            pos = Vector3.zero;
+            if ((object)rig == null) return false;
+            var rbs = rig.GetComponentsInChildren<Rigidbody>();
+            if (rbs == null || rbs.Length == 0) return false;
+            Vector3 sum = Vector3.zero, vel = Vector3.zero;
+            int n = 0;
+            foreach (var rb in rbs)
+            {
+                if ((object)rb == null) continue;
+                sum += rb.position;
+                vel += rb.velocity;
+                n++;
+            }
+            if (n == 0) return false;
+            pos = sum / n + (vel / n) * 0.05f;
+            return true;
+        }
+
+        // [AUTH-SYNC] SHADOW telemetry — measures the server's input-driven
+        // simulated rig against the client's last-claimed position, so we can
+        // judge (before any feel change) whether the server sim is close enough
+        // to make authoritative. Snapshots still ship the client claim while
+        // this runs, so live players are unaffected.
+        private float _authSyncNextLogAt = -1f;
+        private readonly Dictionary<int, float> _authErrSum = new Dictionary<int, float>();
+        private readonly Dictionary<int, float> _authErrMax = new Dictionary<int, float>();
+        private readonly Dictionary<int, int> _authErrCount = new Dictionary<int, int>();
+        private int _authVoidEvents, _authDeadSpuriousEvents;
+        private static Type _ctrlTypeAuth, _ciTypeAuth;
+        private static FieldInfo _ciIsDeadField, _ctrlInfoField;
+        private static bool _authReflectTried;
+        private void TickAuthSyncShadow()
+        {
+            if (SlotToRig.Count == 0) return;
+            float now = Time.realtimeSinceStartup;
+            if (!_authReflectTried)
+            {
+                _authReflectTried = true;
+                _ctrlTypeAuth = AccessTools.TypeByName("Controller");
+                _ciTypeAuth = AccessTools.TypeByName("CharacterInformation");
+                if ((object)_ctrlTypeAuth != null) _ctrlInfoField = AccessTools.Field(_ctrlTypeAuth, "info");
+                if ((object)_ciTypeAuth != null)
+                    _ciIsDeadField = AccessTools.Field(_ciTypeAuth, "isDead");
+            }
+            foreach (var kv in SlotToRig)
+            {
+                int slot = kv.Key; var rig = kv.Value;
+                if ((object)rig == null) continue;
+                if (!TryComputeRigAuthPos(rig, out var simPos)) continue;
+                // void: simulated rig left the playable area.
+                if (simPos.y < -30f) _authVoidEvents++;
+                // spurious death: rig flagged dead while the match is live.
+                if ((object)_ctrlTypeAuth != null && (object)_ctrlInfoField != null && (object)_ciIsDeadField != null)
+                {
+                    try
+                    {
+                        var ctrl = rig.GetComponent(_ctrlTypeAuth);
+                        if ((object)ctrl != null)
+                        {
+                            var info = _ctrlInfoField.GetValue(ctrl);
+                            if ((object)info != null && (bool)_ciIsDeadField.GetValue(info) && _matchStarted)
+                                _authDeadSpuriousEvents++;
+                        }
+                    }
+                    catch { }
+                }
+                // divergence vs the client's claim (only when fresh).
+                if (_slotClaimedPos.TryGetValue(slot, out var claim)
+                    && _slotClaimedAt.TryGetValue(slot, out var at) && now - at < 1f)
+                {
+                    // Compare on the Y-Z play plane (X is depth, unsynced).
+                    float err = Mathf.Sqrt((simPos.y - claim.y) * (simPos.y - claim.y)
+                                         + (simPos.z - claim.z) * (simPos.z - claim.z));
+                    _authErrSum[slot] = (_authErrSum.TryGetValue(slot, out var s) ? s : 0f) + err;
+                    _authErrCount[slot] = (_authErrCount.TryGetValue(slot, out var c) ? c : 0) + 1;
+                    if (!_authErrMax.TryGetValue(slot, out var mx) || err > mx) _authErrMax[slot] = err;
+                    // A stalled rig (client moving, sim not) shows up directly as
+                    // ballooning divergence — no separate counter needed.
+                }
+            }
+            if (_authSyncNextLogAt < 0f) _authSyncNextLogAt = now + 5f;
+            if (now >= _authSyncNextLogAt)
+            {
+                _authSyncNextLogAt = now + 5f;
+                foreach (var kv in _authErrCount)
+                {
+                    int slot = kv.Key; int c = kv.Value;
+                    if (c <= 0) continue;
+                    float mean = _authErrSum[slot] / c;
+                    float mx = _authErrMax.TryGetValue(slot, out var m) ? m : 0f;
+                    Log.LogInfo($"[AUTH-SYNC] slot={slot} samples={c} meanErr={mean:0.000} maxErr={mx:0.000} void={_authVoidEvents} deadSpurious={_authDeadSpuriousEvents}");
+                }
+                _authErrSum.Clear(); _authErrMax.Clear(); _authErrCount.Clear();
+            }
         }
 
         private void WriteInputsToRigs()
