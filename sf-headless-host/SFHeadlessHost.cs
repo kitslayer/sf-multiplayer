@@ -2768,6 +2768,16 @@ namespace SFHeadlessHost
         private readonly HashSet<int> _acKicked = new HashSet<int>();
         private int _acRoundIndex;
         private bool AcEnabled => Environment.GetEnvironmentVariable("SF_AC_BEHAVIOR") != "0";
+        // The behavioral "impossible kill" heuristic flags a kill whose victim
+        // took little/no SERVER-RECORDED damage. That is NOT sound evidence of
+        // cheating: damage is still largely client-authoritative, so legit melee
+        // punches, throws, environmental/fall kills, and the intended comp
+        // quick-draw instant-shot routinely reach the server as a killing blow
+        // with ~0 prior accumulated damage — and get flagged. It has kicked
+        // real players repeatedly. So the flag is now LOG-ONLY telemetry by
+        // default; the auto-kick requires explicit opt-in (SF_AC_KICK=1) for an
+        // operator who has corroborated a real cheater from the logs.
+        private bool AcKickEnabled => Environment.GetEnvironmentVariable("SF_AC_KICK") == "1";
 
         // Called at every round boundary to reset per-life damage accumulators.
         private void AcResetRound()
@@ -2825,11 +2835,12 @@ namespace SFHeadlessHost
                 _acFlaggedRounds[attackerIdx] = rounds;
             }
             rounds.Add(_acRoundIndex);
-            Log.LogWarning($"[anticheat behavior] Impossible kill by slot={attackerIdx} on slot={victimSlot} " +
+            Log.LogWarning($"[anticheat behavior] Low-damage kill by slot={attackerIdx} on slot={victimSlot} " +
                            $"(victim took only {accum:0.#} dmg over {hits} hit(s) at melee range). " +
-                           $"Flagged rounds: {rounds.Count}/{AcFlaggedRoundsToKick}.");
+                           $"Flagged rounds: {rounds.Count}/{AcFlaggedRoundsToKick}. " +
+                           $"{(AcKickEnabled ? "" : "[LOG-ONLY — set SF_AC_KICK=1 to auto-kick]")}");
 
-            if (rounds.Count >= AcFlaggedRoundsToKick)
+            if (rounds.Count >= AcFlaggedRoundsToKick && AcKickEnabled)
             {
                 _acKicked.Add(attackerIdx);
                 AcKickForCheat(attackerIdx, "instant melee kills (impossible without cheats)");
