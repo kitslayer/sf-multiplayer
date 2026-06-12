@@ -99,6 +99,34 @@ namespace SFClientRecon
         private readonly Queue<Vector3>  _historyPos = new Queue<Vector3>(InputHistoryCap);
         private readonly Dictionary<uint, Vector3> _historyLookup = new Dictionary<uint, Vector3>(InputHistoryCap);
         private uint _divergenceLogged;
+
+        // === Stage 1 server-auth movement reconciliation (SFCLIENTRECON_AUTH_MOVEMENT>=2) ===
+        // The local player is stock-Movement-predicted; the server now sends its
+        // authoritative simulated position + the input seq it has processed. We
+        // bleed the prediction error into the body smoothly (NOT all at once —
+        // that was the disabled SHIFT's "hyper-push"). Error now correcting
+        // against a GENUINELY authoritative server (Stage 0 proved 0.125u
+        // steady-state), so it's small + consistent rather than the old phantom.
+        private static int _authMoveStageCache = -1;
+        private static int AuthMoveStage
+        {
+            get
+            {
+                if (_authMoveStageCache < 0)
+                {
+                    int v = 0; var s = Environment.GetEnvironmentVariable("SFCLIENTRECON_AUTH_MOVEMENT");
+                    if (!string.IsNullOrEmpty(s)) int.TryParse(s, out v);
+                    _authMoveStageCache = v < 0 ? 0 : v;
+                }
+                return _authMoveStageCache;
+            }
+        }
+        private uint _lastCorrectedSeq;            // ack we last consumed (correct once per new ack)
+        private Vector3 _pendingCorrection;        // residual error bled in over frames
+        private const float ReconDeadbandM   = 0.30f;  // |err| below this = RTT jitter, ignore
+        private const float ReconHardSnapM   = 3.0f;   // |err| above this = respawn/teleport → snap
+        private const float ReconBleedPerFrame = 0.18f;// fraction of residual applied per frame (~6-frame settle)
+        private const float ReconMaxStepM    = 0.5f;   // cap per-frame shift so a big correction never jerks
         private float _lastShiftAt = -1f;
 
         // Pending snapshot (set on RX thread, applied on main thread).
@@ -734,6 +762,7 @@ namespace SFClientRecon
             // positions toward latest targets so the visual feel is smooth
             // instead of teleporting every 33ms (30Hz snapshot rate).
             SmoothTowardTargets();
+            if (AuthMoveStage >= 2) TickAuthMoveReconcile();
             TickNsoClientPushRelay();
             TickFastCombatInput();
 
@@ -1702,6 +1731,80 @@ namespace SFClientRecon
             return Quaternion.Euler(0f, 0f, e.RotZ);
         }
 
+        // Per-frame: bleed the queued reconciliation error into the local
+        // player's body. Small fraction per frame (smooth, no jerk) for normal
+        // corrections; instant snap for huge errors (respawn/teleport). Shifts
+        // every body rigidbody by the Y-Z step, preserving X/depth + velocity so
+        // local prediction keeps flowing from the corrected position.
+        private GameObject _reconLocalRig;
+        private float _reconRigRefreshAt;
+        private void TickAuthMoveReconcile()
+        {
+            if (_pendingCorrection.sqrMagnitude < 0.0001f) return;
+            // Cache the local rig; refresh every 0.5s (handles respawn/scene swap).
+            float nowR = Time.realtimeSinceStartup;
+            if ((object)_reconLocalRig == null || nowR - _reconRigRefreshAt > 0.5f)
+            {
+                _reconRigRefreshAt = nowR;
+                int slot = FindLocalSlot();
+                if (slot >= 0)
+                {
+                    var npType = AccessTools.TypeByName("NetworkPlayer");
+                    if ((object)npType != null)
+                    {
+                        var nps = UnityEngine.Object.FindObjectsOfType(npType);
+                        if (nps != null)
+                            foreach (var np in nps)
+                                if (TryGetPlayerSlotFromNetworkPlayer(np, out var pi) && pi == slot)
+                                { _reconLocalRig = (np as Component)?.gameObject; break; }
+                    }
+                }
+            }
+            if ((object)_reconLocalRig == null) return;
+
+            Vector3 step;
+            float mag = _pendingCorrection.magnitude;
+            if (mag > ReconHardSnapM)
+            {
+                step = _pendingCorrection;          // respawn/teleport — snap fully
+                _pendingCorrection = Vector3.zero;
+            }
+            else
+            {
+                step = _pendingCorrection * ReconBleedPerFrame;
+                float sm = step.magnitude;
+                if (sm > ReconMaxStepM) step *= ReconMaxStepM / sm;
+                _pendingCorrection -= step;
+                if (_pendingCorrection.magnitude < 0.02f) _pendingCorrection = Vector3.zero;
+            }
+
+            var rbs = _reconLocalRig.GetComponentsInChildren<Rigidbody>();
+            if (rbs == null) return;
+            foreach (var rb in rbs)
+            {
+                if ((object)rb == null) continue;
+                rb.position = rb.position + step;   // velocity untouched → prediction continues
+            }
+        }
+
+        // Local player's authoritative position = average of all body
+        // rigidbodies + 0.05s velocity lookahead, matching stock
+        // NetworkPlayer.CreateNetworkPositionPackage and the server's
+        // TryComputeRigAuthPos. Also returns the rigidbody array (out) so the
+        // reconciler can shift them without a second GetComponentsInChildren.
+        private static Vector3 LocalPlayerAvgPos(GameObject rigRoot, out Rigidbody[] rbsOut)
+        {
+            rbsOut = null;
+            if ((object)rigRoot == null) return Vector3.zero;
+            var rbs = rigRoot.GetComponentsInChildren<Rigidbody>();
+            rbsOut = rbs;
+            if (rbs == null || rbs.Length == 0) return rigRoot.transform.position;
+            Vector3 sum = Vector3.zero, vel = Vector3.zero; int n = 0;
+            foreach (var rb in rbs) { if ((object)rb == null) continue; sum += rb.position; vel += rb.velocity; n++; }
+            if (n == 0) return rigRoot.transform.position;
+            return sum / n + (vel / n) * 0.05f;
+        }
+
         private static bool IsWeaponNsoRootClient(GameObject root)
         {
             if ((object)root == null) return false;
@@ -1880,7 +1983,13 @@ namespace SFClientRecon
                             if (!TryGetPlayerSlotFromNetworkPlayer(np, out var pi) || pi != localSlot) continue;
                             var npComp = np as Component;
                             if ((object)npComp == null) break;
-                            Vector3 currentPos = npComp.transform.position;
+                            // Store the AVG-OF-RIGS position (+vel lookahead) — the
+                            // SAME metric the server ships (stock
+                            // CreateNetworkPositionPackage) — so the reconciliation
+                            // error is apples-to-apples. The root transform does NOT
+                            // track the ragdoll body, so storing it would make every
+                            // error read garbage.
+                            Vector3 currentPos = LocalPlayerAvgPos(npComp.gameObject, out _);
                             _historySeq.Enqueue(_inputSeq);
                             _historyPos.Enqueue(currentPos);
                             _historyLookup[_inputSeq] = currentPos;
@@ -2253,14 +2362,24 @@ namespace SFClientRecon
                     // Below SoftDriftThresholdSq → ignore (natural RTT jitter).
                     if (isLocal)
                     {
-                        // Drift correction TEMPORARILY DISABLED. The previous version
-                        // applied a position shift every snapshot when the server's
-                        // view differed from local prediction → caused hyper-push of
-                        // the player at /start. The rate-limited version still felt
-                        // weird. For now, let local prediction own the player
-                        // entirely; the server's authoritative position is reflected
-                        // by InjectInput / movement only. Just track the acked seq.
                         _serverLastAckedSeq = entry.LastInputSeq;
+                        // Stage 2+: reconcile. Once per NEW ack, measure how wrong
+                        // our prediction was at that seq and QUEUE the error to be
+                        // bled into the body smoothly over the next few frames
+                        // (see TickAuthMoveReconcile). Correcting once per ack (not
+                        // every snapshot) + smoothing is what the disabled version
+                        // lacked → no hyper-push.
+                        if (AuthMoveStage >= 2 && entry.LastInputSeq != 0
+                            && entry.LastInputSeq != _lastCorrectedSeq
+                            && _historyLookup.TryGetValue(entry.LastInputSeq, out var predicted))
+                        {
+                            _lastCorrectedSeq = entry.LastInputSeq;
+                            // Y-Z play plane only (X is unsynced depth).
+                            var err = new Vector3(0f, target.y - predicted.y, target.z - predicted.z);
+                            float mag = err.magnitude;
+                            if (mag >= ReconDeadbandM)
+                                _pendingCorrection = err;   // replace, not accumulate (latest ack wins)
+                        }
                     }
                     else
                     {

@@ -2351,6 +2351,11 @@ namespace SFHeadlessHost
         // Slots whose dynamic rig has been one-time-aligned to the client's spawn
         // this life. Cleared per (re)spawn in ConfigureAuthoritativeRig.
         private static readonly HashSet<int> _slotSeeded = new HashSet<int>();
+        // realtime of each slot's last seed — [AUTH-SYNC] excludes divergence
+        // samples within SeedSettleSec of a seed (round transitions cause large
+        // transients that otherwise swamp the steady-state fidelity number).
+        private static readonly Dictionary<int, float> _slotSeedAt = new Dictionary<int, float>();
+        private const float SeedSettleSec = 3f;
 
         // Pending teleport target for the next sceneLoaded callback (set by
         // the loadMap bridge command). Applied to every spawned rig once the
@@ -4431,6 +4436,7 @@ namespace SFHeadlessHost
                 // start). Re-armed each (re)spawn via ConfigureAuthoritativeRig.
                 SeedRigToPlayPlane(cli.Slot, claim);
                 _slotSeeded.Add(cli.Slot);
+                _slotSeedAt[cli.Slot] = Time.realtimeSinceStartup;
             }
             // else: input-driven, no teleport (relay above still renders to peers).
         }
@@ -5570,7 +5576,13 @@ namespace SFHeadlessHost
                 var rig = kv.Value;
                 if ((object)rig == null) continue;
                 body[off++] = (byte)kv.Key;
-                Vector3 p = rig.transform.position;
+                // Stage 2+: ship the SIMULATED avg-of-rigs position (the
+                // authoritative truth) instead of the root transform / mirror.
+                // Stages 0/1 keep the legacy root read (= client claim under the
+                // kinematic mirror) so the wire is unchanged for live players.
+                Vector3 p;
+                if (AuthMovementStage < 2 || !TryComputeRigAuthPos(rig, out p))
+                    p = rig.transform.position;
                 WriteF32LE(body, off, p.x); off += 4;
                 WriteF32LE(body, off, p.y); off += 4;
                 WriteF32LE(body, off, p.z); off += 4;
@@ -6904,6 +6916,10 @@ namespace SFHeadlessHost
                     }
                     catch { }
                 }
+                // Exclude the settling window after a (re)seed — round-transition
+                // transients otherwise swamp the steady-state fidelity number.
+                if (_slotSeedAt.TryGetValue(slot, out var seedAt) && now - seedAt < SeedSettleSec)
+                    continue;
                 // divergence vs the client's claim (only when fresh).
                 if (_slotClaimedPos.TryGetValue(slot, out var claim)
                     && _slotClaimedAt.TryGetValue(slot, out var at) && now - at < 1f)
