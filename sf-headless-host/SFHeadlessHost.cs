@@ -5224,8 +5224,15 @@ namespace SFHeadlessHost
                 if ((object)hitCol == null) return;
                 var rb = hitCol.attachedRigidbody;
                 if ((object)rb == null || rb.isKinematic) return;
-                var root = hitCol.transform.root;
-                if ((object)root == null || !IsPushableCrateNso(root.gameObject)) return;
+                // Classify the NEAREST NSO ancestor of the hit body, not
+                // transform.root — crates are children of the map root, so the
+                // old root check answered "does this MAP contain any crate"
+                // and kicked unrelated dynamic bodies (ice debris) too.
+                EnsureNsoTypeCache();
+                if ((object)_nsoType == null) return;
+                var nsoComp = rb.GetComponentInParent(_nsoType) as Component;
+                if ((object)nsoComp == null || !IsPushableCrateNso(nsoComp.gameObject)) return;
+                var root = nsoComp.transform;
                 Vector3 dir = projVelocity;
                 dir.x = 0f;
                 if (dir.sqrMagnitude < 0.0001f) return;
