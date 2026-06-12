@@ -2687,6 +2687,13 @@ namespace SFHeadlessHost
                 case PktObjectInvokeDestructionEvent:
                 case PktObjectDestructionCollision:
                     RelayBodyToAll(msgType, data, bodyOffset, bodyLen, channel);
+                    // v0.4.x — ALSO apply the destruction to the server's own
+                    // scene. The server used to only relay, so ice/boxes that
+                    // clients shot/broke stayed intact server-side: the server's
+                    // world drifted from the clients' (a player's server-side
+                    // rig could stand on phantom ice; hit-reg + anti-cheat ran
+                    // against a stale world). Now the oracle breaks them too.
+                    ApplyDestructionLocally(msgType, data, bodyOffset, bodyLen);
                     break;
 
                 // Weapon drop: SF's OnPlayerRequestingWeaponDrop just appends
@@ -5747,6 +5754,78 @@ namespace SFHeadlessHost
                 return _authMovementStageCache;
             }
         }
+        // v0.4.x — apply a client-originated destruction to the server's own
+        // DestructiblePiece, so the oracle's world matches the clients'. Uses
+        // the stock "NetworkForce*" apply methods (network-applied, NO
+        // re-broadcast — we already relayed separately, so no loop). All three
+        // packet types start with the i16 NSO index; type 30 also carries
+        // force.y/z (i16/100) + multiplier (f32). Mirrors DestructiblePiece.
+        // ReceivedDestruction + ReceivedPackage dispatch.
+        private static Type _dpDestType;
+        private static MethodInfo _dpSimpleDestM, _dpEventDestM, _dpForceDestM;
+        private static bool _dpDestLookupTried;
+        private int _destructAppliedCount, _destructMissCount;
+        private void ApplyDestructionLocally(byte msgType, byte[] data, int off, int len)
+        {
+            try
+            {
+                if (len < 2) return;
+                ushort idx = (ushort)(data[off] | (data[off + 1] << 8));
+
+                // Index→Component cache (shared with ApplyClientObjectUpdate).
+                float now = Time.realtimeSinceStartup;
+                if (_nsoCacheLastRebuildAt < 0f || now - _nsoCacheLastRebuildAt > 5f || _nsoByIndexCache.Count == 0)
+                {
+                    RebuildNsoIndexCache();
+                    _nsoCacheLastRebuildAt = now;
+                }
+                if (!_nsoByIndexCache.TryGetValue(idx, out var comp) || (object)comp == null)
+                {
+                    _destructMissCount++;
+                    if (_destructMissCount == 1 || _destructMissCount % 60 == 0)
+                        Log.LogInfo($"[DESTRUCT] No server NSO for idx={idx} (type={msgType}) #{_destructMissCount} — already gone or not registered.");
+                    return;
+                }
+
+                if (!_dpDestLookupTried)
+                {
+                    _dpDestLookupTried = true;
+                    _dpDestType = AccessTools.TypeByName("DestructiblePiece");
+                    if ((object)_dpDestType != null)
+                    {
+                        _dpSimpleDestM = AccessTools.Method(_dpDestType, "NetworkForceSimpleDestruction");
+                        _dpEventDestM  = AccessTools.Method(_dpDestType, "NetworkForceEvent");
+                        _dpForceDestM  = AccessTools.Method(_dpDestType, "NetworkForceDestruction");
+                    }
+                }
+                if ((object)_dpDestType == null) return;
+                var dp = comp.GetComponent(_dpDestType) ?? comp.GetComponentInChildren(_dpDestType);
+                if ((object)dp == null) { _destructMissCount++; return; }
+
+                if (msgType == PktObjectSimpleDestruction && (object)_dpSimpleDestM != null)
+                    _dpSimpleDestM.Invoke(dp, null);
+                else if (msgType == PktObjectInvokeDestructionEvent && (object)_dpEventDestM != null)
+                    _dpEventDestM.Invoke(dp, null);
+                else if (msgType == PktObjectDestructionCollision && (object)_dpForceDestM != null)
+                {
+                    Vector3 force = Vector3.zero; float mult = 10f;
+                    if (len >= 10)
+                    {
+                        force.y = (short)(data[off + 2] | (data[off + 3] << 8)) / 100f;
+                        force.z = (short)(data[off + 4] | (data[off + 5] << 8)) / 100f;
+                        mult = BitConverter.ToSingle(data, off + 6);
+                    }
+                    _dpForceDestM.Invoke(dp, new object[] { force, mult });
+                }
+                else return;
+
+                _destructAppliedCount++;
+                if (_destructAppliedCount == 1 || _destructAppliedCount % 30 == 0)
+                    Log.LogInfo($"[DESTRUCT] Applied server-side #{_destructAppliedCount} idx={idx} type={msgType} on '{comp.name}'");
+            }
+            catch (Exception e) { Log.LogWarning($"[DESTRUCT] apply idx-type={msgType} threw: {e.Message}"); }
+        }
+
         private void ApplyClientObjectUpdate(byte[] data, int off, int len)
         {
             if (len < 10) return;
