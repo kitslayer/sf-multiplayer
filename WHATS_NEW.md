@@ -1,3 +1,22 @@
+# What's new — 2026-06-11 server-authoritative boxes (shipped + deployed)
+
+The box-divergence fix (PR #8, merged + **deployed live to `.115`**, installer refreshed to `SFClientRecon 0.6.0`). The oracle's sim is now the single authority for crates; clients run dynamic local physics for instant push feel and continuously reconcile toward the server. Verified live over many rounds and map transitions: mean error 0.06–0.10 units, snap counters flat, zero crates falling through the world.
+
+Root causes fixed along the way (full narrative with telemetry in [`notes/bug-investigations/2026-06-11_server-authoritative-boxes.md`](notes/bug-investigations/2026-06-11_server-authoritative-boxes.md)):
+
+- **Slot discovery** — every client claimed slot 0, so one player per match silently received *zero* sync data (their snapshot stream went to a dead port; captured on the wire). Now derived from the rig the game actually marks locally-controlled.
+- **Oracle scene tracking** — rounds taking the settle-skip load path left every object cache filtered to the *previous* map; the authority broadcast last round's crate layout all round. Scene loads are now tracked directly, mirrored client-side.
+- **Headless cull** — stock `IgnorePlayerWhenOffScreen` removed collision from anything below y=-11; the oracle's crates fell through the world on big maps every round (masked for weeks by client relays).
+- **Vanilla-first physics** — crate mass had been overridden to 45 vs the prefab's 500 (runtime ground truth via UnityExplorer); pushes felt weightless. Neither sim overrides prefab values anymore, and the constraint mask now matches what vanilla actually ships.
+- **Client NRE storm** — ~150 exceptions/second on every client (uninitialized packet-channel slots), a chronic hidden FPS tax, fixed at the source.
+- **"Fake hits"** — server-side bullet hit tests against lagged ghost rigs emitted phantom damage packets; server bullet damage is shadow-mode (observe + log) until hit-reg is lag-compensated.
+
+Also: v26.7 wire appendix (NSO rotation as the stock up-vector pair; old clients unaffected), live-debugging tooling (per-instance timestamped console tees + a file-driven `boxes`/`rigs` query console on clients and oracle), README de-hyped + install-troubleshooting section, installer fully in English (zip rebuilt).
+
+Known residual: explosion→crate force parity (an occasional box pop right after big blasts, converges within a second) — next on the list, with the server-browser test and the cleanup pass.
+
+---
+
 # What's new — 2026-06-11 security + crash-containment pass
 
 Full-repo review (`notes/REVIEW_2026-06-10.md`) plus the fixes that came out of it. Shipped + deployed live to `.115`.
