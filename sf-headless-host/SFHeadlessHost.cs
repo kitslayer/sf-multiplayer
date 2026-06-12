@@ -5050,6 +5050,13 @@ namespace SFHeadlessHost
                 var p = _projectiles[i];
                 if (now - p.BornAt > p.LifetimeSec)
                 {
+                    // EXPLOSION PARITY (v0.4.1) — an explosive round expiring
+                    // is its FUSE going off (lobbed grenade-launcher shots
+                    // land, roll, then detonate). Previously only wall hits
+                    // blasted server-side, so fuse detonations moved crates on
+                    // every client's local sim but never on the authority.
+                    if (!p.IsThrown && IsExplosiveWeaponType(p.WeaponType, p.Velocity.magnitude))
+                        ApplyExplosiveBlastAt(p.Position, BlastRadius, BlastForce);
                     _projectiles.RemoveAt(i);
                     continue;
                 }
@@ -5073,7 +5080,7 @@ namespace SFHeadlessHost
                 {
                     // Thrown weapons hit walls and stick/drop — they never explode.
                     if (!p.IsThrown && IsExplosiveWeaponType(p.WeaponType, p.Velocity.magnitude))
-                        ApplyExplosiveBlastAt(wallHit, 5f, 900f);
+                        ApplyExplosiveBlastAt(wallHit, BlastRadius, BlastForce);
                     else
                         // Server-auth boxes (v0.4.0): non-explosive shots
                         // shove the crate they hit in the oracle sim — the
@@ -5089,6 +5096,11 @@ namespace SFHeadlessHost
                         Log.LogInfo($"[{(p.IsThrown ? "throw-auth" : "bullet-auth")}] SHADOW HIT: id={p.Id} owner-slot={p.OwnerSlot} → would damage slot {hitSlot} (server swept-sphere; no damage emitted in shadow mode)");
                     else
                         EmitServerDamage(hitSlot, p.OwnerSlot, p.WeaponType, p.Velocity);
+                    // EXPLOSION PARITY (v0.4.1) — explosive rounds detonate on
+                    // player impact too (the blast moves nearby crates; damage
+                    // handling above is independent and stays shadow-gated).
+                    if (!p.IsThrown && IsExplosiveWeaponType(p.WeaponType, p.Velocity.magnitude))
+                        ApplyExplosiveBlastAt(p.Position, BlastRadius, BlastForce);
                     _projectiles.RemoveAt(i);
                 }
             }
@@ -5104,6 +5116,31 @@ namespace SFHeadlessHost
         private static bool IsExplosiveWeaponType(byte weaponType, float speed)
         {
             return speed < 50f || weaponType == 5 || weaponType == 6 || weaponType == 7 || weaponType == 8;
+        }
+
+        // EXPLOSION PARITY (v0.4.1) — blast tunables, env-overridable for live
+        // tuning sessions (the three-way `boxes` debug-console diff is the
+        // measuring stick). Defaults keep the historical 5u/900f and add the
+        // stock-shaped VelocityChange component.
+        private static float _blastRadius = -1f, _blastForce = -1f, _blastVelChange = -1f;
+        private static float BlastEnvFloat(string name, float dflt)
+        {
+            var v = Environment.GetEnvironmentVariable(name);
+            float f;
+            if (!string.IsNullOrEmpty(v) && float.TryParse(v, out f) && f > 0f) return f;
+            return dflt;
+        }
+        private static float BlastRadius
+        {
+            get { if (_blastRadius < 0f) _blastRadius = BlastEnvFloat("SFHEADLESS_BLAST_RADIUS", 5f); return _blastRadius; }
+        }
+        private static float BlastForce
+        {
+            get { if (_blastForce < 0f) _blastForce = BlastEnvFloat("SFHEADLESS_BLAST_FORCE", 900f); return _blastForce; }
+        }
+        private static float BlastVelocityChange
+        {
+            get { if (_blastVelChange < 0f) _blastVelChange = BlastEnvFloat("SFHEADLESS_BLAST_VELCHANGE", 5f); return _blastVelChange; }
         }
 
         // P6.17 — server-side explosion physics. Applies AddExplosionForce to
@@ -5147,10 +5184,20 @@ namespace SFHeadlessHost
                 {
                     if ((object)col == null) continue;
 
-                    // Always apply explosion impulse (visual feedback for any dynamic body)
+                    // EXPLOSION PARITY (v0.4.1) — mirror stock Explosion.Explode's
+                    // non-player treatment: a MASS-SCALED impulse (clamp(mass/500,
+                    // 0.01, 1) — a 500-mass vanilla crate takes the full force)
+                    // plus a mass-independent VelocityChange kick, both with
+                    // upwardsModifier=1 like stock. The old single un-scaled
+                    // impulse with upwards=0.5 moved crates differently than
+                    // every client's local sim.
                     var rb = col.attachedRigidbody;
                     if ((object)rb != null && !rb.isKinematic)
-                        rb.AddExplosionForce(blastForce, center, radius, 0.5f);
+                    {
+                        float massScale = Mathf.Clamp(rb.mass / 500f, 0.01f, 1f);
+                        rb.AddExplosionForce(blastForce * massScale, center, radius, 1f, ForceMode.Impulse);
+                        rb.AddExplosionForce(BlastVelocityChange, center, radius, 1f, ForceMode.VelocityChange);
+                    }
 
                     // For destructibles: filter before calling Collide
                     if ((object)collideM == null || (object)dpType == null) continue;
