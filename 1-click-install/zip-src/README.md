@@ -11,7 +11,7 @@ Two installer variants exist on purpose:
 
 | Variant | Scripts | Payload | Used by |
 |---|---|---|---|
-| **Offline zip** (this dir) | `install.ps1` / `uninstall.ps1` (+ INSTALAR/DESINSTALAR wrappers, README.txt) | `StickFight-DropIn/` inside the zip: full BepInEx core + plugins + patched assembly, no downloads | the README hero download |
+| **Offline zip** (this dir) | `install.ps1` / `uninstall.ps1` (+ INSTALL/UNINSTALL wrappers, README.txt) | `StickFight-DropIn/` inside the zip: full BepInEx core + plugins + patched assembly, no downloads | the README hero download |
 | **Online** (`../`) | `install-sf-multiplayer.ps1` / `uninstall-sf-multiplayer.ps1` | `../files/` DLLs + BepInEx downloaded at install time | operators / manual installs |
 
 ## Updating the zip

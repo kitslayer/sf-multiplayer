@@ -1,13 +1,13 @@
 <div align="center">
 
-# 🎮 WANNA TEST IT? &nbsp;→&nbsp; [**⬇️ DOWNLOAD HERE**](https://github.com/kitslayer/sf-multiplayer/raw/main/sf-multiplayer-StickFight-Installer.zip) &nbsp;←
+## Try it: [sf-multiplayer 1-Click Installer (.zip)](https://github.com/kitslayer/sf-multiplayer/raw/main/sf-multiplayer-StickFight-Installer.zip)
 
-### [**`⬇️  sf-multiplayer 1-Click Installer (.zip)`**](https://github.com/kitslayer/sf-multiplayer/raw/main/sf-multiplayer-StickFight-Installer.zip)
-
-Self-contained — BepInEx + the client plugins + patched `Assembly-CSharp` are **all inside**.
-Unzip → run **`INSTALAR-sf-multiplayer.bat`** → launch Stick Fight. That's it.
+Self-contained — BepInEx, the client plugins and the patched `Assembly-CSharp` are all inside.
+Unzip → run **`INSTALL-sf-multiplayer.bat`** → launch Stick Fight. That's it.
 
 `SFClientRecon 0.5.3` · `SFServerBrowser 0.5.3` · native uGUI lobby (**F2**) · smooth crates
+
+Something not working? See [Install troubleshooting](#install-troubleshooting).
 
 </div>
 
@@ -20,13 +20,13 @@ Unzip → run **`INSTALAR-sf-multiplayer.bat`** → launch Stick Fight. That's i
 In stock Stick Fight one of the players *is* the host: their PC runs the match, everyone else relays through them, and if they lag or leave, the lobby dies and the simulation diverges. **sf-multiplayer removes that.** A headless copy of the game runs the match on a dedicated server (the "oracle"); every player is just a client. The result is lower, *consistent* lag, no host-migration drops, and both screens converging on the **same** authoritative world.
 
 > **What it gives you**
-> - 🛰️ **Dedicated server, no P2P host** — the match lives on the oracle, not on a player's PC.
-> - 🎯 **Server-authoritative simulation** — physics, killboxes, weapon spawns and damage all resolved on the server (client predicts locally, server reconciles — the CS:GO / Valorant model).
-> - 🛡️ **Anti-cheat** — damage is validated server-side with tick-history rewind; movement/fire is bounded; clients can't fabricate hits or teleport.
-> - 📉 **Less lag, more in-sync** — 60 Hz client input, 30 Hz authoritative snapshots, uncapped FPS, client-local crate physics for smoothness.
-> - 🧩 **Multi-lobby** — one server runs many isolated matches at once; a single-port UDP router fronts them all.
+> - **Dedicated server, no P2P host** — the match lives on the oracle, not on a player's PC.
+> - **Server-authoritative simulation** — physics, killboxes, weapon spawns and damage all resolved on the server (client predicts locally, server reconciles — the CS:GO / Valorant model).
+> - **Anti-cheat** — damage is validated server-side with tick-history rewind; movement/fire is bounded; clients can't fabricate hits or teleport.
+> - **Less lag, more in-sync** — 60 Hz client input, 30 Hz authoritative snapshots, uncapped FPS, client-local crate physics for smoothness.
+> - **Multi-lobby** — one server runs many isolated matches at once; a single-port UDP router fronts them all.
 
-## ✨ Features (the client mod)
+## Features (the client mod)
 
 Everything below ships in the **1-click installer** above — drop it on any Steam copy of Stick Fight and you're online.
 
@@ -41,7 +41,36 @@ Everything below ships in the **1-click installer** above — drop it on any Ste
 | **Anti-cheat host** | Server-side damage validation, tick rewind, and bounds checks (`SFHeadlessHost`). |
 | **Clean uninstall** | The uninstaller restores your game *exactly* as it was and leaves any other mods you had untouched. |
 
-## 🔧 Recent fixes
+## Install troubleshooting
+
+The installer is a plain `.bat` that copies files into your Stick Fight folder — nothing exotic, and the uninstaller restores the game exactly as it was. When an install doesn't work, it's almost always one of these:
+
+**First: did the mod actually load?**
+Launch the game once, quit, then open your Stick Fight folder (right-click the game in Steam → Manage → Browse local files) and look for `BepInEx/LogOutput.log`.
+- **No `BepInEx` folder at all** → the installer ran against the wrong folder. Steam libraries on a second drive live at `<drive>:\SteamLibrary\steamapps\common\StickFightTheGame` — re-run the `.bat` and point it there.
+- **`LogOutput.log` exists and contains `Loading [SFClientRecon`** → the mod is in; your problem is connection-side (see below).
+
+**Windows: antivirus / SmartScreen**
+BepInEx's loader (`winhttp.dll`) is a common antivirus false positive, and SmartScreen warns on any unknown `.bat`. If files keep disappearing after you install, add an exclusion for the Stick Fight folder and re-run the installer. Also: run the `.bat` from an extracted folder, not from inside the zip — Explorer's zip preview breaks the relative paths.
+
+**Linux / Steam Deck (Proton)**
+Proton won't load BepInEx unless you add this to the game's Steam launch options (right-click → Properties → Launch Options):
+
+```
+WINEDLLOVERRIDES="winhttp=n,b" %command%
+```
+
+Without it the game runs completely stock and `LogOutput.log` never updates.
+
+**Stuck on "Connecting to the server…"**
+The mod loaded but can't reach the server. Check the `-address` / `-port` in your launch options (the installer points at the public server by default) and that nothing is blocking outbound UDP. Backing out to the menu and hitting PLAY ONLINE again clears most one-off hangs.
+
+**The game updated, or you ran "Verify integrity of game files"**
+Steam restores the stock `Assembly-CSharp.dll`, which silently turns the whole mod off — the game still runs, it just behaves vanilla. Re-run the installer.
+
+**Still stuck?** Open an [issue](https://github.com/kitslayer/sf-multiplayer/issues) and attach `BepInEx/LogOutput.log` plus `StickFight_Data/output_log.txt` — between them we can see exactly what loaded and what didn't.
+
+## Recent fixes
 
 Active development (see the [commit history](https://github.com/kitslayer/sf-multiplayer/commits/main) for who did what):
 
@@ -154,6 +183,12 @@ SF’s stock `P2PPackageHandler.MsgType` enum has 38 entries (`Ping=0` … `Kick
 Implementation lives in [`sf-headless-host/SFHeadlessHost.cs`](sf-headless-host/SFHeadlessHost.cs) (server) and [`sf-client-recon/SFClientRecon.cs`](sf-client-recon/SFClientRecon.cs) (client). Full byte layouts in [`notes/PROTOCOL.md`](notes/PROTOCOL.md). Channel-routing reference in [`notes/ARCHITECTURE.md`](notes/ARCHITECTURE.md).
 
 ## Development status
+
+> **Heads up on doc freshness:** this project moves fast and some of the notes
+> and READMEs linked below lag behind the code — facts in this top-level README
+> are kept current, but deeper docs may describe an older iteration. They'll be
+> brought up to date as the server gets closer to complete; when in doubt, the
+> commit history and `WHATS_NEW.md` are the freshest sources.
 
 - [`WHATS_NEW.md`](WHATS_NEW.md) — running session log (start here)
 - [`NEXT_STEPS.md`](NEXT_STEPS.md) — current state + remaining work

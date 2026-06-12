@@ -34,7 +34,7 @@ namespace SFBoxFix
     {
         public const string PluginGuid = "com.stickfightdev.box-fix";
         public const string PluginName = "SFBoxFix";
-        public const string PluginVersion = "0.2.4";
+        public const string PluginVersion = "0.3.0";
 
         internal static ManualLogSource Log;
         private static Type _dpType;
@@ -538,9 +538,12 @@ namespace SFBoxFix
                 if ((object)rb == null) { _crateRbs.RemoveAt(i); continue; }   // prune destroyed
                 if (rb.isKinematic) continue;                                  // floating/parked crate
                 GovernCrateVelocity(rb);
-                if (rb.velocity.sqrMagnitude < OverhangRestSpeed * OverhangRestSpeed
-                    && rb.angularVelocity.sqrMagnitude < OverhangRestAngular * OverhangRestAngular)
-                    OverhangAssist(rb);
+                // v0.3.0 — OverhangAssist retired. Its probes sampled the depth
+                // axis (X) so it had never actually fired; fixing the axis made
+                // it torque every partially-supported crate forever — crates
+                // rocked, never slept, and streamed endless corrections to
+                // clients. With vanilla prefab mass/CoM (no longer overridden),
+                // crates topple naturally when they should.
             }
         }
 
@@ -577,15 +580,21 @@ namespace SFBoxFix
             if ((object)col == null || col.isTrigger) return;
             Bounds b = col.bounds;
             Vector3 c = b.center, e = b.extents;
-            if (e.x < 0.05f || e.y < 0.05f) return;
+            if (e.z < 0.05f || e.y < 0.05f) return;
 
+            // v0.3.0 — probes sample along Z, the horizontal axis the game
+            // actually plays on (position syncs y/z; X is camera depth). The
+            // old X-axis probes tested the edge nobody can fall off, and the
+            // resulting torque was about the now-frozen Z axis.
             float probeY = c.y - e.y + 0.05f;
-            float probeX = e.x * OverhangProbeFrac;
-            bool leftSup  = Physics.Raycast(new Vector3(c.x - probeX, probeY, c.z), Vector3.down, OverhangProbeDist);
-            bool rightSup = Physics.Raycast(new Vector3(c.x + probeX, probeY, c.z), Vector3.down, OverhangProbeDist);
-            if (leftSup == rightSup) return;   // fully supported or fully airborne ⇒ leave it
+            float probeZ = e.z * OverhangProbeFrac;
+            bool nearSup = Physics.Raycast(new Vector3(c.x, probeY, c.z - probeZ), Vector3.down, OverhangProbeDist);
+            bool farSup  = Physics.Raycast(new Vector3(c.x, probeY, c.z + probeZ), Vector3.down, OverhangProbeDist);
+            if (nearSup == farSup) return;   // fully supported or fully airborne ⇒ leave it
 
-            Vector3 tipDir = leftSup ? Vector3.right : Vector3.left;
+            // Torque about +X tips the top toward +Z (right-hand rule), i.e.
+            // toward the unsupported side when the -Z probe found support.
+            Vector3 tipDir = nearSup ? Vector3.forward : Vector3.back;
             Vector3 torque = Vector3.Cross(tipDir, Physics.gravity) * rb.mass * OverhangTorqueMul;
             rb.AddTorque(torque, ForceMode.Force);
         }
@@ -680,25 +689,36 @@ namespace SFBoxFix
             // Skip massless markers/sensors; configure everything with real mass.
             if (rb.mass < CrateMinConfigMass) return false;
 
+            // v0.3.0 — VANILLA-FIRST: mass / CoM / inertia / drag / materials are
+            // NOT overridden anymore. Stock crates are heavy (some prefabs ship
+            // mass ≈ 1500); our 45-mass override made players shove them around
+            // "like they are nothing" on every sim. Keeping prefab values is both
+            // perfect client↔server parity (neither side touches them) and the
+            // vanilla feel. Only what sync REQUIRES is configured: the unified
+            // constraint mask and tunneling-safe collision detection.
             ApplyCrateConstraints(rb);
-            ApplyCrateMassAndSolver(rb);
-            ApplyCrateInertiaAndCoM(rb);
-            ApplyCrateDragLimits(rb);
-            ApplyCrateMaterials(rb);
+            rb.collisionDetectionMode = CollisionDetectionMode.Continuous;
             return true;
         }
 
-        // Rotation is freezable only in Z over the NSO wire (snapshot syncs rotZ).
-        // So freeze X+Y rotation (otherwise the server tumbles the box on axes the
-        // clients never receive → "cajas giran porque sí") and FORCE Z free (the
-        // prefab freezes Z; a plain |= would never re-open it, so the crate only
-        // slid and never tipped). Position stays fully free so crates stay coplanar.
+        // GROUND-TRUTH FIX (v0.3.0): stock SF syncs NSO rotation as the
+        // up-vector's (y,z) — the up vector tilts within the Y-Z play plane,
+        // i.e. crates tip about world X (LerpLocalDummy reconstructs
+        // LookRotation(Cross(Vector3.right, up), up)). The previous mask froze
+        // X and freed Z on the belief that "the wire syncs rotZ" — true only
+        // of our own v26 field, not of vanilla — so the server tipped crates
+        // about the into-the-screen axis while clients tip about X:
+        // permanently divergent orientation between the authority sim and the
+        // predicted sims. Unified mask (mirrored in SFClientRecon): free X
+        // (the visible tip axis, now carried on the wire as up-vector y/z),
+        // freeze Y (yaw — unsyncable, so locked identically on both sims) and
+        // Z (vanilla crate prefabs ship Z frozen).
         private static void ApplyCrateConstraints(Rigidbody rb)
         {
             var c = (rb.constraints
-                     | RigidbodyConstraints.FreezeRotationX
-                     | RigidbodyConstraints.FreezeRotationY)
-                    & ~RigidbodyConstraints.FreezeRotationZ;
+                     | RigidbodyConstraints.FreezeRotationY
+                     | RigidbodyConstraints.FreezeRotationZ)
+                    & ~RigidbodyConstraints.FreezeRotationX;
             rb.constraints = c;
         }
 
@@ -711,6 +731,10 @@ namespace SFBoxFix
             // contacts, few enough that stacks don't "weld" (vanilla looseness).
             rb.solverIterations = CrateSolverIters;
             rb.solverVelocityIterations = CrateSolverVelIters;
+            // v0.3.0 — mirrored with the client's ConfigureCratePhysics: the
+            // predicted sim and this authority sim must integrate identically,
+            // and collision mode changes tunneling behavior.
+            rb.collisionDetectionMode = CollisionDetectionMode.Continuous;
         }
 
         // High centre of mass + slightly eased Z inertia ⇒ a crate overhanging an
@@ -722,8 +746,7 @@ namespace SFBoxFix
             rb.ResetInertiaTensor();
             rb.centerOfMass = new Vector3(0f, CrateCoMHeight, 0f);
             var it = rb.inertiaTensor;
-            it.x *= 0.85f;
-            it.z *= 0.70f;   // ease rotation in the 2.5D play plane (Z)
+            it.x *= 0.70f;   // ease the visible tip axis (world X; Y/Z are frozen)
             rb.inertiaTensor = it;
         }
 

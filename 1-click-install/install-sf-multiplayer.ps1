@@ -9,9 +9,9 @@
 #   4. Installs BepInEx (if missing), the patched Assembly-CSharp and the
 #      SFClientRecon (+ SFServerBrowser) plugins.
 #   5. Sets the launch options (-address of the oracle).
-#   6. Creates "Jugar-StickFight.bat" on the desktop.
+#   6. Creates "Play-StickFight.bat" on the desktop.
 #
-#  To revert: run DESINSTALAR-sf-multiplayer.bat (restores the backup).
+#  To revert: run UNINSTALL-sf-multiplayer.bat (restores the backup).
 # ===================================================================
 
 param(
@@ -87,7 +87,7 @@ $TargetAsm = Join-Path $Managed 'Assembly-CSharp.dll'
 $VanillaBak= Join-Path $Managed 'Assembly-CSharp.dll.vanilla.bak'
 $Plug      = Join-Path $Sf 'BepInEx\plugins'
 
-# Assets prebuildeados. Primero buscamos en la carpeta local 'files\'
+# Prebuilt assets. Look in the local 'files\' folder first
 # (paquete autocontenido); si no, caemos al repo (dist\ / client-mod\).
 $FilesDir = Join-Path $Here 'files'
 function Resolve-Asset($name, $repoRel) {
@@ -166,7 +166,7 @@ if ($hasMelon) {
 Step 7 'Setting launch options and desktop shortcut...'
 $launchArgs = ("-address {0} -port {1}" -f $ServerIp, $ServerPort)
 $desktop = [Environment]::GetFolderPath('Desktop')
-$batPath = Join-Path $desktop 'Jugar-StickFight.bat'
+$batPath = Join-Path $desktop 'Play-StickFight.bat'
 @"
 @echo off
 title sf-multiplayer  Stick Fight Oracle
@@ -184,13 +184,13 @@ Write-Host '   INSTALL COMPLETE  -  sf-multiplayer' -ForegroundColor Yellow
 Write-Host '===================================================================' -ForegroundColor Green
 Write-Host ''
 Write-Host '  To play (either way):' -ForegroundColor White
-Write-Host ('   A) Double-click on the desktop: Jugar-StickFight.bat') -ForegroundColor Gray
+Write-Host ('   A) Double-click on the desktop: Play-StickFight.bat') -ForegroundColor Gray
 Write-Host  '   B) Steam -> Stick Fight -> Properties -> Launch options:' -ForegroundColor Gray
 Write-Host ('        {0}' -f $launchArgs) -ForegroundColor Cyan
 Write-Host ''
 Write-Host '  In game: PLAY ONLINE -> QUICK MATCH. In the lobby type /start' -ForegroundColor White
 Write-Host ''
-Write-Host '  Roll back everything: DESINSTALAR-sf-multiplayer.bat' -ForegroundColor DarkGray
+Write-Host '  Roll back everything: UNINSTALL-sf-multiplayer.bat' -ForegroundColor DarkGray
 Write-Host ''
 Write-Host '  Thanks for playing sf-multiplayer!' -ForegroundColor Magenta
 Write-Host ''

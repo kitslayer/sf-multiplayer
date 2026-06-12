@@ -8,6 +8,7 @@ using BepInEx;
 using BepInEx.Logging;
 using HarmonyLib;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 namespace SFClientRecon
 {
@@ -62,7 +63,7 @@ namespace SFClientRecon
     {
         public const string PluginGuid = "com.stickfightdev.client-recon";
         public const string PluginName = "SFClientRecon";
-        public const string PluginVersion = "0.5.3";
+        public const string PluginVersion = "0.6.0";
 
         internal static ManualLogSource Log;
         // Verbose per-tick diagnostics OFF by default — they spammed the log and
@@ -149,12 +150,24 @@ namespace SFClientRecon
         {
             public ushort Id;
             public float X, Y, Z, RotZ;
+            // v26.7 — NSO up-vector (stock SF's rotation representation; tipping
+            // is about world X). NaN when the host didn't send the section.
+            public float UpY, UpZ;
         }
 
         private void Awake()
         {
             Log = Logger;
             Instance = this;
+            InstallUnityConsoleTee();
+            // v0.6.0 — track the current map scene (mirrors the oracle's
+            // _currentMapSceneName). NSO ids are PER-MAP and collide while
+            // both map scenes coexist during the additive transition; the
+            // cache rebuild must only accept objects from the newest map or
+            // the reconciler matches snapshot ids against LAST round's
+            // objects (~40u away) and teleports them (observed live:
+            // crates=162 on a 90-crate map, meanErr=37, thousands of snaps).
+            SceneManager.sceneLoaded += OnSceneLoadedTrackMapScene;
             foreach (var arg in Environment.GetCommandLineArgs())
             {
                 if (arg == "-batchmode" || arg == "-nographics")
@@ -264,6 +277,24 @@ namespace SFClientRecon
                 else Log.LogWarning("[crate-cull] IgnorePlayerWhenOffScreen type not found.");
             }
             catch (Exception e) { Log.LogWarning($"[crate-cull] patch failed: {e.Message}"); }
+
+            // v0.6.0 — null-channels guard on P2PPackageHandler.IsPacketAvailable.
+            // In oracle-connect mode the Steam P2P channel array never
+            // initializes, so SyncableObjectManager.LateUpdate's per-frame
+            // packet poll threw ~150 NullReferenceExceptions PER SECOND on
+            // every client (22k+/session in output_log) — a chronic hidden
+            // frame-rate tax. The oracle has the same guard in SFHeadlessHost;
+            // it must live HERE too because p2-style clients don't load the
+            // host plugin (and its patch suite is batchmode-gated anyway).
+            // NRE-storm fix attempt history (2026-06-11): a Harmony PREFIX on
+            // P2PPackageHandler.IsPacketAvailable broke the v25 handshake
+            // ("Connecting to the server..." hang) — and so did a FINALIZER,
+            // so the breakage comes from patching that method AT ALL (it is
+            // the patched DLL's packet pump). The storm is now fixed at the
+            // SOURCE instead: TickChannelNullFill (Update) fills null channel
+            // slots with empty queue instances, so stock code sees "empty
+            // queue = no packet" with zero patching. DO NOT Harmony-patch
+            // IsPacketAvailable on clients.
 
             InstallClientTerrainPatches();
             InstallOracleLobbyConnectPatches();
@@ -486,6 +517,8 @@ namespace SFClientRecon
                         Y    = BitConverter.ToSingle(pkt, o + 6),
                         Z    = BitConverter.ToSingle(pkt, o + 10),
                         RotZ = BitConverter.ToSingle(pkt, o + 14),
+                        UpY  = float.NaN,
+                        UpZ  = float.NaN,
                     });
                     o += nsoEntrySize;
                 }
@@ -537,6 +570,50 @@ namespace SFClientRecon
 
             List<MapStateSnapEntry> mapStateList = null;
             ParseMapStateSection(pkt, ref o, bodyOff + bodyLen, out mapStateList);
+
+            // v26.7 — NSO up-vector appendix: [u16 count][u16 id, f32 upY,
+            // f32 upZ]×count. Stock SF syncs NSO rotation as the up-vector's
+            // y/z (tipping is about world X; eulerAngles.z carries ~nothing
+            // for it), so this section is the real crate orientation. Optional
+            // trailing section — absent on older hosts, in which case every
+            // entry keeps UpY/UpZ = NaN and rotation falls back to RotZ.
+            if (o + 2 <= bodyOff + bodyLen)
+            {
+                ushort upCount = (ushort)(pkt[o] | (pkt[o + 1] << 8));
+                o += 2;
+                int upEntrySize = 10;
+                int maxUp = (bodyOff + bodyLen - o) / upEntrySize;
+                if (upCount > maxUp) upCount = (ushort)(maxUp < 0 ? 0 : maxUp);
+                if (upCount > 0 && nsoList != null && nsoList.Count > 0)
+                {
+                    var upById = new Dictionary<ushort, Vector2>(upCount);
+                    for (int i = 0; i < upCount; i++)
+                    {
+                        if (o + upEntrySize > bodyOff + bodyLen) break;
+                        ushort uid = (ushort)(pkt[o] | (pkt[o + 1] << 8));
+                        upById[uid] = new Vector2(
+                            BitConverter.ToSingle(pkt, o + 2),
+                            BitConverter.ToSingle(pkt, o + 6));
+                        o += upEntrySize;
+                    }
+                    for (int i = 0; i < nsoList.Count; i++)
+                    {
+                        Vector2 up;
+                        if (!upById.TryGetValue(nsoList[i].Id, out up)) continue;
+                        var e2 = nsoList[i];
+                        e2.UpY = up.x;
+                        e2.UpZ = up.y;
+                        nsoList[i] = e2;
+                    }
+                }
+                else
+                {
+                    // Still advance past the section so any future trailing
+                    // section stays aligned.
+                    int skip = upCount * upEntrySize;
+                    if (o + skip <= bodyOff + bodyLen) o += skip;
+                }
+            }
 
             // NB: explicit Monitor.Enter(obj)/Exit, NOT lock(){}. The C# `lock`
             // keyword compiles to Monitor.Enter(obj, ref bool), an overload that
@@ -615,6 +692,8 @@ namespace SFClientRecon
                 if (QualitySettings.vSyncCount != 0) QualitySettings.vSyncCount = 0;
             }
             try { TickOracleAutoConnect(); } catch { }
+            try { TickDebugConsole(); } catch { }
+            try { TickChannelNullFill(); } catch { }
             List<SnapshotEntry> snap;
             List<NsoSnapEntry>  nsoSnap;
             List<MapSyncSnapEntry> mapSyncSnap;
@@ -688,6 +767,105 @@ namespace SFClientRecon
             }
         }
 
+        // v0.6.0 — full Unity console tee. Subscribes to the engine's log
+        // callback and streams EVERY console line (all log levels, stack
+        // traces on errors, TIMESTAMPED — which output_log.txt lacks) to a
+        // per-instance file, so the live console can be followed from outside
+        // the process and correlated across instances. Path is unique per
+        // instance via the v26 listen port (p1=1340, p2=1342, default 1339).
+        private static System.IO.StreamWriter _consoleTee;
+        private static readonly object _consoleTeeLock = new object();
+        private void InstallUnityConsoleTee()
+        {
+            try
+            {
+                string port = Environment.GetEnvironmentVariable("SFCLIENTRECON_PORT");
+                if (string.IsNullOrEmpty(port)) port = "1339";
+                string path = "/tmp/sf-console-" + port + ".log";
+                _consoleTee = new System.IO.StreamWriter(path, false) { AutoFlush = true };
+                Application.logMessageReceivedThreaded += OnUnityLogMessage;
+                Log.LogInfo($"Unity console tee → {path}");
+            }
+            catch (Exception e) { Log.LogWarning($"[console-tee] {e.Message}"); }
+        }
+
+        private static void OnUnityLogMessage(string condition, string stackTrace, LogType type)
+        {
+            var w = _consoleTee;
+            if (w == null) return;
+            try
+            {
+                System.Threading.Monitor.Enter(_consoleTeeLock);
+                try
+                {
+                    w.Write(DateTime.Now.ToString("HH:mm:ss.fff"));
+                    w.Write(" [");
+                    w.Write(type.ToString());
+                    w.Write("] ");
+                    w.WriteLine(condition);
+                    if ((type == LogType.Exception || type == LogType.Error) && !string.IsNullOrEmpty(stackTrace))
+                        w.WriteLine(stackTrace);
+                }
+                finally { System.Threading.Monitor.Exit(_consoleTeeLock); }
+            }
+            catch { }
+        }
+
+        // v0.6.0 — kill the per-frame NRE storm AT THE SOURCE. In
+        // oracle-connect mode some P2PPackageHandler channel queue slots are
+        // never created, so the stock per-frame packet poll
+        // (SyncableObjectManager.LateUpdate → ListenForPackages →
+        // IsPacketAvailable) threw ~150 NREs/s per client. Filling the null
+        // slots with empty queue instances gives stock code exactly the
+        // semantics it expects ("empty queue → no packet") without Harmony-
+        // patching the packet pump (which broke the v25 handshake — see the
+        // install-site comment). Re-checked every 5s: scene/reconnect churn
+        // can recreate the handler.
+        private static FieldInfo _ppChannelsFillField;
+        private static bool _ppChannelsFillLookupTried;
+        private static Type _ppTypeForFill;
+        private float _chanFillNextAt = -1f;
+        private int _chanFillTotal;
+        private void TickChannelNullFill()
+        {
+            float now = Time.realtimeSinceStartup;
+            if (_chanFillNextAt > 0f && now < _chanFillNextAt) return;
+            _chanFillNextAt = now + 5f;
+            try
+            {
+                if ((object)_ppTypeForFill == null) _ppTypeForFill = AccessTools.TypeByName("P2PPackageHandler");
+                if ((object)_ppTypeForFill == null) return;
+                var inst = UnityEngine.Object.FindObjectOfType(_ppTypeForFill);
+                if (!RefOk(inst)) return;
+                if (!_ppChannelsFillLookupTried)
+                {
+                    _ppChannelsFillLookupTried = true;
+                    _ppChannelsFillField = AccessTools.Field(_ppTypeForFill, "channels");
+                }
+                if ((object)_ppChannelsFillField == null) return;
+                var channels = _ppChannelsFillField.GetValue(inst) as Array;
+                if (channels == null) return;
+                var elemType = channels.GetType().GetElementType();
+                if ((object)elemType == null || elemType.IsAbstract) return;
+                int filled = 0;
+                for (int i = 0; i < channels.Length; i++)
+                {
+                    if (channels.GetValue(i) != null) continue;
+                    object q;
+                    try { q = Activator.CreateInstance(elemType); }
+                    catch { return; }   // no parameterless ctor — bail quietly
+                    channels.SetValue(q, i);
+                    filled++;
+                }
+                if (filled > 0)
+                {
+                    _chanFillTotal += filled;
+                    Log.LogInfo($"[chan-fill] Filled {filled} null channel slot(s) with empty {elemType.Name} (total {_chanFillTotal}) — NRE storm source removed.");
+                }
+            }
+            catch { }
+        }
+
         // Smoothing targets — apply each frame in Update via exponential lerp.
         // Higher SmoothRate = snappier (less lag, more jitter).
         // Lower = smoother (more lag, less jitter). 15/s is a reasonable middle
@@ -717,6 +895,11 @@ namespace SFClientRecon
             public Quaternion RenderRot;
             public float LastRecvAt;     // realtime the latest snapshot was applied
             public bool HasRender;
+            // True when Rot was built from the v26.7 up-vector (full in-plane
+            // orientation). False = RotZ-only legacy rotation — the reconciler
+            // must NOT rotation-correct against it (a crate tipped about X has
+            // eulerAngles.z ≈ 0, so RotZ-only would "un-tip" every fallen crate).
+            public bool HasFullRot;
         }
         private readonly Dictionary<ushort, PoseTarget> _nsoTargets = new Dictionary<ushort, PoseTarget>();
         // Briefly make pushed crates non-kinematic for local collision feedback
@@ -749,8 +932,12 @@ namespace SFClientRecon
         // felt sluggish / "lentas". 6 m/s lets a deliberate push be responsive
         // while still well under a bullet's fling speed (which the blast cap and
         // the server governor catch).
-        private const float CrateMaxHoriz       = 2.5f;   // m/s — player-push CAP only (not the physics logic). Lower = "no las empuja tanto"
-        private const float CrateMaxHorizBlast  = 13.0f;  // m/s — explosion cap (when vert velocity present)
+        // v0.6.0 — caps mirror SFBoxFix's GovernCrateVelocity exactly. The
+        // client used to cap harder (2.5) than the server (6.0); under
+        // reconciliation an asymmetric cap means the authority moves crates
+        // faster than the prediction allows → constant forward-drag corrections.
+        private const float CrateMaxHoriz       = 6.0f;   // m/s — SFBoxFix.CrateMaxHoriz
+        private const float CrateMaxHorizBlast  = 14.0f;  // m/s — SFBoxFix.CrateMaxHorizBlast
         private const float CrateVertTrigger    = 2.0f;   // |v.y| above this enables the explosion cap
         private const float CrateMaxUp          = 9.0f;   // m/s upward — lets explosions launch crates
         private const float CrateMaxFall        = 30.0f;  // m/s downward — natural gravity fall
@@ -815,8 +1002,12 @@ namespace SFClientRecon
                     }
 
                     // AIR TUMBLE — falling fast with little spin ⇒ add a gentle,
-                    // deterministic Z tumble so it rotates as it falls (synced axis).
-                    if (v.y < -CrateAirTumbleSpeed && rb.angularVelocity.sqrMagnitude < CrateAirTumbleMaxAngSqr)
+                    // deterministic tumble so it rotates as it falls. LEGACY MODE
+                    // ONLY: in reconcile mode this torque exists on no other sim —
+                    // the server's real tumble now arrives via the v26.7 up-vector,
+                    // and injecting our own would just be orientation divergence.
+                    if (!CrateReconcileActive
+                        && v.y < -CrateAirTumbleSpeed && rb.angularVelocity.sqrMagnitude < CrateAirTumbleMaxAngSqr)
                     {
                         float sign = ((rb.GetInstanceID() & 1) == 0) ? 1f : -1f;
                         rb.AddTorque(new Vector3(sign * rb.mass * CrateAirTumbleTorque, 0f, 0f), ForceMode.Force);
@@ -1109,6 +1300,9 @@ namespace SFClientRecon
             if (!_running) return;
             if (!IsMatchActive()) return;
             try { ClampCrateVelocities(); } catch { }
+            // v0.6.0 — steer predicted crates toward the oracle's authoritative
+            // pose (runs in the physics step; velocity-based, see SfNsoClientPush).
+            try { ReconcilePushableCrates(); } catch { }
         }
 
         private void SmoothTowardTargets()
@@ -1178,19 +1372,16 @@ namespace SFClientRecon
                         // to tug-of-war with.
                         if (entry.Pushable && (object)rb != null)
                         {
-                            // PURE LOCAL PHYSICS. We deliberately apply NO server
-                            // position to pushable ground crates. Every previous
-                            // reconciliation scheme (position teleport OR corrective
-                            // velocity) injected motion the player never caused →
-                            // crates exploded on contact, slid, drifted, moved on
-                            // their own, or tunnelled. Letting the local Unity
-                            // simulation fully own them (dynamic + grip friction +
-                            // continuous collision, configured at cache build) gives
-                            // exact vanilla behaviour: they only move when the
-                            // player or another body pushes them, they stack, and
-                            // they never self-correct. The server learns their
-                            // positions from the outgoing relay (TickNsoClientPushRelay)
-                            // instead of pushing positions back at us.
+                            // Pushable crates are NOT render-lerped here. They run
+                            // dynamic local physics (instant push feel) and, in the
+                            // default v0.6.0 mode, converge to the oracle's
+                            // authoritative pose via ReconcilePushableCrates in
+                            // FixedUpdate — velocity-steered with a deadband, not
+                            // position-written, because every position-write scheme
+                            // tried in May 2026 injected penetration/phantom motion
+                            // (crates exploded, slid, drifted). In legacy mode
+                            // (SF_CRATES_LOCAL_PHYSICS=1) they take no server input
+                            // at all and the 5Hz relay reports them upward instead.
                             continue;
                         }
 
@@ -1331,6 +1522,10 @@ namespace SFClientRecon
         private void ApplyNsoSnapshot(List<NsoSnapEntry> snap, uint tick)
         {
             if (snap.Count == 0) return;
+            // Map transition — both scenes briefly coexist with colliding NSO
+            // ids; snapshots in flight may still describe the OLD map. Don't
+            // record targets (or rebuild the cache) until the window passes.
+            if (Time.realtimeSinceStartup < _reconSuppressUntil) return;
             try
             {
                 if ((object)_nsoType == null)
@@ -1349,13 +1544,16 @@ namespace SFClientRecon
                     {
                         foreach (var nso in all)
                         {
+                            var c = nso as Component;
+                            if ((object)c == null) continue;
+                            // PER-MAP ids: never cache an NSO from a stale
+                            // coexisting scene (see Awake comment).
+                            if (!SceneMatchesCurrentMapClient(c)) continue;
                             ushort id = 0;
                             if ((object)_nsoIndexProp != null)
                                 id = (ushort)_nsoIndexProp.GetValue(nso, null);
                             else if ((object)_nsoIndexField != null)
                                 id = (ushort)_nsoIndexField.GetValue(nso);
-                            var c = nso as Component;
-                            if ((object)c == null) continue;
                             var go = c.gameObject;
                             bool skip = IsWeaponNsoRootClient(go)
                                      || IsIceOnlyDestructibleRoot(go)
@@ -1422,7 +1620,8 @@ namespace SFClientRecon
                         var rootT = nsoComp.transform.root;
                         if ((object)rootT != null) _recentLerpAt[rootT.GetInstanceID()] = nowTs;
                     }
-                    Quaternion newRot = Quaternion.Euler(0f, 0f, e.RotZ);
+                    bool hasFullRot;
+                    Quaternion newRot = BuildNsoRotation(e, out hasFullRot);
                     float nowRt = Time.realtimeSinceStartup;
                     PoseTarget pt;
                     if (_nsoTargets.TryGetValue(e.Id, out pt) && pt != null && pt.HasRender)
@@ -1444,6 +1643,7 @@ namespace SFClientRecon
                         }
                         pt.Pos = newTarget;
                         pt.Rot = newRot;
+                        pt.HasFullRot = hasFullRot;
                         pt.LastRecvAt = nowRt;
                     }
                     else
@@ -1452,7 +1652,8 @@ namespace SFClientRecon
                         {
                             Pos = newTarget, Rot = newRot, Vel = Vector3.zero,
                             RenderPos = newTarget, RenderRot = newRot,
-                            LastRecvAt = nowRt, HasRender = true
+                            LastRecvAt = nowRt, HasRender = true,
+                            HasFullRot = hasFullRot
                         };
                         _nsoTargets[e.Id] = pt;
                     }
@@ -1461,7 +1662,44 @@ namespace SFClientRecon
                 if (VerboseDiag && (_snapsApplied == 1 || _snapsApplied % 90 == 0))
                     Log.LogInfo($"[P6.14] NSO snap tick={tick} targeted {applied}/{snap.Count}");
             }
-            catch (Exception ex) { Log.LogWarning($"[P6.14 NSO apply] {ex.Message}"); }
+            catch (Exception ex) { Log.LogWarning($"[P6.14 NSO apply] {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        // Current map scene tracking — see the Awake comment. Empty (menu,
+        // pre-first-map) = no filtering.
+        private static string _clientMapSceneName;
+        private static void OnSceneLoadedTrackMapScene(Scene sc, LoadSceneMode mode)
+        {
+            try
+            {
+                if (sc.name != "MainScene") _clientMapSceneName = sc.name;
+            }
+            catch { }
+        }
+        private static bool SceneMatchesCurrentMapClient(Component c)
+        {
+            if (string.IsNullOrEmpty(_clientMapSceneName)) return true;
+            try { return c.gameObject.scene.name == _clientMapSceneName; }
+            catch { return true; }
+        }
+
+        // Reconstruct the server rotation exactly like stock LerpLocalDummy
+        // (NetworkSyncableObject.cs:273-274): the up-vector tilts within the
+        // Y-Z play plane and the rotation is LookRotation(Cross(right, up), up).
+        // Falls back to the legacy eulerZ when the v26.7 section was absent.
+        private static Quaternion BuildNsoRotation(NsoSnapEntry e, out bool hasFullRot)
+        {
+            if (!float.IsNaN(e.UpY) && !float.IsNaN(e.UpZ))
+            {
+                var up = new Vector3(0f, e.UpY, e.UpZ);
+                if (up.sqrMagnitude > 0.0001f)
+                {
+                    hasFullRot = true;
+                    return Quaternion.LookRotation(Vector3.Cross(Vector3.right, up), up);
+                }
+            }
+            hasFullRot = false;
+            return Quaternion.Euler(0f, 0f, e.RotZ);
         }
 
         private static bool IsWeaponNsoRootClient(GameObject root)
@@ -2039,12 +2277,85 @@ namespace SFClientRecon
             catch (Exception e) { Log.LogWarning($"[P6.11 apply] {e.Message}"); }
         }
 
+        private static Type _mmTypeForSlot;
+        private static FieldInfo _mmLocalPlayerIndexField;
+        private static bool _mmSlotLookupTried;
+        private static FieldInfo _npHasLocalControlField;
+        private static bool _npLocalCtlLookupTried;
+
         private int FindLocalSlot()
         {
             if (_localSlot >= 0) return _localSlot;
             try
             {
+                // v0.6.0 — slot discovery, most-authoritative first. History:
+                // mHasControl scanning is always-false in server-auth mode; the
+                // first-NetworkPlayer fallback is order-dependent (every client
+                // claimed slot 0 → the server's _slotV26Endpoint[0] flip-flopped
+                // 40×/s and slot 1's snapshot stream went to the :1339 default
+                // port — seen on the wire 2026-06-11); and
+                // MultiplayerManager.mLocalPlayerIndex is NOT populated by the
+                // patched DLL in oracle mode (both clients read the default 0 —
+                // the decompile shows the stock path only).
+                //
+                // (1) The local player's NetworkPlayer carries
+                // mHasLocalControl=true in online matches (the field Phase-5
+                // PlayerSync used successfully); its Controller.playerID is the
+                // server-assigned slot.
                 EnsureControllerRefs();
+                if (!_npLocalCtlLookupTried)
+                {
+                    _npLocalCtlLookupTried = true;
+                    var npT = AccessTools.TypeByName("NetworkPlayer");
+                    if ((object)npT != null)
+                        _npHasLocalControlField = AccessTools.Field(npT, "mHasLocalControl");
+                }
+                if ((object)_npHasLocalControlField != null)
+                {
+                    var npTypeScan = AccessTools.TypeByName("NetworkPlayer");
+                    var npsScan = (object)npTypeScan != null ? UnityEngine.Object.FindObjectsOfType(npTypeScan) : null;
+                    if (npsScan != null)
+                    {
+                        foreach (var np in npsScan)
+                        {
+                            try
+                            {
+                                if (!(bool)_npHasLocalControlField.GetValue(np)) continue;
+                            }
+                            catch { continue; }
+                            int slotNp;
+                            if (TryGetPlayerSlotFromNetworkPlayer(np, out slotNp))
+                            {
+                                _localSlot = slotNp;
+                                Log.LogInfo($"[P6.11] Discovered localSlot={_localSlot} (NetworkPlayer.mHasLocalControl).");
+                                return _localSlot;
+                            }
+                        }
+                    }
+                }
+                // (2) mLocalPlayerIndex — trust only a NONZERO value (zero is
+                // indistinguishable from the never-set default here).
+                if (!_mmSlotLookupTried)
+                {
+                    _mmSlotLookupTried = true;
+                    _mmTypeForSlot = AccessTools.TypeByName("MultiplayerManager");
+                    if ((object)_mmTypeForSlot != null)
+                        _mmLocalPlayerIndexField = AccessTools.Field(_mmTypeForSlot, "mLocalPlayerIndex");
+                }
+                if ((object)_mmLocalPlayerIndexField != null)
+                {
+                    var mm = UnityEngine.Object.FindObjectOfType(_mmTypeForSlot);
+                    if (RefOk(mm))
+                    {
+                        int idx = (byte)_mmLocalPlayerIndexField.GetValue(mm);
+                        if (idx > 0)
+                        {
+                            _localSlot = idx;
+                            Log.LogInfo($"[P6.11] Discovered localSlot={_localSlot} (MultiplayerManager.mLocalPlayerIndex).");
+                            return _localSlot;
+                        }
+                    }
+                }
                 if ((object)_ctrlTypeForNp != null)
                 {
                     var ctrls = UnityEngine.Object.FindObjectsOfType(_ctrlTypeForNp);
@@ -2059,18 +2370,10 @@ namespace SFClientRecon
                         }
                     }
                 }
-                var npType = AccessTools.TypeByName("NetworkPlayer");
-                if ((object)npType != null)
-                {
-                    foreach (var np in UnityEngine.Object.FindObjectsOfType(npType))
-                    {
-                        if (TryGetPlayerSlotFromNetworkPlayer(np, out _localSlot))
-                        {
-                            Log.LogInfo($"[P6.11] Discovered localSlot={_localSlot} (NetworkPlayer+Controller).");
-                            return _localSlot;
-                        }
-                    }
-                }
+                // NOTE: the old "first NetworkPlayer found" fallback is GONE on
+                // purpose — it's order-dependent and was the source of every
+                // client claiming slot 0. Returning -1 (inputs wait for spawn)
+                // is strictly better than caching a wrong slot.
             }
             catch (Exception e) { Log.LogWarning($"FindLocalSlot: {e.Message}"); }
             return -1;

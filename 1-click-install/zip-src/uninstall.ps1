@@ -1,5 +1,5 @@
 # ===================================================================
-#  sf-multiplayer  -  Desinstalar / revertir a Stick Fight vanilla
+#  sf-multiplayer  -  Uninstall / revert to vanilla Stick Fight
 # ===================================================================
 $ErrorActionPreference = 'Stop'
 
@@ -19,29 +19,32 @@ function Find-StickFight {
     return $null
 }
 
-Write-Host 'sf-multiplayer - Revirtiendo a Stick Fight vanilla...' -ForegroundColor Yellow
+Write-Host 'sf-multiplayer - Reverting to vanilla Stick Fight...' -ForegroundColor Yellow
 $Sf = Find-StickFight
-if (-not $Sf) { $Sf = Read-Host 'Pega la ruta de StickFightTheGame' }
-if (Get-Process StickFight -ErrorAction SilentlyContinue) { throw 'Cerra Stick Fight primero.' }
+if (-not $Sf) { $Sf = Read-Host 'Paste the path to your StickFightTheGame folder' }
+if (Get-Process StickFight -ErrorAction SilentlyContinue) { throw 'Close Stick Fight first.' }
 
 $asm = Join-Path $Sf 'StickFight_Data\Managed\Assembly-CSharp.dll'
 $bak = "$asm.vanilla.bak"
-if (Test-Path $bak) { Copy-Item $bak $asm -Force; Remove-Item $bak -Force; Write-Host 'OK  Assembly-CSharp.dll vanilla restaurado.' -ForegroundColor Green }
-else { Write-Host '!!  Sin backup. Steam -> Stick Fight -> Propiedades -> Archivos -> Verificar integridad para restaurar.' -ForegroundColor Yellow }
+if (Test-Path $bak) { Copy-Item $bak $asm -Force; Remove-Item $bak -Force; Write-Host 'OK  Vanilla Assembly-CSharp.dll restored.' -ForegroundColor Green }
+else { Write-Host '!!  No backup found. Use Steam -> Stick Fight -> Properties -> Installed Files -> Verify integrity to restore it.' -ForegroundColor Yellow }
 
-# Quitar nuestros plugins
+# Remove our plugins
 foreach ($p in @('SFClientRecon.dll','SFServerBrowser.dll')) {
     $f = Join-Path $Sf "BepInEx\plugins\$p"
-    if (Test-Path $f) { Remove-Item $f -Force; Write-Host "OK  Quitado BepInEx\plugins\$p" -ForegroundColor Green }
+    if (Test-Path $f) { Remove-Item $f -Force; Write-Host "OK  Removed BepInEx\plugins\$p" -ForegroundColor Green }
 }
 
-# Apagar BepInEx (deja los archivos pero no se carga) para volver 100% vanilla.
+# Turn BepInEx off (files stay, nothing loads) so the game is 100% vanilla.
 $ds = Join-Path $Sf 'doorstop_config.ini'
-if (Test-Path $ds) { (Get-Content $ds -Raw) -replace 'enabled\s*=\s*true','enabled = false' | Set-Content $ds -NoNewline; Write-Host 'OK  BepInEx desactivado (doorstop enabled=false).' -ForegroundColor Green }
+if (Test-Path $ds) { (Get-Content $ds -Raw) -replace 'enabled\s*=\s*true','enabled = false' | Set-Content $ds -NoNewline; Write-Host 'OK  BepInEx disabled (doorstop enabled=false).' -ForegroundColor Green }
 
-$bat = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Jugar-StickFight.bat'
-if (Test-Path $bat) { Remove-Item $bat -Force }
+# Remove the desktop shortcut (both the current name and the old Spanish one).
+foreach ($name in @('Play-StickFight.bat','Jugar-StickFight.bat')) {
+    $bat = Join-Path ([Environment]::GetFolderPath('Desktop')) $name
+    if (Test-Path $bat) { Remove-Item $bat -Force }
+}
 
 Write-Host ''
-Write-Host 'Listo. Stick Fight vuelve a su estado normal.' -ForegroundColor Green
-Write-Host 'Si pusiste -address en las Opciones de lanzamiento de Steam, quitalas.' -ForegroundColor Gray
+Write-Host 'Done. Stick Fight is back to normal.' -ForegroundColor Green
+Write-Host 'If you added -address to your Steam Launch Options, remove it.' -ForegroundColor Gray

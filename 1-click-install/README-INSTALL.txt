@@ -3,12 +3,12 @@
 ===================================================================
 
 HOW TO INSTALL (1 click):
-  1) Double-click:  INSTALAR-sf-multiplayer.bat
+  1) Double-click:  INSTALL-sf-multiplayer.bat
   2) Accept the administrator prompt (needed to write into Steam).
   3) Wait until it says "INSTALL COMPLETE".
 
 DONE. To play:
-  - Double-click on the desktop: "Jugar-StickFight.bat"
+  - Double-click on the desktop: "Play-StickFight.bat"
   - Or open Stick Fight from Steam (launch options are already set).
   - In game: PLAY ONLINE -> QUICK MATCH, or press F2 for the in-game lobby.
 
@@ -20,7 +20,7 @@ WHAT THE INSTALLER DOES:
   - Installs the oracle client (SFClientRecon + SFServerBrowser).
 
 TO ROLL BACK EVERYTHING:
-  - Double-click:  DESINSTALAR-sf-multiplayer.bat
+  - Double-click:  DESINSTALL-sf-multiplayer.bat
     It restores your original Assembly-CSharp.dll and removes ONLY the mod
     plugins -- any other mods you had are left untouched.
 

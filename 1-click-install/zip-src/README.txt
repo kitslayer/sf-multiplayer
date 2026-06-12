@@ -1,84 +1,120 @@
 ===================================================================
-   sf-multiplayer  -  Stick Fight: The Game  -  Mod Oracle (cliente)
+   sf-multiplayer  -  Stick Fight: The Game  -  Oracle mod (client)
    kitslayer
 ===================================================================
 
-Este paquete contiene SOLO lo necesario para jugar (release): el mod ya
-compilado + BepInEx. No trae el codigo fuente.
+This package contains ONLY what you need to play (a release build):
+the compiled mod + BepInEx. No source code in here.
 
-Contenido:
-  INSTALAR-sf-multiplayer.bat     -> instalacion 1-CLICK (automatica)
-  DESINSTALAR-sf-multiplayer.bat  -> revertir a vanilla
-  StickFight-DropIn\              -> los archivos, ordenados EXACTAMENTE como
-                                      van dentro de la carpeta de Stick Fight
-  README.txt                      -> esto
-
--------------------------------------------------------------------
-  OPCION A — INSTALACION AUTOMATICA (1 clic, recomendada)
--------------------------------------------------------------------
-  1) Cerra Stick Fight si esta abierto.
-  2) Doble clic en  INSTALAR-sf-multiplayer.bat
-  3) Acepta el permiso de administrador.
-  4) Esperar a "INSTALACION COMPLETA".
-
-  El instalador:
-   - Encuentra Stick Fight solo (cualquier biblioteca de Steam).
-   - Hace BACKUP de tu Assembly-CSharp.dll (-> Assembly-CSharp.dll.vanilla.bak).
-   - Copia BepInEx + los plugins + el Assembly-CSharp parcheado.
-   - Deja un acceso directo "Jugar-StickFight.bat" en el escritorio.
+Contents:
+  INSTALL-sf-multiplayer.bat    -> 1-CLICK install (automatic)
+  UNINSTALL-sf-multiplayer.bat  -> revert to vanilla
+  StickFight-DropIn\            -> the files, laid out EXACTLY as they
+                                   go inside your Stick Fight folder
+  README.txt                    -> this file
 
 -------------------------------------------------------------------
-  OPCION B — INSTALACION MANUAL (copiar y pegar)
+  OPTION A — AUTOMATIC INSTALL (1 click, recommended)
 -------------------------------------------------------------------
-  1) Cerra Stick Fight.
-  2) Abri la carpeta de Stick Fight:
-       Steam -> Stick Fight -> Propiedades -> Archivos instalados ->
-       Examinar...   (o normalmente:
+  1) Close Stick Fight if it's open.
+  2) Extract the whole zip somewhere (don't run it from inside the
+     zip preview window).
+  3) Double-click  INSTALL-sf-multiplayer.bat
+  4) Accept the administrator prompt.
+  5) Wait for "INSTALL COMPLETE".
+
+  What the installer does:
+   - Finds Stick Fight on its own (any Steam library, any drive).
+   - BACKS UP your Assembly-CSharp.dll (-> Assembly-CSharp.dll.vanilla.bak).
+   - Copies BepInEx + the plugins + the patched Assembly-CSharp.
+   - Leaves a "Play-StickFight.bat" shortcut on your desktop.
+
+-------------------------------------------------------------------
+  OPTION B — MANUAL INSTALL (copy & paste)
+-------------------------------------------------------------------
+  1) Close Stick Fight.
+  2) Open your Stick Fight folder:
+       Steam -> Stick Fight -> Properties -> Installed Files ->
+       Browse...   (usually:
        C:\Program Files (x86)\Steam\steamapps\common\StickFightTheGame )
-  3) BACKUP (importante): copia
+  3) BACKUP (important): copy
        StickFight_Data\Managed\Assembly-CSharp.dll
-     a otro lado (o renombralo a Assembly-CSharp.dll.vanilla.bak).
-  4) Abri la carpeta  StickFight-DropIn\  de este paquete.
-  5) Selecciona TODO su contenido y pegalo DENTRO de la carpeta de
-     Stick Fight. Cuando pregunte por reemplazar, decir SI
-     (reemplaza Assembly-CSharp.dll por el parcheado).
-     -> La estructura ya coincide: cada archivo cae en su lugar
-        (winhttp.dll, doorstop_config.ini, BepInEx\..., StickFight_Data\...).
-  6) (Opcional) En Steam -> Stick Fight -> Propiedades -> Opciones de
-     lanzamiento, pega:   -address 69.53.117.43 -port 1337
+     somewhere safe (or rename it to Assembly-CSharp.dll.vanilla.bak).
+  4) Open the  StickFight-DropIn\  folder from this package.
+  5) Select ALL of its contents and paste them INTO your Stick Fight
+     folder. When asked to replace, say YES
+     (this swaps Assembly-CSharp.dll for the patched one).
+     -> The structure already matches: every file lands where it
+        belongs (winhttp.dll, doorstop_config.ini, BepInEx\...,
+        StickFight_Data\...).
+  6) (Optional) In Steam -> Stick Fight -> Properties -> Launch
+     Options, paste:   -address 69.53.117.43 -port 1337
 
 -------------------------------------------------------------------
-  COMO JUGAR
+  HOW TO PLAY
 -------------------------------------------------------------------
-  - Abri Stick Fight (por el acceso directo del escritorio, o por Steam
-    si pusiste las opciones de lanzamiento).
+  - Open Stick Fight (via the desktop shortcut, or via Steam if you
+    set the launch options).
   - PLAY ONLINE -> QUICK MATCH.
-  - En el lobby del mapa, escribi en el chat:  /start
+  - In the map lobby, type in chat:  /start
 
 -------------------------------------------------------------------
-  COMO REVERTIR (volver a vanilla)
+  TROUBLESHOOTING
 -------------------------------------------------------------------
-  AUTOMATICO:
-   - Doble clic en  DESINSTALAR-sf-multiplayer.bat
-     (restaura tu Assembly-CSharp.dll original, quita los plugins y
-      desactiva BepInEx).
+  Did the mod load at all?
+   - Launch the game once, quit, and check that
+     BepInEx\LogOutput.log now exists in your Stick Fight folder.
+   - No BepInEx folder -> the installer hit the wrong path. Re-run
+     INSTALL-sf-multiplayer.bat and paste your real install path
+     when asked.
+   - LogOutput.log exists and mentions "Loading [SFClientRecon" ->
+     the mod is fine; your issue is connection-side (below).
+
+  Files keep disappearing after install?
+   - Your antivirus is quarantining BepInEx's winhttp.dll (a common
+     false positive). Add an exclusion for the Stick Fight folder
+     and re-run the installer.
+
+  Stuck on "Connecting to the server..."?
+   - Check the launch options have  -address 69.53.117.43 -port 1337
+   - Make sure nothing blocks outbound UDP.
+   - Back out to the menu and hit PLAY ONLINE again; first attempt
+     after a fresh boot sometimes needs a second try.
+
+  Game updated, or you ran "Verify integrity of game files"?
+   - Steam restored the vanilla Assembly-CSharp.dll, which silently
+     turns the mod off. Just re-run the installer.
+
+  Still stuck? Open an issue at
+  github.com/kitslayer/sf-multiplayer/issues and attach
+  BepInEx\LogOutput.log + StickFight_Data\output_log.txt.
+
+-------------------------------------------------------------------
+  HOW TO REVERT (back to vanilla)
+-------------------------------------------------------------------
+  AUTOMATIC:
+   - Double-click  UNINSTALL-sf-multiplayer.bat
+     (restores your original Assembly-CSharp.dll, removes the
+      plugins and disables BepInEx).
 
   MANUAL:
-   1) Cerra Stick Fight.
-   2) En  StickFight_Data\Managed\  reemplaza Assembly-CSharp.dll por tu
-      backup (Assembly-CSharp.dll.vanilla.bak -> Assembly-CSharp.dll).
-   3) Borra  BepInEx\plugins\SFClientRecon.dll  y  SFServerBrowser.dll
-   4) Para desactivar BepInEx del todo: en doorstop_config.ini pone
-      enabled = false   (o borra winhttp.dll).
-   5) Quita las opciones de lanzamiento -address de Steam.
-   - Si algo quedo mal: Steam -> Stick Fight -> Propiedades -> Archivos
-     instalados -> Verificar integridad de los archivos (restaura todo).
+   1) Close Stick Fight.
+   2) In  StickFight_Data\Managed\  replace Assembly-CSharp.dll with
+      your backup (Assembly-CSharp.dll.vanilla.bak -> Assembly-CSharp.dll).
+   3) Delete  BepInEx\plugins\SFClientRecon.dll  and  SFServerBrowser.dll
+   4) To fully disable BepInEx: set  enabled = false  in
+      doorstop_config.ini (or delete winhttp.dll).
+   5) Remove the -address launch options from Steam.
+   - If anything is left broken: Steam -> Stick Fight -> Properties ->
+     Installed Files -> Verify integrity of game files (restores
+     everything).
 
 -------------------------------------------------------------------
-  NOTAS
+  NOTES
 -------------------------------------------------------------------
-  - Si tenes MelonLoader: convive con BepInEx. Si el menu online falla,
-    renombra version.dll temporalmente mientras jugas en el oracle.
-  - Servidor por defecto: 69.53.117.43 : 1337
+  - If you have MelonLoader: it coexists with BepInEx. If the online
+    menu misbehaves, temporarily rename version.dll while playing on
+    the oracle.
+  - Default server: 69.53.117.43 : 1337
   - Discord: kitslayer
 ===================================================================

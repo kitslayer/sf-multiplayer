@@ -76,7 +76,7 @@ namespace SFHeadlessHost
     {
         public const string PluginGuid = "com.stickfightdev.headless-host";
         public const string PluginName = "SFHeadlessHost";
-        public const string PluginVersion = "0.3.11";
+        public const string PluginVersion = "0.4.0";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance;
@@ -296,17 +296,45 @@ namespace SFHeadlessHost
                     (object)mmType != null ? AccessTools.Method(mmType, "ReadyUp") : null,
                     postfix: nameof(ReadyUpPostfix));
 
+                // v0.4.0 — installed on BOTH oracle and clients (was batchmode-
+                // only; clients hit the identical null-channels NRE storm).
                 var ppTypeHeadless = AccessTools.TypeByName("P2PPackageHandler");
-                if (_batchModeHost && (object)ppTypeHeadless != null)
+                if ((object)ppTypeHeadless != null)
                 {
                     var isPkt = AccessTools.Method(ppTypeHeadless, "IsPacketAvailable");
                     if ((object)isPkt != null)
-                        TryPatch(harmony, "P2PPackageHandler.IsPacketAvailable (headless null-guard)",
+                        TryPatch(harmony, "P2PPackageHandler.IsPacketAvailable (null-channels guard)",
                             isPkt, prefix: nameof(IsPacketAvailableHeadlessPrefix));
                 }
 
                 if (_batchModeHost)
                     TryPatchHealthHandlerDieForRoundAdvance(harmony);
+
+                // v0.4.0 — stock IgnorePlayerWhenOffScreen.Update moves any
+                // object below y=-11 to layer 24 (no collision). It's a RENDER
+                // cull, hardcoded for small maps — on big maps (e.g. Desert9,
+                // crates at y=-14) the oracle's crates silently lost collision
+                // and fell through the world. Clients patch this with a
+                // map-size-aware transpiler (SFClientRecon "crate-cull"); the
+                // headless oracle renders nothing, so kill the cull outright.
+                // Before server-auth this was masked: client relays kept
+                // teleporting the fallen server crates back up.
+                if (_batchModeHost)
+                {
+                    SceneManager.sceneLoaded += OnOracleSceneLoadedTrackMap;
+                    Log.LogInfo("[v26.7] Oracle map-scene tracker registered (sceneLoaded hook).");
+                }
+
+                if (_batchModeHost)
+                {
+                    var cullType = AccessTools.TypeByName("IgnorePlayerWhenOffScreen");
+                    var cullUpd = (object)cullType != null ? AccessTools.Method(cullType, "Update") : null;
+                    if ((object)cullUpd != null)
+                        TryPatch(harmony, "IgnorePlayerWhenOffScreen.Update (headless cull kill)",
+                            cullUpd, prefix: nameof(SkipPrefix));
+                    else
+                        Log.LogWarning("[P6.5] IgnorePlayerWhenOffScreen.Update not found — offscreen cull NOT disabled.");
+                }
 
                 if (_p65MissingPatches.Count == 0)
                 {
@@ -939,9 +967,133 @@ namespace SFHeadlessHost
             Log.LogInfo($"[P6.9 settle] Settle complete for '{scene.name}': {reEnabled}/{n} rigidbodies re-enabled dynamic.");
             yield return new WaitForFixedUpdate();
             yield return new WaitForFixedUpdate();
+            // v0.4.0 — id-keyed NSO state is PER-MAP: indexes are reassigned on
+            // every scene load, and during the additive transition both maps'
+            // NSOs are alive with colliding ids. Record the authoritative map
+            // scene (every NSO cache/collect filters on it) and wipe the
+            // id-keyed dicts so nothing from the previous round leaks into
+            // snapshots, the keepalive, or the fall-guard.
+            _currentMapSceneName = scene.name;
+            _nsoLastBroadcastPos.Clear();
+            _nsoLastMovedAt.Clear();
+            _nsoSpawnPos.Clear();
+            RebuildNsoIndexCache();
+            _nsoCacheLastRebuildAt = Time.realtimeSinceStartup;
             MarkSceneNsosMovedAfterSettle();
             if ((object)Instance != null)
                 Instance.RunPostMapLoadServerInit(scene);
+        }
+
+        // === File-driven live debug console (v0.4.0, batchmode only) ===
+        // Write commands — one per line — into /tmp/sf-cmd-oracle.txt; replies
+        // land in the plugin log tee (SFHEADLESS_LOGFILE) within ~0.5s. Gives
+        // an outside operator on-demand live crate/rig state from the
+        // AUTHORITY sim, diffable against the clients' own `boxes` dumps.
+        // Commands: boxes | rigs | help
+        private float _oracleDbgNextPollAt = -1f;
+        private const string OracleDbgCmdPath = "/tmp/sf-cmd-oracle.txt";
+        private void TickOracleDebugConsole()
+        {
+            if (!_batchModeHost) return;
+            float now = Time.realtimeSinceStartup;
+            if (_oracleDbgNextPollAt > 0f && now < _oracleDbgNextPollAt) return;
+            _oracleDbgNextPollAt = now + 0.5f;
+            try
+            {
+                if (!System.IO.File.Exists(OracleDbgCmdPath)) return;
+                string text = System.IO.File.ReadAllText(OracleDbgCmdPath);
+                if (string.IsNullOrEmpty(text) || text.Trim().Length == 0) return;
+                System.IO.File.WriteAllText(OracleDbgCmdPath, "");   // consume
+                string[] lines = text.Split('\n');
+                foreach (var raw in lines)
+                {
+                    string cmd = raw.Trim();
+                    if (cmd.Length == 0) continue;
+                    if (cmd == "boxes") { OracleDumpBoxes(); continue; }
+                    if (cmd == "rigs") { OracleDumpRigs(); continue; }
+                    Log.LogInfo("[dbg] commands: boxes | rigs | help");
+                }
+            }
+            catch (Exception e) { Log.LogWarning($"[dbg] poll error: {e.Message}"); }
+        }
+
+        private void OracleDumpBoxes()
+        {
+            EnsureNsoSrvCache();
+            var sb = new System.Text.StringBuilder();
+            sb.Append("[dbg] ORACLE BOXES id p=(y,z) v slp kin\n");
+            int n = 0;
+            foreach (var ent in _nsoSrvEntries)
+            {
+                if (!ent.Pushable) continue;
+                var rb = ent.Rb;
+                if ((object)rb == null || !ent.Comp) continue;
+                Vector3 p;
+                try { p = rb.position; } catch { continue; }
+                sb.Append("  #").Append(ent.Id)
+                  .Append(" p=(").Append(p.y.ToString("0.0")).Append(",").Append(p.z.ToString("0.0"))
+                  .Append(") v=").Append(rb.velocity.magnitude.ToString("0.00"))
+                  .Append(" slp=").Append(rb.IsSleeping() ? "1" : "0")
+                  .Append(" kin=").Append(rb.isKinematic ? "1" : "0").Append("\n");
+                n++;
+            }
+            sb.Append("[dbg] total ").Append(n).Append(" pushable crates (authority)");
+            Log.LogInfo(sb.ToString());
+        }
+
+        private void OracleDumpRigs()
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.Append("[dbg] ORACLE RIGS:\n");
+            int n = 0;
+            foreach (var kv in SlotToRig)
+            {
+                var rig = kv.Value;
+                if ((object)rig == null) continue;
+                sb.Append("  slot=").Append(kv.Key)
+                  .Append(" pos=").Append(rig.transform.position.ToString("0.00")).Append("\n");
+                n++;
+            }
+            sb.Append("[dbg] total ").Append(n).Append(" rigs");
+            Log.LogInfo(sb.ToString());
+        }
+
+        // Scene gate for id-keyed NSO state. Empty (lobby, pre-first-map) = no
+        // filtering.
+        private static string _currentMapSceneName;
+        private static bool SceneMatchesCurrentMap(Component comp)
+        {
+            if (string.IsNullOrEmpty(_currentMapSceneName)) return true;
+            try { return comp.gameObject.scene.name == _currentMapSceneName; }
+            catch { return true; }
+        }
+
+        // v0.4.0 — track EVERY map-scene load directly. The settle coroutine
+        // also updates _currentMapSceneName, but rounds that take the
+        // stale-settle-skip / ForceCompleteMapLoad path bypass it entirely —
+        // the oracle then filtered all NSO caches to the PREVIOUS map for the
+        // whole round: broadcast old-scene crates (clients saw uniform 22-37u
+        // errors), empty fall-guard, `boxes` dump showing 0 pushables mid-
+        // match (caught live via the debug console, 2026-06-11).
+        private static void OnOracleSceneLoadedTrackMap(Scene sc, LoadSceneMode mode)
+        {
+            try
+            {
+                if (!_batchModeHost) return;
+                if (sc.name == "MainScene") return;
+                _currentMapSceneName = sc.name;
+                var inst = Instance;
+                if ((object)inst != null)
+                {
+                    inst._nsoLastBroadcastPos.Clear();
+                    inst._nsoLastMovedAt.Clear();
+                    inst._nsoSpawnPos.Clear();
+                    inst.RebuildNsoIndexCache();
+                    inst._nsoCacheLastRebuildAt = Time.realtimeSinceStartup;
+                }
+                Log.LogInfo($"[v26.7] Map scene tracked → '{sc.name}' (NSO caches reset).");
+            }
+            catch (Exception e) { Log.LogWarning($"[v26.7] scene-track: {e.Message}"); }
         }
 
         // After settle, seed snapshot tracking so quiescent crates still broadcast once.
@@ -963,6 +1115,7 @@ namespace SFHeadlessHost
                 {
                     var comp = nso as Component;
                     if ((object)comp == null) continue;
+                    if (!SceneMatchesCurrentMap(comp)) continue;
                     ushort id = 0;
                     if ((object)_nsoIndexProp != null)
                         id = (ushort)_nsoIndexProp.GetValue(nso, null);
@@ -1548,13 +1701,26 @@ namespace SFHeadlessHost
         // Generic skip-prefix: return false to skip the original method.
         internal static bool SkipPrefix() => false;
 
-        // Headless oracle: channels[channel] can be null → 40k+ NullRef/frame in ListenForPackages.
+        // Headless oracle ONLY: channels[channel] can be null → 40k+
+        // NullRef/frame in ListenForPackages. BATCHMODE-GATED ON PURPOSE —
+        // do NOT widen to clients: the patched DLL lazily creates channel
+        // queues INSIDE IsPacketAvailable, and a prefix-skip there blocks
+        // the v25 handshake entirely ("Connecting to the server..." hang,
+        // live-debugged 2026-06-11). Clients get an NRE-suppressing
+        // FINALIZER from SFClientRecon instead.
+        private static FieldInfo _ppChannelsField;
+        private static bool _ppChannelsLookupTried;
         internal static bool IsPacketAvailableHeadlessPrefix(object __instance, int channel, ref bool __result)
         {
             if (!_batchModeHost) return true;
             try
             {
-                var chField = AccessTools.Field(__instance.GetType(), "channels");
+                if (!_ppChannelsLookupTried)
+                {
+                    _ppChannelsLookupTried = true;
+                    _ppChannelsField = AccessTools.Field(__instance.GetType(), "channels");
+                }
+                var chField = _ppChannelsField;
                 if ((object)chField == null) { __result = false; return false; }
                 var channels = chField.GetValue(__instance) as Array;
                 if (channels == null || channel < 0 || channel >= channels.Length)
@@ -1762,6 +1928,7 @@ namespace SFHeadlessHost
         private string _updateErrorFirstStackTrace;
         private void Update()
         {
+            try { TickOracleDebugConsole(); } catch { }
             try
             {
                 StepBoot();
@@ -1799,6 +1966,56 @@ namespace SFHeadlessHost
                 _fixedUpdateErrors++;
                 if (_fixedUpdateErrors <= 5 || _fixedUpdateErrors % 300 == 0)
                     Log.LogError($"SFHeadlessHost.FixedUpdate (count={_fixedUpdateErrors}) {e.GetType().Name}: {e.Message}");
+            }
+            try { TickGhostContactGovernor(); } catch { }
+        }
+
+        // v0.4.0 — bound the ghost rig's push on crates. The auth rigs are
+        // KINEMATIC and swept to the client-asserted position, and a kinematic
+        // body is infinite mass to PhysX: a crate in its path must move at
+        // full rig speed (a fall/dash = 10-20 u/s shove). The client predicts
+        // the same push with its real, light, dynamic player rig vs a 45-mass
+        // crate — barely a nudge. That asymmetry made the authority's crates
+        // run away from every client's prediction during contact (the
+        // "rubber-band on push" of the first live test). While a crate is in
+        // ghost-rig contact range, cap its horizontal speed to a believable
+        // walk-push; vertical and blast motion (|v.y| > 2) stay untouched so
+        // explosions and drops behave.
+        private const float GhostPushCrateCap   = 2.6f;  // u/s horizontal while rig-adjacent
+        private const float GhostPushContactSqr = 1.7f * 1.7f;
+        private int _ghostGovernedCount;
+        private void TickGhostContactGovernor()
+        {
+            if (SlotToRig.Count == 0) return;
+            EnsureNsoSrvCache();
+            if (_nsoSrvEntries.Count == 0) return;
+            float capSqr = GhostPushCrateCap * GhostPushCrateCap;
+            foreach (var ent in _nsoSrvEntries)
+            {
+                if (!ent.Pushable) continue;
+                var rb = ent.Rb;
+                if ((object)rb == null || rb.isKinematic) continue;
+                Vector3 v;
+                Vector3 p;
+                try { v = rb.velocity; p = rb.position; } catch { continue; }
+                if (Mathf.Abs(v.y) > 2f) continue;            // blast/fall — leave it
+                float hSqr = v.x * v.x + v.z * v.z;
+                if (hSqr <= capSqr) continue;
+                bool rigNear = false;
+                foreach (var kv in SlotToRig)
+                {
+                    var rig = kv.Value;
+                    if ((object)rig == null) continue;
+                    Vector3 d = rig.transform.position - p;
+                    if (d.sqrMagnitude <= GhostPushContactSqr) { rigNear = true; break; }
+                }
+                if (!rigNear) continue;
+                float s = GhostPushCrateCap / Mathf.Sqrt(hSqr);
+                v.x *= s; v.z *= s;
+                rb.velocity = v;
+                _ghostGovernedCount++;
+                if (_ghostGovernedCount == 1 || _ghostGovernedCount % 200 == 0)
+                    Log.LogInfo($"[P6.9 ghost] Capped rig-push on crate #{_ghostGovernedCount} (→{GhostPushCrateCap:0.0} u/s)");
             }
         }
 
@@ -2419,16 +2636,28 @@ namespace SFHeadlessHost
                     break;
 
                 case PktObjectUpdate:
-                    // BOXES FIX — apply the client's NSO update to the
-                    // server's own scene state BEFORE relaying. Previously
-                    // we only relayed; the server's local NSO sat at its
-                    // spawn position forever, so v26 WorldStateSnapshot
-                    // broadcast (Phase 6.14) overrode the client's correct
-                    // local-push with the server's stale "still at spawn"
-                    // view. Now the server tracks who-pushed-what and the
-                    // snapshot is accurate.
-                    ApplyClientObjectUpdate(data, bodyOffset, bodyLen);
-                    RelayBodyToOthers(cli, msgType, data, bodyOffset, bodyLen, channel);
+                    // SERVER-AUTH BOXES (v0.4.0) — the oracle's own sim is
+                    // the single authority for crate state. Client
+                    // ObjectUpdates are no longer applied OR relayed:
+                    // applying let any client teleport any crate (zero
+                    // validation), and with two clients the last-writer-wins
+                    // overwrite ping-ponged the server's crates between two
+                    // divergent local sims. Clients learn crate state from
+                    // the v26 snapshot; they influence crates only through
+                    // their player rig (ghost-rig collisions) and the
+                    // server-side bullet kick.
+                    // SFHEADLESS_ACCEPT_CLIENT_CRATES=1 restores legacy.
+                    if (AcceptClientCrates)
+                    {
+                        ApplyClientObjectUpdate(data, bodyOffset, bodyLen);
+                        RelayBodyToOthers(cli, msgType, data, bodyOffset, bodyLen, channel);
+                    }
+                    else
+                    {
+                        _objectUpdateDroppedCount++;
+                        if (_objectUpdateDroppedCount == 1 || _objectUpdateDroppedCount % 600 == 0)
+                            Log.LogInfo($"[BOXES] Dropped client ObjectUpdate #{_objectUpdateDroppedCount} (server-authoritative crates)");
+                    }
                     break;
 
                 // "Relay to ALL including sender" for destruction events.
@@ -4347,7 +4576,10 @@ namespace SFHeadlessHost
                 float dist = Vector3.Distance(sweepFrom, sweepTo);
                 if (dist < 0.05f) return;
                 Vector3 mid = (sweepFrom + sweepTo) * 0.5f;
-                float radius = dist * 0.5f + 1.25f;
+                // v0.4.0 — tight corridor. The old +1.25u pad woke every crate
+                // near a player's PATH ~50×/s; nothing ever slept near players
+                // and the whole field jittered ("imposible que se asienten").
+                float radius = dist * 0.5f + 0.45f;
                 var hits = Physics.OverlapSphere(mid, radius);
                 if (hits == null || hits.Length == 0) return;
 
@@ -4514,9 +4746,8 @@ namespace SFHeadlessHost
                         if (!_nsoByIndexCache.TryGetValue(id, out comp) || (object)comp == null)
                             continue;
                     }
-                    if (!IsPushableCrateNso(comp.gameObject)) continue;
                     var p = comp.transform.position;
-                    // Only act on crates that have left the playable area. A crate
+                    // Only act on NSOs that have left the playable area. A crate
                     // below the void threshold is never in legitimate play (no
                     // player push or throw arc lives down there) — it tunneled the
                     // floor due to server physics. The previous version SKIPPED
@@ -4525,6 +4756,32 @@ namespace SFHeadlessHost
                     // downward-velocity guards fired on exactly the crates we
                     // needed to rescue, and the guard never did anything.
                     if (p.y >= NsoFallResetY) continue;
+                    if (!IsPushableCrateNso(comp.gameObject))
+                    {
+                        // v0.4.0 — tracked NON-crate NSOs (ice debris etc.)
+                        // knocked into the void fell forever: the rescue below
+                        // is crates-only and the stale-NSO freezer deliberately
+                        // skips fall-guard-tracked ids, so nothing owned this
+                        // case (observed live: 7 bodies at y=-1366 and counting).
+                        // Stock SF's host killboxes such debris; parking it
+                        // kinematic is our equivalent.
+                        var rbsNp = comp.GetComponentsInChildren<Rigidbody>();
+                        if (rbsNp != null)
+                        {
+                            int frozeNp = 0;
+                            foreach (var rbn in rbsNp)
+                            {
+                                if ((object)rbn == null || rbn.isKinematic) continue;
+                                rbn.velocity = Vector3.zero;
+                                rbn.angularVelocity = Vector3.zero;
+                                rbn.isKinematic = true;
+                                frozeNp++;
+                            }
+                            if (frozeNp > 0)
+                                Log.LogInfo($"[BOXES] Froze void debris idx={id} Y={p.y:0.0} ({frozeNp} rb)");
+                        }
+                        continue;
+                    }
                     if (resetsThisTick >= NsoFallMaxResetPerTick) break;
 
                     Vector3 spawn = kv.Value;
@@ -4672,6 +4929,18 @@ namespace SFHeadlessHost
         // once confirmed + client-side dedup (suppress the vanilla local throw hit) is in.
         private bool _throwAuthShadow = true;
 
+        // Server-emitted bullet damage opt-in (see HandleClientFireWeapon).
+        private static bool? _bulletDamageCache;
+        private static bool BulletDamageEnabled
+        {
+            get
+            {
+                if (_bulletDamageCache == null)
+                    _bulletDamageCache = Environment.GetEnvironmentVariable("SFHEADLESS_BULLET_DAMAGE") == "1";
+                return _bulletDamageCache.Value;
+            }
+        }
+
         // PktClientFireWeapon body (v26.3 — client → server):
         //   u8  ownerSlot
         //   u8  weaponType  (passthrough byte; meaning is whatever the client sends)
@@ -4723,6 +4992,15 @@ namespace SFHeadlessHost
                 Velocity    = dir * speed,
                 BornAt      = Time.realtimeSinceStartup,
                 LifetimeSec = DefaultProjectileLifetime,
+                // v0.4.0 — bullet damage SHADOW by default, like throws. The
+                // sphere hit test runs against RTT-lagged ghost rigs, so
+                // client-side misses registered as server hits and the emitted
+                // PlayerTookDamage rendered hit feedback WITHOUT the victim's
+                // HP authority changing — "fake hits" (live report 2026-06-11,
+                // 4 spurious emissions in one session). Stock client-side
+                // damage remains authoritative; flip SFHEADLESS_BULLET_DAMAGE=1
+                // to re-enable for hit-reg tuning sessions.
+                ShadowOnly  = !BulletDamageEnabled,
             };
             _projectiles.Add(p);
             Log.LogInfo($"[P6.17] Fire registered: id={p.Id} slot={ownerSlot} w={weaponType} pos={p.Position} vel={p.Velocity.magnitude:0.0}u/s");
@@ -4760,11 +5038,16 @@ namespace SFHeadlessHost
                 // so the existing hit emit applies.
                 Vector3 prev = p.Position;
                 p.Position += p.Velocity * dt;
-                if (TryProjectileWallHit(prev, p.Position, out var wallHit))
+                if (TryProjectileWallHit(prev, p.Position, out var wallHit, out var wallCol))
                 {
                     // Thrown weapons hit walls and stick/drop — they never explode.
                     if (!p.IsThrown && IsExplosiveWeaponType(p.WeaponType, p.Velocity.magnitude))
                         ApplyExplosiveBlastAt(wallHit, 5f, 900f);
+                    else
+                        // Server-auth boxes (v0.4.0): non-explosive shots
+                        // shove the crate they hit in the oracle sim — the
+                        // only sim that counts now.
+                        ApplyBulletCrateKick(wallCol, p.Velocity);
                     _projectiles.RemoveAt(i);
                     continue;
                 }
@@ -4772,7 +5055,7 @@ namespace SFHeadlessHost
                 if (hitSlot >= 0)
                 {
                     if (p.ShadowOnly)
-                        Log.LogInfo($"[throw-auth] SHADOW HIT: thrown id={p.Id} owner-slot={p.OwnerSlot} → would damage slot {hitSlot} (server swept-sphere @ fixed tick — FPS-INDEPENDENT; no damage emitted in shadow mode)");
+                        Log.LogInfo($"[{(p.IsThrown ? "throw-auth" : "bullet-auth")}] SHADOW HIT: id={p.Id} owner-slot={p.OwnerSlot} → would damage slot {hitSlot} (server swept-sphere; no damage emitted in shadow mode)");
                     else
                         EmitServerDamage(hitSlot, p.OwnerSlot, p.WeaponType, p.Velocity);
                     _projectiles.RemoveAt(i);
@@ -4873,11 +5156,12 @@ namespace SFHeadlessHost
         }
 
         private bool ProjectileHitWall(Vector3 from, Vector3 to) =>
-            TryProjectileWallHit(from, to, out _);
+            TryProjectileWallHit(from, to, out _, out _);
 
-        private bool TryProjectileWallHit(Vector3 from, Vector3 to, out Vector3 hitPoint)
+        private bool TryProjectileWallHit(Vector3 from, Vector3 to, out Vector3 hitPoint, out Collider hitCollider)
         {
             hitPoint = to;
+            hitCollider = null;
             Vector3 dir = to - from;
             float dist = dir.magnitude;
             if (dist < 0.001f) return false;
@@ -4885,12 +5169,43 @@ namespace SFHeadlessHost
             {
                 if ((object)hit.collider == null) return false;
                 hitPoint = hit.point;
+                hitCollider = hit.collider;
                 var root = hit.collider.transform.root;
                 if ((object)root == null) return false;
                 if (root.GetComponent("Controller") != null) return false;
                 return true;
             }
             return false;
+        }
+
+        // Stock SF bullets impart a mass-independent velocity change on the
+        // crate they hit (which is why heavy crates still fling in vanilla).
+        // The wall-hit linecast above already stops the projectile at the
+        // crate; this adds the shove. Kick is confined to the Y-Z play plane
+        // and SFBoxFix's per-FixedUpdate velocity governor caps the result,
+        // so sustained fire can't build up a launch.
+        private const float BulletCrateKick = 2.5f; // m/s per hit
+        private int _bulletCrateKicks;
+        private void ApplyBulletCrateKick(Collider hitCol, Vector3 projVelocity)
+        {
+            try
+            {
+                if ((object)hitCol == null) return;
+                var rb = hitCol.attachedRigidbody;
+                if ((object)rb == null || rb.isKinematic) return;
+                var root = hitCol.transform.root;
+                if ((object)root == null || !IsPushableCrateNso(root.gameObject)) return;
+                Vector3 dir = projVelocity;
+                dir.x = 0f;
+                if (dir.sqrMagnitude < 0.0001f) return;
+                dir.Normalize();
+                rb.WakeUp();
+                rb.velocity += dir * BulletCrateKick;
+                _bulletCrateKicks++;
+                if (_bulletCrateKicks == 1 || _bulletCrateKicks % 25 == 0)
+                    Log.LogInfo($"[P6.17] Bullet crate-kick #{_bulletCrateKicks} on '{root.name}'");
+            }
+            catch (Exception e) { Log.LogWarning($"[P6.17 crate-kick] {e.Message}"); }
         }
 
         // Returns the slot of the first rig (other than the owner) whose
@@ -5074,12 +5389,20 @@ namespace SFHeadlessHost
         //   u16 projCount; projs: [u32 id, u8 slot, u8 wType, f32 x,y,z]   × k (18/each)
         //   u16 mapSyncCount (v26.5 positions)
         //   mapState section (v26.6 GetData payloads — GhostPlatform isOn, etc.)
+        //   u16 nsoUpCount; [u16 id, f32 upY, f32 upZ] × m  (v26.7 appendix —
+        //       stock SF syncs NSO rotation as the up-vector's y/z (tipping is
+        //       about world X; eulerAngles.z carries ~nothing for it). The
+        //       18-byte NSO entry can't grow without breaking deployed 0.5.x
+        //       parsers, so the up-vector rides in a trailing section old
+        //       clients never read. Reconstruct exactly like stock
+        //       LerpLocalDummy: LookRotation(Cross(right, up), up).
         private byte[] BuildWorldStateBody(List<NsoSnap> nsoEntries, List<MapSyncSnap> mapSyncEntries, List<MapStateSnap> mapStateEntries)
         {
             int n = 0;
             foreach (var kv in SlotToRig) if ((object)kv.Value != null) n++;
             int bodyLen = 4 + 1 + n * 17 + 2 + nsoEntries.Count * 18 + 2 + _projectiles.Count * 18
-                          + 2 + mapSyncEntries.Count * 20 + MapStateSectionByteLen(mapStateEntries);
+                          + 2 + mapSyncEntries.Count * 20 + MapStateSectionByteLen(mapStateEntries)
+                          + 2 + nsoEntries.Count * 10;
             byte[] body = new byte[bodyLen];
             int off = 0;
             WriteU32LE(body, off, _serverTick); off += 4;
@@ -5131,10 +5454,18 @@ namespace SFHeadlessHost
                 WriteF32LE(body, off, m.Z); off += 4;
             }
             off = WriteMapStateSection(body, off, mapStateEntries);
+            // v26.7 — NSO up-vector appendix (same ids/order as the NSO section).
+            WriteU16LE(body, off, (ushort)nsoEntries.Count); off += 2;
+            foreach (var e in nsoEntries)
+            {
+                WriteU16LE(body, off, e.Id); off += 2;
+                WriteF32LE(body, off, e.UpY); off += 4;
+                WriteF32LE(body, off, e.UpZ); off += 4;
+            }
             return body;
         }
 
-        private struct NsoSnap { public ushort Id; public float X, Y, Z, RotZ; }
+        private struct NsoSnap { public ushort Id; public float X, Y, Z, RotZ, UpY, UpZ; }
 
         // P0-14 — MapInfoSyncableBase position snapshot entry.
         // Identified by Vector2 startPos (same key stock SF uses in its
@@ -5168,6 +5499,7 @@ namespace SFHeadlessHost
                 {
                     var comp = nso as Component;
                     if ((object)comp == null) continue;
+                    if (!SceneMatchesCurrentMap(comp)) continue;
                     if (IsWeaponNsoRoot(comp.gameObject)) continue;
                     ushort id = 0;
                     if ((object)_nsoIndexProp != null) id = (ushort)_nsoIndexProp.GetValue(nso, null);
@@ -5175,7 +5507,8 @@ namespace SFHeadlessHost
                     var p = comp.transform.position;
                     if (p.y < -30f) continue;
                     var e = comp.transform.eulerAngles;
-                    result.Add(new NsoSnap { Id = id, X = p.x, Y = p.y, Z = p.z, RotZ = e.z });
+                    var up = comp.transform.up;
+                    result.Add(new NsoSnap { Id = id, X = p.x, Y = p.y, Z = p.z, RotZ = e.z, UpY = up.y, UpZ = up.z });
                 }
             }
             catch (Exception ex) { Log.LogWarning($"[P0-13 keyframe collect] {ex.Message}"); }
@@ -5212,6 +5545,18 @@ namespace SFHeadlessHost
         private readonly Dictionary<ushort, Component> _nsoByIndexCache = new Dictionary<ushort, Component>();
         private float _nsoCacheLastRebuildAt = -1f;
         private int _objectUpdateAppliedCount;
+        private int _objectUpdateDroppedCount;
+        // Cached once — checked per inbound ObjectUpdate packet.
+        private static bool? _acceptClientCratesCache;
+        private static bool AcceptClientCrates
+        {
+            get
+            {
+                if (_acceptClientCratesCache == null)
+                    _acceptClientCratesCache = Environment.GetEnvironmentVariable("SFHEADLESS_ACCEPT_CLIENT_CRATES") == "1";
+                return _acceptClientCratesCache.Value;
+            }
+        }
         private void ApplyClientObjectUpdate(byte[] data, int off, int len)
         {
             if (len < 10) return;
@@ -5284,14 +5629,15 @@ namespace SFHeadlessHost
                 if (all == null) return;
                 foreach (var nso in all)
                 {
+                    var c = nso as Component;
+                    if ((object)c == null) continue;
+                    if (!SceneMatchesCurrentMap(c)) continue;
                     ushort id = 0;
                     if ((object)_nsoIndexProp != null)
                         id = (ushort)_nsoIndexProp.GetValue(nso, null);
                     else if ((object)_nsoIndexField != null)
                         id = (ushort)_nsoIndexField.GetValue(nso);
-                    var c = nso as Component;
                     _nsoByIndexCache[id] = c;
-                    if ((object)c == null) continue;
                     var go = c.gameObject;
                     _nsoSrvEntries.Add(new NsoSrvEntry
                     {
@@ -5363,7 +5709,8 @@ namespace SFHeadlessHost
                         _nsoLastMovedAt[id] = now;
                         _nsoLastBroadcastPos[id] = p;
                         var eDyn = comp.transform.eulerAngles;
-                        result.Add(new NsoSnap { Id = id, X = p.x, Y = p.y, Z = p.z, RotZ = eDyn.z });
+                        var upDyn = comp.transform.up;
+                        result.Add(new NsoSnap { Id = id, X = p.x, Y = p.y, Z = p.z, RotZ = eDyn.z, UpY = upDyn.y, UpZ = upDyn.z });
                         continue;
                     }
 
@@ -5391,7 +5738,8 @@ namespace SFHeadlessHost
                     _nsoLastBroadcastPos[id] = p;
 
                     var e = comp.transform.eulerAngles;
-                    result.Add(new NsoSnap { Id = id, X = p.x, Y = p.y, Z = p.z, RotZ = e.z });
+                    var up = comp.transform.up;
+                    result.Add(new NsoSnap { Id = id, X = p.x, Y = p.y, Z = p.z, RotZ = e.z, UpY = up.y, UpZ = up.z });
                 }
                 if (needRebuild)
                 {

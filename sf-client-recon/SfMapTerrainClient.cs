@@ -216,6 +216,19 @@ namespace SFClientRecon
             Instance._crateConfigured.Clear();
             Instance._appliedGwIds.Clear();   // new map → new ground-weapon ids
             ClearPushableLerpCache();
+            // v0.6.0 — NSO ids collide while both map scenes coexist after the
+            // additive load. Suppress reconciliation + target intake until the
+            // old scene is gone, or the reconciler chases ghosts of the
+            // previous round (first live test: crates=162 on a 90-crate map,
+            // meanErr=40 — every crate teleporting toward last map's layout).
+            _reconSuppressUntil = Time.realtimeSinceStartup + 2.5f;
+            Instance._reconBigErrSince.Clear();
+            Instance._reconRigCache.Clear();
+            Instance._reconRigCacheAt = -1f;
+            // Re-derive the local slot each map (cheap: direct
+            // mLocalPlayerIndex read) — the old forever-cache could pin a
+            // stale slot across a reconnect.
+            Instance._localSlot = -1;
             _countDownDeferred = false;
             Instance.StartCoroutine(Instance.RebuildMapCachesAfterLoadCoroutine());
             try { Instance.StartCoroutine(Instance.ForceMapLoadWatchdog(data)); }

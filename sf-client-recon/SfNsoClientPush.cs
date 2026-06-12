@@ -7,11 +7,15 @@ using UnityEngine;
 namespace SFClientRecon
 {
     /// <summary>
-    /// Oracle client: dynamic pushable crates + relay ObjectUpdate (msg 26) to server.
+    /// Oracle client: dynamic (predicted) pushable crates + server-auth reconciliation.
     /// </summary>
     public partial class Plugin
     {
         private static bool _oraclePushMode;
+        // v0.6.0 — the 5Hz msg-26 relay is LEGACY-mode only. In the default
+        // (server-authoritative) mode the oracle drops client ObjectUpdates,
+        // and crate state flows one way: oracle sim → v26 snapshot → client.
+        private static bool _crateRelayEnabled;
         private static Type _nsoPushType;
         private static PropertyInfo _nsoPushIndexProp;
         private static FieldInfo _nsoPushIndexField;
@@ -23,16 +27,29 @@ namespace SFClientRecon
         private const float PushRelayInterval = 0.2f;
         private const float PushRelayMinDelta = 0.04f;
 
-        // Client LOCAL crate physics is the DEFAULT again. On this 30Hz netcode,
-        // pure server-follow renders steppy/slow ("se ve lageada"); local physics
-        // runs at full framerate so crates feel smooth and instant, while the
-        // server stays the source of truth via the outgoing relay. Set
-        // SF_CRATES_SERVER_AUTHORITATIVE=1 to force pure server-follow instead.
+        // Crate modes (v0.6.0). Default = PREDICTED + RECONCILED: crates run
+        // dynamic local physics (instant, full-framerate push feel) and are
+        // continuously steered toward the oracle's sim — the single authority —
+        // by ReconcilePushableCrates. The old default (pure local physics +
+        // 5Hz relay, no incoming correction) meant every client lived in its
+        // own crate universe: A's pushes never appeared on B, and the server's
+        // "truth" ping-ponged between the clients' divergent relays.
+        //   SF_CRATES_LOCAL_PHYSICS=1        → legacy local+relay mode (A/B rollback)
+        //   SF_CRATES_SERVER_AUTHORITATIVE=1 → stock kinematic-follow (debug)
         private static bool ServerAuthoritativeCrates()
         {
             string v = Environment.GetEnvironmentVariable("SF_CRATES_SERVER_AUTHORITATIVE");
             return !string.IsNullOrEmpty(v) && (v == "1" || v.ToLowerInvariant() == "true");
         }
+
+        private static bool LegacyLocalCrates()
+        {
+            string v = Environment.GetEnvironmentVariable("SF_CRATES_LOCAL_PHYSICS");
+            return !string.IsNullOrEmpty(v) && (v == "1" || v.ToLowerInvariant() == "true");
+        }
+
+        // Reconciliation runs only in the default mode (not legacy, not stock).
+        private static bool CrateReconcileActive => _oraclePushMode && !_crateRelayEnabled;
 
         private void InstallNsoClientPushPatches()
         {
@@ -40,11 +57,14 @@ namespace SFClientRecon
             if (!_oracleConnectMode) return;
             if (ServerAuthoritativeCrates())
             {
-                Log.LogInfo("[nso-push] SERVER-AUTHORITATIVE crates forced (SF_CRATES_SERVER_AUTHORITATIVE=1) — "
+                Log.LogInfo("[nso-push] STOCK kinematic-follow crates forced (SF_CRATES_SERVER_AUTHORITATIVE=1) — "
                           + "client local physics OFF; crates follow server snapshots.");
                 return;
             }
             _oraclePushMode = true;
+            _crateRelayEnabled = LegacyLocalCrates();
+            if (_crateRelayEnabled)
+                Log.LogInfo("[nso-push] LEGACY local-crates mode (SF_CRATES_LOCAL_PHYSICS=1) — pure local physics + 5Hz relay, no reconciliation.");
             try
             {
                 _nsoPushType = AccessTools.TypeByName("NetworkSyncableObject");
@@ -65,21 +85,20 @@ namespace SFClientRecon
                 if ((object)lerpDummy != null)
                     harmony.Patch(lerpDummy, prefix: new HarmonyMethod(typeof(Plugin), nameof(LerpLocalDummy_PushPrefix)));
 
-                Log.LogInfo("[nso-push] Pushable crates = pure local physics (LerpLocalDummy skipped); relay active.");
+                if (_crateRelayEnabled)
+                    Log.LogInfo("[nso-push] Pushable crates = pure local physics (LerpLocalDummy skipped); relay active.");
+                else
+                    Log.LogInfo("[nso-push] Pushable crates = predicted local physics + server reconciliation (v0.6.0); oracle sim is authoritative, relay OFF.");
             }
             catch (Exception e) { Log.LogWarning($"[nso-push] install failed: {e.Message}"); }
         }
 
         internal void TickNsoClientPushRelay()
         {
-            // Crates are now PURE LOCAL PHYSICS and we apply NO incoming server
-            // position to them, so the old tug-of-war is gone — it is safe (and
-            // necessary for other clients) to relay our authoritative crate
-            // positions UP to the server. Only fires while a match is live and
-            // throttled to PushRelayInterval; only sends crates that actually
-            // moved (RelayPushableCrateUpdates skips at-rest crates), so a still
-            // stack costs no bandwidth and triggers no server-side motion.
-            if (!_oraclePushMode || !_running) return;
+            // LEGACY MODE ONLY (SF_CRATES_LOCAL_PHYSICS=1). In the default
+            // server-auth mode nothing is relayed up — the oracle drops client
+            // ObjectUpdates anyway, and crate state flows oracle → client.
+            if (!_oraclePushMode || !_crateRelayEnabled || !_running) return;
             if (Time.realtimeSinceStartup < _nextPushRelayAt) return;
             _nextPushRelayAt = Time.realtimeSinceStartup + PushRelayInterval;
             try { RelayPushableCrateUpdates(); } catch { }
@@ -201,128 +220,40 @@ namespace SFClientRecon
             return false;
         }
 
-        // Applied at map-load to every pushable crate rigidbody (ground + floating
-        // preset). Tuned for vanilla-like stack tumble: lower inter-crate grip,
-        // higher CoM / lower Z inertia for tipping, lighter solver so contacts
-        // don't "glue" stacks, heavier player-push damping lives in FixedUpdate.
+        // Applied at map-load to every pushable crate rigidbody. v0.6.0
+        // VANILLA-FIRST (mirrors SFBoxFix v0.3.0): mass / CoM / inertia / drag /
+        // materials are NOT overridden anymore. Stock crates are heavy (some
+        // prefabs ship mass ≈ 1500) — the old 45-mass override made players
+        // shove them around "like they are nothing" on every sim. Keeping
+        // prefab values is both perfect client↔server parity (neither side
+        // touches them) and the vanilla feel. Only what sync REQUIRES is set:
+        // the unified constraint mask, tunneling-safe collision detection, and
+        // render interpolation (client-only; no sim effect).
         internal static void ConfigureCratePhysics(Rigidbody rb, bool floatingPreset = false)
         {
             if ((object)rb == null) return;
             try
             {
-                ApplyCrateColliderMaterials(rb, floatingPreset);
-                ApplyCrateMassAndSolver(rb, floatingPreset);
-                ApplyCrateInertiaAndCenterOfMass(rb, floatingPreset);
-                ApplyCrateDragAndRotationLimits(rb, floatingPreset);
                 ApplyCrateConstraintMask(rb);
+                rb.collisionDetectionMode = CollisionDetectionMode.Continuous;
+                rb.interpolation = RigidbodyInterpolation.Interpolate;
             }
             catch { }
         }
 
-        private static PhysicMaterial _crateStackMaterial;
-        private static PhysicMaterial _crateFloorMaterial;
-
-        private static PhysicMaterial CrateStackMaterial
-        {
-            get
-            {
-                if ((object)_crateStackMaterial == null)
-                {
-                    _crateStackMaterial = new PhysicMaterial("CrateStackVanilla")
-                    {
-                        // Low crate-vs-crate grip → stacks disassemble on vertical hits.
-                        staticFriction = 0.26f,
-                        dynamicFriction = 0.22f,
-                        bounciness = 0.10f,
-                        frictionCombine = PhysicMaterialCombine.Average,
-                        bounceCombine = PhysicMaterialCombine.Maximum
-                    };
-                }
-                return _crateStackMaterial;
-            }
-        }
-
-        private static PhysicMaterial CrateFloorMaterial
-        {
-            get
-            {
-                if ((object)_crateFloorMaterial == null)
-                {
-                    _crateFloorMaterial = new PhysicMaterial("CrateFloorGrip")
-                    {
-                        // Enough floor grip to pivot on edges, not so high that stacks weld.
-                        staticFriction = 0.42f,
-                        dynamicFriction = 0.36f,
-                        bounciness = 0.06f,
-                        frictionCombine = PhysicMaterialCombine.Average,
-                        bounceCombine = PhysicMaterialCombine.Minimum
-                    };
-                }
-                return _crateFloorMaterial;
-            }
-        }
-
-        // Ground crates: stack material on all colliders (most contacts are crate-crate).
-        // Floating: same stack tuning pre-applied before activation.
-        private static void ApplyCrateColliderMaterials(Rigidbody rb, bool floatingPreset)
-        {
-            var cols = rb.GetComponentsInChildren<Collider>();
-            if (cols == null) return;
-            var mat = CrateStackMaterial;
-            foreach (var col in cols)
-            {
-                if ((object)col == null || col.isTrigger) continue;
-                col.sharedMaterial = mat;
-            }
-        }
-
-        private static void ApplyCrateMassAndSolver(Rigidbody rb, bool floatingPreset)
-        {
-            // Lighter than 80 → tips/rotates under impact; player push capped in FixedUpdate.
-            rb.mass = floatingPreset ? 42f : 36f;
-            // Fewer solver passes → less "contact welding" in stacks (vanilla chaos).
-            rb.solverIterations = floatingPreset ? 10 : 8;
-            rb.solverVelocityIterations = floatingPreset ? 6 : 5;
-            rb.useGravity = true;
-            rb.sleepThreshold = floatingPreset ? 0.014f : 0.011f;
-            // Continuous catches floor tunneling without ContinuousDynamic cost on every crate.
-            rb.collisionDetectionMode = CollisionDetectionMode.Continuous;
-            rb.interpolation = RigidbodyInterpolation.Interpolate;
-        }
-
-        private static void ApplyCrateInertiaAndCenterOfMass(Rigidbody rb, bool floatingPreset)
-        {
-            rb.ResetInertiaTensor();
-            // High CoM → gravity torque when overhanging an edge (barrel topple).
-            float comY = floatingPreset ? 0.50f : 0.58f;
-            rb.centerOfMass = new Vector3(0f, comY, 0f);
-            var it = rb.inertiaTensor;
-            // Ease rotation in the 2.5D play plane (Z), keep pitch/roll slightly stiff.
-            it.x *= 0.80f;
-            it.y *= 1.05f;
-            it.z *= 0.62f;
-            rb.inertiaTensor = it;
-        }
-
-        private static void ApplyCrateDragAndRotationLimits(Rigidbody rb, bool floatingPreset)
-        {
-            rb.drag = floatingPreset ? 0.16f : 0.14f;
-            rb.angularDrag = floatingPreset ? 0.32f : 0.28f;
-            // Allow visible tumble when falling; still capped in FixedUpdate.
-            rb.maxAngularVelocity = 11f;
-        }
-
         private static void ApplyCrateConstraintMask(Rigidbody rb)
         {
-            // Play plane is Y-Z (position syncs p.y/p.z), so a crate sliding in Z
-            // under gravity (-Y) tips by rotating about WORLD X. The old mask froze
-            // X (and Y) and only freed Z, which is why crates slid but never tipped
-            // or fell off edges ("no rotan / no se caen en los bordes"). Free BOTH
-            // X (the visible tip axis) and Z; freeze only Y (yaw → would spin the
-            // box flat into depth, looks wrong). Now crates tumble/tip like vanilla.
+            // GROUND TRUTH (decompile NetworkSyncableObject:498-512 + LerpLocalDummy
+            // :270-274): stock SF syncs NSO rotation as the up-vector's (y,z) and
+            // reconstructs LookRotation(Cross(Vector3.right, up), up) — i.e. the
+            // one real, network-visible rotation axis is world X (the up vector
+            // tilting within the Y-Z play plane). Unified mask, mirrored in
+            // SFBoxFix v0.3.0: free X (tip axis — synced via the v26.7 up-vector
+            // section), freeze Y (yaw — unsyncable, so locked identically on both
+            // sims) and Z (vanilla crate prefabs ship Z frozen).
             var c = rb.constraints;
-            c |= RigidbodyConstraints.FreezeRotationY;
-            c &= ~(RigidbodyConstraints.FreezeRotationX | RigidbodyConstraints.FreezeRotationZ);
+            c |= RigidbodyConstraints.FreezeRotationY | RigidbodyConstraints.FreezeRotationZ;
+            c &= ~RigidbodyConstraints.FreezeRotationX;
             rb.constraints = c;
         }
 
@@ -418,6 +349,238 @@ namespace SFClientRecon
                 bool simple = (object)_dpSimpleField != null && (bool)_dpSimpleField.GetValue(dp);
                 bool ev = (object)_dpEventField != null && (bool)_dpEventField.GetValue(dp);
                 if (simple && !ev) return true;
+            }
+            return false;
+        }
+
+        // ====================================================================
+        //  SERVER-AUTH RECONCILIATION (v0.6.0)
+        //  Crates stay DYNAMIC locally — your push is instant, full-framerate
+        //  local physics — while the oracle's sim is the single authority.
+        //  Each FixedUpdate every pushable crate is steered toward the
+        //  latency-compensated server pose. Each May-2026 failure mode has an
+        //  explicit countermeasure here:
+        //    · compare against the server pose EXTRAPOLATED by its own
+        //      velocity, never the raw last snapshot — measuring live local
+        //      state against an RTT-stale reference made every moving crate
+        //      look "wrong" and the correction yanked it backward mid-push;
+        //    · corrections steer VELOCITY (lerp toward serverVel + error
+        //      term), never write position — position writes inject
+        //      penetration and the solver ejects violently;
+        //    · inside the deadband nothing is injected at all, and when the
+        //      server says the crate is at rest, residual creep is zeroed so
+        //      idle crates can't drift apart;
+        //    · while any player rig is near the crate the blend weakens —
+        //      local prediction owns active contacts; convergence resumes
+        //      the moment the contact ends;
+        //    · only a huge error hard-snaps, and that path zeroes velocities
+        //      and marks the root for the P0-15 destruction guard so the
+        //      warp can't break adjacent ice/chains.
+        // ====================================================================
+        private const float ReconDeadband         = 0.20f;  // u — agreeing sims get zero injected motion
+        private const float ReconHardSnap         = 1.8f;   // u — beyond this, clean teleport
+        private const float ReconGain             = 4.0f;   // err (u) → corrective velocity (u/s)
+        private const float ReconMaxCorrVel       = 2.5f;   // u/s cap on the error term
+        private const float ReconBlendRate        = 6.0f;   // 1/s velocity-steer rate
+        private const float ReconTouchGraceMul    = 0.25f;  // blend multiplier near a player rig
+        private const float ReconTouchRadiusSqr   = 1.5f * 1.5f;
+        private const float ReconContactMaxCorr   = 4.0f;   // u/s — in-contact hard-pull cap (no snaps mid-push)
+        private const float ReconGlideMax         = 0.8f;   // u — settled divergence below this glides into place
+        private const float ReconGlideSpeed       = 3.0f;   // u/s — glide rate for settled resolution
+        private const float ReconRotDeadbandDeg   = 8f;
+        private const float ReconStaleAfter       = 0.6f;   // s without a snapshot → hands off
+        private const float ReconServerRestVelSqr = 0.01f;
+        // Errors beyond this are an identity/scene mismatch (NSO ids are
+        // reassigned every round and collide while both map scenes coexist),
+        // not physics divergence — "correcting" them teleports crates toward
+        // ghosts of the previous map. A real server-side void-rescue also
+        // looks like this, so a persistent big error is accepted after 1.2s.
+        private const float ReconIdentityBound    = 8f;
+        private const float ReconIdentityAcceptSec = 2.0f;   // was 1.2 — too eager during slow boss-map transitions
+        internal static float _reconSuppressUntil;  // set on MapChange; transition guard
+        private readonly Dictionary<ushort, float> _reconBigErrSince = new Dictionary<ushort, float>();
+        private int _reconHardSnaps;
+        private float _boxSyncLogAt = -1f;
+
+        internal void ReconcilePushableCrates()
+        {
+            if (!CrateReconcileActive) return;
+            if (Time.realtimeSinceStartup < _reconSuppressUntil) return;
+            if (_nsoTargets.Count == 0 || _nsoCache.Count == 0) return;
+            float now = Time.realtimeSinceStartup;
+            RefreshReconRigCache(now);
+            float blendBase = 1f - Mathf.Exp(-ReconBlendRate * Time.fixedDeltaTime);
+            int tracked = 0; float errSum = 0f, errMax = 0f;
+            foreach (var kv in _nsoTargets)
+            {
+                NsoCacheEntry entry;
+                if (!_nsoCache.TryGetValue(kv.Key, out entry) || entry == null) continue;
+                if (!entry.Pushable) continue;
+                var rb = entry.Rb;
+                if (rb == null || rb.isKinematic) continue;
+                var pose = kv.Value;
+                if (pose == null || !pose.HasRender) continue;
+                float age = now - pose.LastRecvAt;
+                if (age < 0f) age = 0f;
+                // No fresh server data (round transition, packet loss burst):
+                // leave the crate to local physics rather than dragging it
+                // toward a stale pose.
+                if (age > ReconStaleAfter) continue;
+                float extrapAge = age > NsoMaxExtrapSec ? NsoMaxExtrapSec : age;
+                Vector3 target = pose.Pos + pose.Vel * extrapAge;
+                Vector3 err = target - rb.position;
+                float errMag = err.magnitude;
+                tracked++; errSum += errMag; if (errMag > errMax) errMax = errMag;
+
+                if (errMag > ReconIdentityBound)
+                {
+                    float bigSince;
+                    if (!_reconBigErrSince.TryGetValue(kv.Key, out bigSince))
+                    {
+                        _reconBigErrSince[kv.Key] = now;
+                        continue;
+                    }
+                    if (now - bigSince < ReconIdentityAcceptSec) continue;
+                    // Persistence alone is NOT enough: during a wrong-scene
+                    // window every crate shows a persistent ~37u error and a
+                    // time-based acceptance mass-teleported the whole field
+                    // toward the previous map's layout (live, 2026-06-11).
+                    // The only legitimate >8u correction is a void-rescue —
+                    // and in a rescue OUR copy has fallen too. A crate in
+                    // normal play space with a far-away target is an identity
+                    // mismatch, never to be "corrected".
+                    if (rb.position.y > -20f) continue;
+                    _reconBigErrSince.Remove(kv.Key);
+                }
+                else
+                {
+                    _reconBigErrSince.Remove(kv.Key);
+                }
+
+                if (errMag > ReconHardSnap)
+                {
+                    // Mid-contact, a teleport under the player's hands is the
+                    // worst possible artifact (first live test: 5 snaps in
+                    // seconds while pushing). Pull hard-but-smooth instead;
+                    // the snap only happens once the contact has ended.
+                    // (Identity-scale errors skip this — they're never a push.)
+                    if (errMag <= ReconIdentityBound && AnyReconRigNear(rb.position))
+                    {
+                        Vector3 corrHard = err * ReconGain;
+                        float chSqr = corrHard.sqrMagnitude;
+                        if (chSqr > ReconContactMaxCorr * ReconContactMaxCorr)
+                            corrHard *= ReconContactMaxCorr / Mathf.Sqrt(chSqr);
+                        rb.velocity = Vector3.Lerp(rb.velocity, pose.Vel + corrHard, blendBase);
+                        continue;
+                    }
+                    var rootT = (entry.Comp != null) ? entry.Comp.transform.root : null;
+                    if (rootT != null) _recentLerpAt[rootT.GetInstanceID()] = now;
+                    rb.position = target;
+                    if (pose.HasFullRot) rb.rotation = pose.Rot;
+                    rb.velocity = Vector3.zero;
+                    rb.angularVelocity = Vector3.zero;
+                    _reconHardSnaps++;
+                    continue;
+                }
+                if (errMag < ReconDeadband)
+                {
+                    if (pose.Vel.sqrMagnitude < ReconServerRestVelSqr
+                        && rb.velocity.sqrMagnitude < CrateSettleLin * CrateSettleLin
+                        && rb.angularVelocity.sqrMagnitude < CrateSettleAng * CrateSettleAng)
+                    {
+                        rb.velocity = Vector3.zero;
+                        rb.angularVelocity = Vector3.zero;
+                    }
+                    continue;
+                }
+
+                // SETTLED-DIVERGENCE RESOLUTION — both sims at rest but apart
+                // (the post-blast scatter). Velocity corrections cannot move a
+                // resting crate: ground friction (~μ0.4 → ~8 u/s² decel) eats
+                // the injected ~0.2 u/s within one step, so without this branch
+                // the error persists forever (first live test: meanErr ~0.4
+                // across the field, flat). A resting crate away from players is
+                // safe to position-resolve: glide small errors into place,
+                // cleanly snap larger ones. P0-15-marked either way so the
+                // motion can't fire destruction events.
+                bool serverAtRest = pose.Vel.sqrMagnitude < ReconServerRestVelSqr;
+                bool localAtRest = rb.velocity.sqrMagnitude < 0.05f
+                                && rb.angularVelocity.sqrMagnitude < 0.1f;
+                if (serverAtRest && localAtRest && !AnyReconRigNear(rb.position))
+                {
+                    var restRoot = (entry.Comp != null) ? entry.Comp.transform.root : null;
+                    if (restRoot != null) _recentLerpAt[restRoot.GetInstanceID()] = now;
+                    if (errMag <= ReconGlideMax)
+                    {
+                        Vector3 step = err;
+                        float stepMax = ReconGlideSpeed * Time.fixedDeltaTime;
+                        if (errMag > stepMax) step *= stepMax / errMag;
+                        rb.position = rb.position + step;
+                        if (pose.HasFullRot && Quaternion.Angle(rb.rotation, pose.Rot) > 2f)
+                            rb.rotation = Quaternion.Slerp(rb.rotation, pose.Rot, 0.2f);
+                    }
+                    else
+                    {
+                        rb.position = target;
+                        if (pose.HasFullRot) rb.rotation = pose.Rot;
+                        _reconHardSnaps++;
+                    }
+                    rb.velocity = Vector3.zero;
+                    rb.angularVelocity = Vector3.zero;
+                    continue;
+                }
+
+                float blend = blendBase;
+                if (AnyReconRigNear(rb.position)) blend *= ReconTouchGraceMul;
+                Vector3 corr = err * ReconGain;
+                float corrSqr = corr.sqrMagnitude;
+                if (corrSqr > ReconMaxCorrVel * ReconMaxCorrVel)
+                    corr *= ReconMaxCorrVel / Mathf.Sqrt(corrSqr);
+                rb.velocity = Vector3.Lerp(rb.velocity, pose.Vel + corr, blend);
+                if (pose.HasFullRot)
+                {
+                    float angErr = Quaternion.Angle(rb.rotation, pose.Rot);
+                    if (angErr > ReconRotDeadbandDeg)
+                        rb.MoveRotation(Quaternion.Slerp(rb.rotation, pose.Rot, blend));
+                }
+            }
+            if (now >= _boxSyncLogAt)
+            {
+                _boxSyncLogAt = now + 5f;
+                if (tracked > 0)
+                    Log.LogInfo($"[BOX-SYNC] crates={tracked} meanErr={errSum / tracked:0.000} maxErr={errMax:0.000} hardSnaps={_reconHardSnaps}");
+            }
+        }
+
+        // Player-rig transform cache for the touch-grace test. Transforms are
+        // cached for 1s (rigs persist across a round); positions are read live.
+        private static Type _npTypeForRecon;
+        private readonly List<Transform> _reconRigCache = new List<Transform>(8);
+        private float _reconRigCacheAt = -1f;
+        private void RefreshReconRigCache(float now)
+        {
+            if (_reconRigCacheAt > 0f && now - _reconRigCacheAt < 1f) return;
+            _reconRigCacheAt = now;
+            _reconRigCache.Clear();
+            if ((object)_npTypeForRecon == null) _npTypeForRecon = AccessTools.TypeByName("NetworkPlayer");
+            if ((object)_npTypeForRecon == null) return;
+            var nps = UnityEngine.Object.FindObjectsOfType(_npTypeForRecon);
+            if (nps == null) return;
+            foreach (var np in nps)
+            {
+                var c = np as Component;
+                if (c != null) _reconRigCache.Add(c.transform);
+            }
+        }
+
+        private bool AnyReconRigNear(Vector3 pos)
+        {
+            for (int i = 0; i < _reconRigCache.Count; i++)
+            {
+                var t = _reconRigCache[i];
+                if (t == null) continue;   // Unity-aware: destroyed rig
+                Vector3 d = t.position - pos;
+                if (d.sqrMagnitude <= ReconTouchRadiusSqr) return true;
             }
             return false;
         }
