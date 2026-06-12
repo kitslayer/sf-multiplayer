@@ -2283,6 +2283,16 @@ namespace SFClientRecon
         private static FieldInfo _npHasLocalControlField;
         private static bool _npLocalCtlLookupTried;
 
+        // Slot announcements only on CHANGE — the cache resets every map
+        // change and re-deriving the same slot each round was log spam.
+        private int _lastAnnouncedSlot = -2;
+        private void AnnounceLocalSlot(string source)
+        {
+            if (_localSlot == _lastAnnouncedSlot) return;
+            _lastAnnouncedSlot = _localSlot;
+            Log.LogInfo($"[P6.11] Discovered localSlot={_localSlot} ({source}).");
+        }
+
         private int FindLocalSlot()
         {
             if (_localSlot >= 0) return _localSlot;
@@ -2327,7 +2337,7 @@ namespace SFClientRecon
                             if (TryGetPlayerSlotFromNetworkPlayer(np, out slotNp))
                             {
                                 _localSlot = slotNp;
-                                Log.LogInfo($"[P6.11] Discovered localSlot={_localSlot} (NetworkPlayer.mHasLocalControl).");
+                                AnnounceLocalSlot("NetworkPlayer.mHasLocalControl");
                                 return _localSlot;
                             }
                         }
@@ -2351,12 +2361,18 @@ namespace SFClientRecon
                         if (idx > 0)
                         {
                             _localSlot = idx;
-                            Log.LogInfo($"[P6.11] Discovered localSlot={_localSlot} (MultiplayerManager.mLocalPlayerIndex).");
+                            AnnounceLocalSlot("MultiplayerManager.mLocalPlayerIndex");
                             return _localSlot;
                         }
                     }
                 }
-                if ((object)_ctrlTypeForNp != null)
+                // (3) Controller.mHasControl — OFFLINE/local play only. In
+                // oracle mode this path is never right: the server never
+                // grants mHasControl, but the MENU scene stays additively
+                // loaded during matches and its local Controller (playerID 0,
+                // mHasControl=true) is always findable — it produced the
+                // pre-connect slot-0 window of 2026-06-11.
+                if (!_oracleConnectMode && (object)_ctrlTypeForNp != null)
                 {
                     var ctrls = UnityEngine.Object.FindObjectsOfType(_ctrlTypeForNp);
                     if (ctrls != null && (object)_ctrlHasControlField != null && (object)_ctrlPlayerIdField != null)
@@ -2365,7 +2381,7 @@ namespace SFClientRecon
                         {
                             if (!(bool)_ctrlHasControlField.GetValue(c)) continue;
                             _localSlot = (int)_ctrlPlayerIdField.GetValue(c);
-                            Log.LogInfo($"[P6.11] Discovered localSlot={_localSlot} (Controller).");
+                            AnnounceLocalSlot("Controller, offline mode");
                             return _localSlot;
                         }
                     }
