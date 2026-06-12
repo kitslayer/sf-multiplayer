@@ -4895,7 +4895,27 @@ namespace SFHeadlessHost
         // Authoritative-state broadcast rate. Bumped 30→60Hz so server-driven
         // NSOs (boxes) update twice as often → far smoother on clients (combined
         // with client-side velocity extrapolation). Physics already runs 60Hz.
-        private const float SnapshotHz = 30f;
+        // Snapshot broadcast rate (server → clients, msg39). Default 60 Hz to
+        // match the 60 Hz physics + 60 Hz input — boxes and remote players
+        // update every physics tick (combined with client-side extrapolation,
+        // maximally smooth). 60 Hz doubles downstream bandwidth vs the old 30;
+        // operator confirmed ample bandwidth. Dial per-server with
+        // SFHEADLESS_SNAPSHOT_HZ (clamped 10–120) without recompiling.
+        private static float _snapshotHzCache = -1f;
+        private static float SnapshotHz
+        {
+            get
+            {
+                if (_snapshotHzCache < 0f)
+                {
+                    float v = 60f;
+                    var s = Environment.GetEnvironmentVariable("SFHEADLESS_SNAPSHOT_HZ");
+                    if (!string.IsNullOrEmpty(s) && float.TryParse(s, out var p) && p > 0f) v = p;
+                    _snapshotHzCache = Mathf.Clamp(v, 10f, 120f);
+                }
+                return _snapshotHzCache;
+            }
+        }
         private uint  _serverTick;
 
         // === Phase 6.17 v0.1 — server-side projectile registry ===
