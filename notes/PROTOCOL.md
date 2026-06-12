@@ -82,14 +82,15 @@ Total = 5 (prefix) + N (body) + 9 (suffix) = **N + 14**. Minimum packet = 14 byt
 | v26.3 | + projectile section + kinematic NSO position-delta detection | Phase 6.14.1 + 6.17 |
 | v26.5 | + MapInfoSyncable position section (server-authoritative platform / pillar positions) | Phase 6.19 (P0-14 fix) |
 | v26.6 | + MapInfoSyncable state section (`GetData()` payloads — GhostPlatform on/off, etc.) | terrain + weapons pass |
+| v26.7 | + NSO up-vector section (rotation as stock SF's up-vector y/z — fixes tipped-crate sync) | server-auth boxes (PR #8) |
 
-**Current snapshot wire version is v26.6.** Ground truth is `BuildWorldStateBody` in `../sf-headless-host/SFHeadlessHost.cs` (the single place the layout lives — both the periodic broadcast and the per-endpoint keyframe build through it). The two map sections (v26.5 positions + v26.6 state) are serialized in `WriteMapStateSection` / `MapStateSectionByteLen` in `../sf-headless-host/SfMapTerrainHost.cs`.
+**Current snapshot wire version is v26.7.** Ground truth is `BuildWorldStateBody` in `../sf-headless-host/SFHeadlessHost.cs` (the single place the layout lives — both the periodic broadcast and the per-endpoint keyframe build through it). The two map sections (v26.5 positions + v26.6 state) are serialized in `WriteMapStateSection` / `MapStateSectionByteLen` in `../sf-headless-host/SfMapTerrainHost.cs`; the v26.7 NSO up-vector appendix is serialized inline in `BuildWorldStateBody` as a trailing section after mapState (append-only — deployed 0.5.x clients ignore the trailing bytes).
 
 ## v26 extensions (this repo)
 
 ### msgType 39 — `WorldStateSnapshot` (server → all clients, 30Hz)
 
-Current format is **v26.6**. Backward-incompatible with earlier client builds — older `SFClientRecon.dll` will misparse the trailing sections.
+Current format is **v26.7**. Sections are append-only and individually length-guarded: a v26.1+ section-aware client tolerates both missing trailing sections (older server) and unknown extra ones (newer server) — see the v26.7 compat note above. Only pre-section clients misparse.
 
 ```
 u32 serverTick (LE)
@@ -128,6 +129,11 @@ for each mapState entry (9 + dataLen bytes):
   f32 startY (LE)
   u8  dataLen               -- length of the GetData() payload (capped at MapStateMaxPayload)
   dataLen bytes             -- type-specific state (e.g. GhostPlatform isOn = 1 byte)
+u16 nsoUpCount (LE)                                                   (v26.7 + — NSO rotation as stock SF's up-vector)
+for each nsoUp entry (10 bytes):
+  u16 networkID (LE)        -- same ids/order as the NSO section above
+  f32 upY (LE)              -- transform.up.y; client rebuilds Quaternion.LookRotation(Cross(Vector3.right, up), up)
+  f32 upZ (LE)              -- transform.up.z
 ```
 
 - Sent to each spawned client's recorded v26 endpoint (discovered from their PlayerInput source addr).
