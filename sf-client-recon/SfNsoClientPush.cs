@@ -506,28 +506,41 @@ namespace SFClientRecon
                 bool serverAtRest = pose.Vel.sqrMagnitude < ReconServerRestVelSqr;
                 bool localAtRest = rb.velocity.sqrMagnitude < 0.05f
                                 && rb.angularVelocity.sqrMagnitude < 0.1f;
-                if (serverAtRest && localAtRest && !AnyReconRigNear(rb.position))
+                if (serverAtRest && localAtRest)
                 {
-                    var restRoot = (entry.Comp != null) ? entry.Comp.transform.root : null;
-                    if (restRoot != null) _recentLerpAt[restRoot.GetInstanceID()] = now;
-                    if (errMag <= ReconGlideMax)
+                    // The GLIDE is allowed even with a player rig nearby: a
+                    // settled crate easing a few cm per tick can't fight a
+                    // push (pushing implies motion, which un-rests the crate
+                    // and exits this branch). Gating glide on rig distance
+                    // PARKED crates at a permanent ~1.5u offset whenever
+                    // players idled next to them, with periodic >1.8u snaps
+                    // (observed live 2026-06-12: flat 1.3-1.5u, snap, repark).
+                    // Only the teleport stays rig-gated.
+                    bool rigNear = AnyReconRigNear(rb.position);
+                    if (errMag <= ReconGlideMax || !rigNear)
                     {
-                        Vector3 step = err;
-                        float stepMax = ReconGlideSpeed * Time.fixedDeltaTime;
-                        if (errMag > stepMax) step *= stepMax / errMag;
-                        rb.position = rb.position + step;
-                        if (pose.HasFullRot && Quaternion.Angle(rb.rotation, pose.Rot) > 2f)
-                            rb.rotation = Quaternion.Slerp(rb.rotation, pose.Rot, 0.2f);
+                        var restRoot = (entry.Comp != null) ? entry.Comp.transform.root : null;
+                        if (restRoot != null) _recentLerpAt[restRoot.GetInstanceID()] = now;
+                        if (errMag <= ReconGlideMax)
+                        {
+                            Vector3 step = err;
+                            float stepMax = ReconGlideSpeed * Time.fixedDeltaTime;
+                            if (errMag > stepMax) step *= stepMax / errMag;
+                            rb.position = rb.position + step;
+                            if (pose.HasFullRot && Quaternion.Angle(rb.rotation, pose.Rot) > 2f)
+                                rb.rotation = Quaternion.Slerp(rb.rotation, pose.Rot, 0.2f);
+                        }
+                        else
+                        {
+                            rb.position = target;
+                            if (pose.HasFullRot) rb.rotation = pose.Rot;
+                            _reconHardSnaps++;
+                        }
+                        rb.velocity = Vector3.zero;
+                        rb.angularVelocity = Vector3.zero;
+                        continue;
                     }
-                    else
-                    {
-                        rb.position = target;
-                        if (pose.HasFullRot) rb.rotation = pose.Rot;
-                        _reconHardSnaps++;
-                    }
-                    rb.velocity = Vector3.zero;
-                    rb.angularVelocity = Vector3.zero;
-                    continue;
+                    // big error + rig near: fall through to the soft pull.
                 }
 
                 float blend = blendBase;
