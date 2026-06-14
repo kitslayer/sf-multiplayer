@@ -2,7 +2,7 @@
 
 Where the project is and what's coming next. Refreshed continuously — see [`WHATS_NEW.md`](WHATS_NEW.md) for the running session log, [`notes/PROTOCOL.md`](notes/PROTOCOL.md) for the wire-format spec.
 
-> **Current state (2026-06-11) — this file + [`README.md`](README.md) are the source of truth; the other status docs are historical snapshots.** Live server: **`69.53.117.43`** (game UDP 1337, router UDP 1338, lobby browser TCP 8080). Maintainer: kit (solo; ALKA departed, access fully revoked). Live build: `SFHeadlessHost 0.4.0`, `SFClientRecon 0.6.0`, `SFServerBrowser 0.5.3`, `SFBoxFix 0.3.0`.
+> **Current state (2026-06-11) — this file + [`README.md`](README.md) are the source of truth; the other status docs are historical snapshots.** Live server: **`69.53.117.43`** (game UDP 1337, router UDP 1338, lobby browser TCP 8080). Maintainer: kit (solo; ALKA departed, access fully revoked). Live build: `SFHeadlessHost 0.4.1`, `SFClientRecon 0.6.1`, `SFServerBrowser 0.5.3`, `SFBoxFix 0.3.1`.
 >
 > **Latest (2026-06-11): full-repo review + security/crash-containment pass** — see [`notes/REVIEW_2026-06-10.md`](notes/REVIEW_2026-06-10.md) for the audit and [`WHATS_NEW.md`](WHATS_NEW.md) for what shipped. Landed + deployed: slot↔source binding on player input/fire (no more driving other players), rate-guard sweep+cap, admin-gated chat commands, client drops non-server packets + clamps snapshot allocs, and crash containment (`RuntimeMaxSec` + `sf-oracle-watchdog` timer + honest `/healthz`) for the deterministic ~24h native crash.
 >
