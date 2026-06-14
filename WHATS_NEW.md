@@ -1,3 +1,17 @@
+# What's new — 2026-06-14 keeper fixes + 60 Hz snapshots (shipped + deployed)
+
+Server-side quality pass, merged to `main` and **deployed live to `.115`** (host 0.4.1, box-fix 0.3.1; installer/client 0.6.1):
+
+- **Server-side destruction.** The oracle now breaks ice/boxes in *its own* world when a client does (previously it only relayed the event), so the server's collision world matches what players see — no more phantom ice/boxes server-side. Foundation for trustworthy server-side hit-reg + anti-cheat.
+- **Explosion→crate parity.** Explosive rounds detonate server-side on fuse expiry and player impact (not just wall hits), with stock-shaped blast forces — crates react consistently on the authoritative sim.
+- **60 Hz snapshots** (`SnapshotHz` 30→60, env-tunable via `SFHEADLESS_SNAPSHOT_HZ`) — boxes and remote players update every physics tick. The whole pipeline (physics, input, world broadcast) now ticks at 60.
+- **Anti-cheat false-kick fixed.** The "impossible kill" heuristic auto-kicked legit melee/throw/quick-draw kills (they reach the server with little recorded damage). Now log-only by default; opt-in `SF_AC_KICK=1`.
+- **Box polish:** bullet crate-kick classifies the hit body's nearest crate (not the map root), offline-gated local-slot discovery (fixes a pre-connect slot-0 window), settled-crate glide so a crate parked next to a player can't sit at a permanent offset, and a SFBoxFix dead-code strip.
+
+> Server-authoritative *player movement* was prototyped and shelved: SF's non-deterministic physics + per-client destructible worlds make it rubber-band, and the right model is local prediction + server-side hit-reg/anti-cheat. Kept out of this release; notes in the repo.
+
+---
+
 # What's new — 2026-06-11 server-authoritative boxes (shipped + deployed)
 
 The box-divergence fix (PR #8, merged + **deployed live to `.115`**, installer refreshed to `SFClientRecon 0.6.0`). The oracle's sim is now the single authority for crates; clients run dynamic local physics for instant push feel and continuously reconcile toward the server. Verified live over many rounds and map transitions: mean error 0.06–0.10 units, snap counters flat, zero crates falling through the world.

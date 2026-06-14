@@ -12,8 +12,10 @@ using UnityEngine.SceneManagement;
 
 namespace SFBoxFix
 {
-    // SFBoxFix v0.2.0 — Multi-fix server-side companion plugin to v0.3.8.
-    // Coexists with kit's SFHeadlessHost without modifying its binary.
+    // SFBoxFix — multi-fix server-side companion plugin to SFHeadlessHost.
+    // Coexists with the host plugin without modifying its binary. Since
+    // v0.3.0 crate body values are vanilla-first: only the constraint mask
+    // and CCD mode are configured; mass/CoM/drag/materials stay prefab.
     //
     // ALL fixes are surgical Harmony patches. If a target type/method isn't
     // found, that individual fix is silently skipped.
@@ -34,7 +36,7 @@ namespace SFBoxFix
     {
         public const string PluginGuid = "com.stickfightdev.box-fix";
         public const string PluginName = "SFBoxFix";
-        public const string PluginVersion = "0.3.0";
+        public const string PluginVersion = "0.3.1";
 
         internal static ManualLogSource Log;
         private static Type _dpType;
@@ -506,23 +508,7 @@ namespace SFBoxFix
         private const float CrateMaxUp         = 9.0f;   // upward impulse cap
         private const float CrateMaxFall       = 30.0f;  // terminal fall cap
 
-        // ── Body configuration (vanilla-like) ─────────────────────────────────
-        private const float CrateMass          = 45f;    // heavy enough not to fling, light enough to topple
-        private const float CrateDrag          = 0.12f;
-        private const float CrateAngularDrag   = 0.35f;
-        private const float CrateMaxAngular    = 10f;    // visible tumble, still bounded
-        private const float CrateSleepThresh   = 0.012f;
-        private const float CrateCoMHeight     = 0.55f;  // high centre of mass ⇒ gravity tips it over an edge
-        private const int   CrateSolverIters   = 10;
-        private const int   CrateSolverVelIters = 6;
         private const float CrateMinConfigMass = 1f;     // only skip massless markers; configure real crates
-
-        // ── Edge tipping (compensates PhysX contact-persistence bias) ──────────
-        private const float OverhangProbeDist  = 0.20f;
-        private const float OverhangProbeFrac  = 0.85f;  // sample at ±frac of the half-extent
-        private const float OverhangTorqueMul  = 0.5f;
-        private const float OverhangRestSpeed  = 1.0f;   // only assist near-rest crates
-        private const float OverhangRestAngular = 0.3f;
 
         // The set of crate rigidbodies the governor manages this scene.
         private static readonly List<Rigidbody> _crateRbs = new List<Rigidbody>();
@@ -567,61 +553,6 @@ namespace SFBoxFix
             else if (v.y < -CrateMaxFall) { v.y = -CrateMaxFall; changed = true; }
 
             if (changed) rb.velocity = v;
-        }
-
-        // Edge tipping: PhysX averages box-on-box / box-on-ground contacts across
-        // the whole bottom face, which fakes stability and leaves a crate perched
-        // on a ledge. We sample two points near the left/right edges; if exactly
-        // one is unsupported, add a gravity-aligned torque about that edge so the
-        // crate pivots and falls — natural, vanilla-looking toppling.
-        private static void OverhangAssist(Rigidbody rb)
-        {
-            var col = rb.GetComponent<Collider>() ?? rb.GetComponentInChildren<Collider>();
-            if ((object)col == null || col.isTrigger) return;
-            Bounds b = col.bounds;
-            Vector3 c = b.center, e = b.extents;
-            if (e.z < 0.05f || e.y < 0.05f) return;
-
-            // v0.3.0 — probes sample along Z, the horizontal axis the game
-            // actually plays on (position syncs y/z; X is camera depth). The
-            // old X-axis probes tested the edge nobody can fall off, and the
-            // resulting torque was about the now-frozen Z axis.
-            float probeY = c.y - e.y + 0.05f;
-            float probeZ = e.z * OverhangProbeFrac;
-            bool nearSup = Physics.Raycast(new Vector3(c.x, probeY, c.z - probeZ), Vector3.down, OverhangProbeDist);
-            bool farSup  = Physics.Raycast(new Vector3(c.x, probeY, c.z + probeZ), Vector3.down, OverhangProbeDist);
-            if (nearSup == farSup) return;   // fully supported or fully airborne ⇒ leave it
-
-            // Torque about +X tips the top toward +Z (right-hand rule), i.e.
-            // toward the unsupported side when the -Z probe found support.
-            Vector3 tipDir = nearSup ? Vector3.forward : Vector3.back;
-            Vector3 torque = Vector3.Cross(tipDir, Physics.gravity) * rb.mass * OverhangTorqueMul;
-            rb.AddTorque(torque, ForceMode.Force);
-        }
-
-        // ── One shared crate material (cached — never per-collider) ────────────
-        // Most crates are a single box collider, so a per-face split can't apply.
-        // A single MODERATE-grip, near-zero-bounce material is the vanilla-simple
-        // choice: enough friction to pivot on an edge and not slide on the floor,
-        // low enough that stacked crates still topple/disassemble on a hit instead
-        // of welding into one rigid block. sharedMaterial only (never .material,
-        // which clones a fresh PhysicMaterial per collider per round → leak).
-        private static PhysicMaterial _crateMat;
-        private static PhysicMaterial CrateMaterial
-        {
-            get
-            {
-                if ((object)_crateMat == null)
-                    _crateMat = new PhysicMaterial("CrateVanilla")
-                    {
-                        staticFriction = 0.40f,
-                        dynamicFriction = 0.34f,
-                        bounciness = 0.05f,
-                        frictionCombine = PhysicMaterialCombine.Average,
-                        bounceCombine = PhysicMaterialCombine.Minimum
-                    };
-                return _crateMat;
-            }
         }
 
         // Walk every NSO in the freshly-loaded scene, find the pushable crates and
@@ -722,49 +653,5 @@ namespace SFBoxFix
             rb.constraints = c;
         }
 
-        private static void ApplyCrateMassAndSolver(Rigidbody rb)
-        {
-            rb.mass = CrateMass;
-            rb.useGravity = true;
-            rb.sleepThreshold = CrateSleepThresh;
-            // Moderate solver iterations: enough to resolve box-on-box edge
-            // contacts, few enough that stacks don't "weld" (vanilla looseness).
-            rb.solverIterations = CrateSolverIters;
-            rb.solverVelocityIterations = CrateSolverVelIters;
-            // v0.3.0 — mirrored with the client's ConfigureCratePhysics: the
-            // predicted sim and this authority sim must integrate identically,
-            // and collision mode changes tunneling behavior.
-            rb.collisionDetectionMode = CollisionDetectionMode.Continuous;
-        }
-
-        // High centre of mass + slightly eased Z inertia ⇒ a crate overhanging an
-        // edge gets a real gravity torque and topples, while pitch/roll (frozen
-        // anyway) stay stiff. ResetInertiaTensor first so we scale from the box's
-        // true tensor, not an already-tweaked one (idempotent across re-configs).
-        private static void ApplyCrateInertiaAndCoM(Rigidbody rb)
-        {
-            rb.ResetInertiaTensor();
-            rb.centerOfMass = new Vector3(0f, CrateCoMHeight, 0f);
-            var it = rb.inertiaTensor;
-            it.x *= 0.70f;   // ease the visible tip axis (world X; Y/Z are frozen)
-            rb.inertiaTensor = it;
-        }
-
-        private static void ApplyCrateDragLimits(Rigidbody rb)
-        {
-            rb.drag = CrateDrag;
-            rb.angularDrag = CrateAngularDrag;
-            rb.maxAngularVelocity = CrateMaxAngular;
-        }
-
-        // Apply the shared crate material to every solid collider on the body.
-        private static void ApplyCrateMaterials(Rigidbody rb)
-        {
-            var cols = rb.GetComponentsInChildren<Collider>();
-            if (cols == null) return;
-            var mat = CrateMaterial;
-            foreach (var col in cols)
-                if ((object)col != null && !col.isTrigger) col.sharedMaterial = mat;
-        }
     }
 }
