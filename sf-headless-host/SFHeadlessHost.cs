@@ -76,7 +76,7 @@ namespace SFHeadlessHost
     {
         public const string PluginGuid = "com.stickfightdev.headless-host";
         public const string PluginName = "SFHeadlessHost";
-        public const string PluginVersion = "0.4.0";
+        public const string PluginVersion = "0.4.1";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance;
@@ -2673,6 +2673,13 @@ namespace SFHeadlessHost
                 case PktObjectInvokeDestructionEvent:
                 case PktObjectDestructionCollision:
                     RelayBodyToAll(msgType, data, bodyOffset, bodyLen, channel);
+                    // v0.4.x — ALSO apply the destruction to the server's own
+                    // scene. The server used to only relay, so ice/boxes that
+                    // clients shot/broke stayed intact server-side: the server's
+                    // world drifted from the clients' (a player's server-side
+                    // rig could stand on phantom ice; hit-reg + anti-cheat ran
+                    // against a stale world). Now the oracle breaks them too.
+                    ApplyDestructionLocally(msgType, data, bodyOffset, bodyLen);
                     break;
 
                 // Weapon drop: SF's OnPlayerRequestingWeaponDrop just appends
@@ -5050,6 +5057,13 @@ namespace SFHeadlessHost
                 var p = _projectiles[i];
                 if (now - p.BornAt > p.LifetimeSec)
                 {
+                    // EXPLOSION PARITY (v0.4.1) — an explosive round expiring
+                    // is its FUSE going off (lobbed grenade-launcher shots
+                    // land, roll, then detonate). Previously only wall hits
+                    // blasted server-side, so fuse detonations moved crates on
+                    // every client's local sim but never on the authority.
+                    if (!p.IsThrown && IsExplosiveWeaponType(p.WeaponType, p.Velocity.magnitude))
+                        ApplyExplosiveBlastAt(p.Position, BlastRadius, BlastForce);
                     _projectiles.RemoveAt(i);
                     continue;
                 }
@@ -5073,7 +5087,7 @@ namespace SFHeadlessHost
                 {
                     // Thrown weapons hit walls and stick/drop — they never explode.
                     if (!p.IsThrown && IsExplosiveWeaponType(p.WeaponType, p.Velocity.magnitude))
-                        ApplyExplosiveBlastAt(wallHit, 5f, 900f);
+                        ApplyExplosiveBlastAt(wallHit, BlastRadius, BlastForce);
                     else
                         // Server-auth boxes (v0.4.0): non-explosive shots
                         // shove the crate they hit in the oracle sim — the
@@ -5089,6 +5103,11 @@ namespace SFHeadlessHost
                         Log.LogInfo($"[{(p.IsThrown ? "throw-auth" : "bullet-auth")}] SHADOW HIT: id={p.Id} owner-slot={p.OwnerSlot} → would damage slot {hitSlot} (server swept-sphere; no damage emitted in shadow mode)");
                     else
                         EmitServerDamage(hitSlot, p.OwnerSlot, p.WeaponType, p.Velocity);
+                    // EXPLOSION PARITY (v0.4.1) — explosive rounds detonate on
+                    // player impact too (the blast moves nearby crates; damage
+                    // handling above is independent and stays shadow-gated).
+                    if (!p.IsThrown && IsExplosiveWeaponType(p.WeaponType, p.Velocity.magnitude))
+                        ApplyExplosiveBlastAt(p.Position, BlastRadius, BlastForce);
                     _projectiles.RemoveAt(i);
                 }
             }
@@ -5104,6 +5123,31 @@ namespace SFHeadlessHost
         private static bool IsExplosiveWeaponType(byte weaponType, float speed)
         {
             return speed < 50f || weaponType == 5 || weaponType == 6 || weaponType == 7 || weaponType == 8;
+        }
+
+        // EXPLOSION PARITY (v0.4.1) — blast tunables, env-overridable for live
+        // tuning sessions (the three-way `boxes` debug-console diff is the
+        // measuring stick). Defaults keep the historical 5u/900f and add the
+        // stock-shaped VelocityChange component.
+        private static float _blastRadius = -1f, _blastForce = -1f, _blastVelChange = -1f;
+        private static float BlastEnvFloat(string name, float dflt)
+        {
+            var v = Environment.GetEnvironmentVariable(name);
+            float f;
+            if (!string.IsNullOrEmpty(v) && float.TryParse(v, out f) && f > 0f) return f;
+            return dflt;
+        }
+        private static float BlastRadius
+        {
+            get { if (_blastRadius < 0f) _blastRadius = BlastEnvFloat("SFHEADLESS_BLAST_RADIUS", 5f); return _blastRadius; }
+        }
+        private static float BlastForce
+        {
+            get { if (_blastForce < 0f) _blastForce = BlastEnvFloat("SFHEADLESS_BLAST_FORCE", 900f); return _blastForce; }
+        }
+        private static float BlastVelocityChange
+        {
+            get { if (_blastVelChange < 0f) _blastVelChange = BlastEnvFloat("SFHEADLESS_BLAST_VELCHANGE", 5f); return _blastVelChange; }
         }
 
         // P6.17 — server-side explosion physics. Applies AddExplosionForce to
@@ -5147,10 +5191,20 @@ namespace SFHeadlessHost
                 {
                     if ((object)col == null) continue;
 
-                    // Always apply explosion impulse (visual feedback for any dynamic body)
+                    // EXPLOSION PARITY (v0.4.1) — mirror stock Explosion.Explode's
+                    // non-player treatment: a MASS-SCALED impulse (clamp(mass/500,
+                    // 0.01, 1) — a 500-mass vanilla crate takes the full force)
+                    // plus a mass-independent VelocityChange kick, both with
+                    // upwardsModifier=1 like stock. The old single un-scaled
+                    // impulse with upwards=0.5 moved crates differently than
+                    // every client's local sim.
                     var rb = col.attachedRigidbody;
                     if ((object)rb != null && !rb.isKinematic)
-                        rb.AddExplosionForce(blastForce, center, radius, 0.5f);
+                    {
+                        float massScale = Mathf.Clamp(rb.mass / 500f, 0.01f, 1f);
+                        rb.AddExplosionForce(blastForce * massScale, center, radius, 1f, ForceMode.Impulse);
+                        rb.AddExplosionForce(BlastVelocityChange, center, radius, 1f, ForceMode.VelocityChange);
+                    }
 
                     // For destructibles: filter before calling Collide
                     if ((object)collideM == null || (object)dpType == null) continue;
@@ -5224,8 +5278,15 @@ namespace SFHeadlessHost
                 if ((object)hitCol == null) return;
                 var rb = hitCol.attachedRigidbody;
                 if ((object)rb == null || rb.isKinematic) return;
-                var root = hitCol.transform.root;
-                if ((object)root == null || !IsPushableCrateNso(root.gameObject)) return;
+                // Classify the NEAREST NSO ancestor of the hit body, not
+                // transform.root — crates are children of the map root, so the
+                // old root check answered "does this MAP contain any crate"
+                // and kicked unrelated dynamic bodies (ice debris) too.
+                EnsureNsoTypeCache();
+                if ((object)_nsoType == null) return;
+                var nsoComp = rb.GetComponentInParent(_nsoType) as Component;
+                if ((object)nsoComp == null || !IsPushableCrateNso(nsoComp.gameObject)) return;
+                var root = nsoComp.transform;
                 Vector3 dir = projVelocity;
                 dir.x = 0f;
                 if (dir.sqrMagnitude < 0.0001f) return;
@@ -5588,6 +5649,79 @@ namespace SFHeadlessHost
                 return _acceptClientCratesCache.Value;
             }
         }
+
+        // v0.4.x — apply a client-originated destruction to the server's own
+        // DestructiblePiece, so the oracle's world matches the clients'. Uses
+        // the stock "NetworkForce*" apply methods (network-applied, NO
+        // re-broadcast — we already relayed separately, so no loop). All three
+        // packet types start with the i16 NSO index; type 30 also carries
+        // force.y/z (i16/100) + multiplier (f32). Mirrors DestructiblePiece.
+        // ReceivedDestruction + ReceivedPackage dispatch.
+        private static Type _dpDestType;
+        private static MethodInfo _dpSimpleDestM, _dpEventDestM, _dpForceDestM;
+        private static bool _dpDestLookupTried;
+        private int _destructAppliedCount, _destructMissCount;
+        private void ApplyDestructionLocally(byte msgType, byte[] data, int off, int len)
+        {
+            try
+            {
+                if (len < 2) return;
+                ushort idx = (ushort)(data[off] | (data[off + 1] << 8));
+
+                // Index→Component cache (shared with ApplyClientObjectUpdate).
+                float now = Time.realtimeSinceStartup;
+                if (_nsoCacheLastRebuildAt < 0f || now - _nsoCacheLastRebuildAt > 5f || _nsoByIndexCache.Count == 0)
+                {
+                    RebuildNsoIndexCache();
+                    _nsoCacheLastRebuildAt = now;
+                }
+                if (!_nsoByIndexCache.TryGetValue(idx, out var comp) || (object)comp == null)
+                {
+                    _destructMissCount++;
+                    if (_destructMissCount == 1 || _destructMissCount % 60 == 0)
+                        Log.LogInfo($"[DESTRUCT] No server NSO for idx={idx} (type={msgType}) #{_destructMissCount} — already gone or not registered.");
+                    return;
+                }
+
+                if (!_dpDestLookupTried)
+                {
+                    _dpDestLookupTried = true;
+                    _dpDestType = AccessTools.TypeByName("DestructiblePiece");
+                    if ((object)_dpDestType != null)
+                    {
+                        _dpSimpleDestM = AccessTools.Method(_dpDestType, "NetworkForceSimpleDestruction");
+                        _dpEventDestM  = AccessTools.Method(_dpDestType, "NetworkForceEvent");
+                        _dpForceDestM  = AccessTools.Method(_dpDestType, "NetworkForceDestruction");
+                    }
+                }
+                if ((object)_dpDestType == null) return;
+                var dp = comp.GetComponent(_dpDestType) ?? comp.GetComponentInChildren(_dpDestType);
+                if ((object)dp == null) { _destructMissCount++; return; }
+
+                if (msgType == PktObjectSimpleDestruction && (object)_dpSimpleDestM != null)
+                    _dpSimpleDestM.Invoke(dp, null);
+                else if (msgType == PktObjectInvokeDestructionEvent && (object)_dpEventDestM != null)
+                    _dpEventDestM.Invoke(dp, null);
+                else if (msgType == PktObjectDestructionCollision && (object)_dpForceDestM != null)
+                {
+                    Vector3 force = Vector3.zero; float mult = 10f;
+                    if (len >= 10)
+                    {
+                        force.y = (short)(data[off + 2] | (data[off + 3] << 8)) / 100f;
+                        force.z = (short)(data[off + 4] | (data[off + 5] << 8)) / 100f;
+                        mult = BitConverter.ToSingle(data, off + 6);
+                    }
+                    _dpForceDestM.Invoke(dp, new object[] { force, mult });
+                }
+                else return;
+
+                _destructAppliedCount++;
+                if (_destructAppliedCount == 1 || _destructAppliedCount % 30 == 0)
+                    Log.LogInfo($"[DESTRUCT] Applied server-side #{_destructAppliedCount} idx={idx} type={msgType} on '{comp.name}'");
+            }
+            catch (Exception e) { Log.LogWarning($"[DESTRUCT] apply idx-type={msgType} threw: {e.Message}"); }
+        }
+
         private void ApplyClientObjectUpdate(byte[] data, int off, int len)
         {
             if (len < 10) return;
