@@ -36,7 +36,7 @@ namespace SFBoxFix
     {
         public const string PluginGuid = "com.stickfightdev.box-fix";
         public const string PluginName = "SFBoxFix";
-        public const string PluginVersion = "0.3.1";
+        public const string PluginVersion = "0.3.2";
 
         internal static ManualLogSource Log;
         private static Type _dpType;
@@ -60,8 +60,7 @@ namespace SFBoxFix
             try { ApplyBoxCollisionFilter();     } catch (Exception e) { Log.LogError($"[CAJAS-2] {e.Message}"); }
             try { ApplySnakeDamageZero();        } catch (Exception e) { Log.LogError($"[SNAKES-1] {e.Message}"); }
             try { ApplyFastRoundAdvance();       } catch (Exception e) { Log.LogError($"[DEATH-1] {e.Message}"); }
-            try { ApplyInstantDeathDetection();  } catch (Exception e) { Log.LogError($"[DEATH-2] {e.Message}"); }
-            try { ApplyMoreDeathPaths();         } catch (Exception e) { Log.LogError($"[DEATH-3] {e.Message}"); }
+            // (D1/D2 code-review) DEATH-2/DEATH-3 removed — see note below.
 
             // Scene-level pass via SceneManager event — no coroutine, just a
             // deferred timer in Update() to wait for settle.
@@ -69,7 +68,6 @@ namespace SFBoxFix
         }
 
         private static Harmony _harmony;
-        private static object _cachedHostPlugin;
         private Scene _pendingUnfreezeScene;
         private float _pendingUnfreezeAt = -1f;
 
@@ -295,159 +293,13 @@ namespace SFBoxFix
             catch (Exception e) { Log.LogWarning($"[DEATH-1] {e.Message}"); }
         }
 
-        // ========== DEATH-2: Instant death detection — bypass roundAdvanceBlocked ==========
-        // When a player dies, vanilla HealthHandler fires OnDeath events. Oracle
-        // gates round advance behind _roundAdvanceBlockedUntil. If a death happens
-        // before the gate clears, the round waits — feels laggy.
-        //
-        // Fix: postfix CharacterInformation property `isDead = true` setter (the
-        // canonical death event in SF). When we see it, force the oracle's
-        // _roundAdvanceBlockedUntil to NOW so the next advance check fires
-        // immediately. Doesn't change WHO died — just clears the timer.
-        private void ApplyInstantDeathDetection()
-        {
-            var ciType = AccessTools.TypeByName("CharacterInformation");
-            if ((object)ciType == null) { Log.LogInfo("CharacterInformation not found, DEATH-2 skipped."); return; }
-
-            // SF's CharacterInformation has `isDead` field. Watch for SetDead /
-            // similar method. Most likely `CharacterStats.Die` or
-            // `HealthHandler.Die` is the actual entry point.
-            var hhType = AccessTools.TypeByName("HealthHandler");
-            if ((object)hhType == null) { Log.LogInfo("HealthHandler not found, DEATH-2 skipped."); return; }
-
-            var dieMethod = AccessTools.Method(hhType, "Die");
-            if ((object)dieMethod == null) dieMethod = AccessTools.Method(hhType, "OnDeath");
-            if ((object)dieMethod == null) { Log.LogInfo("HealthHandler.Die not found, DEATH-2 skipped."); return; }
-
-            var postfix = AccessTools.Method(typeof(Plugin), nameof(OnPlayerDied_Postfix));
-            _harmony.Patch(dieMethod, postfix: new HarmonyMethod(postfix));
-            Log.LogInfo("[DEATH-2] Patched HealthHandler.Die — clears roundAdvanceBlocked on death.");
-        }
-
-        private static void OnPlayerDied_Postfix(object __instance)
-        {
-            try
-            {
-                var hostType = AccessTools.TypeByName("SFHeadlessHost.Plugin");
-                if ((object)hostType == null) return;
-                if ((object)_cachedHostPlugin == null)
-                    _cachedHostPlugin = UnityEngine.Object.FindObjectOfType(hostType);
-                if ((object)_cachedHostPlugin == null) return;
-                var onDeath = AccessTools.Method(hostType, "ScheduleRoundAdvanceOnDeath");
-                if ((object)onDeath != null)
-                {
-                    onDeath.Invoke(_cachedHostPlugin, new object[] { "SFBoxFix.HealthHandler.Die" });
-                    Log.LogInfo("[DEATH-2] Player died — host ScheduleRoundAdvanceOnDeath invoked.");
-                    return;
-                }
-                var clear = AccessTools.Method(hostType, "ClearRoundAdvanceBlockedGate");
-                if ((object)clear != null)
-                    clear.Invoke(_cachedHostPlugin, new object[] { "SFBoxFix.HealthHandler.Die" });
-            }
-            catch (Exception e) { Log.LogWarning($"[DEATH-2 postfix] {e.Message}"); }
-        }
-
-        // ========== DEATH-3: Patch additional death entry points ==========
-        // Death in SF can fire through several methods. Patch them all so the
-        // round-advance gate clears no matter which path triggers.
-        private void ApplyMoreDeathPaths()
-        {
-            int patched = 0;
-            var hhType = AccessTools.TypeByName("HealthHandler");
-            var ciType = AccessTools.TypeByName("CharacterInformation");
-
-            // HealthHandler death-related methods. TakeDamage has overloads
-            // so we patch ALL of them by enumerating MethodInfos via reflection
-            // and filtering by name. Skip TakeDamage (multiple overloads cause
-            // ambiguity errors and we already have DEATH-2 covering Die).
-            if ((object)hhType != null)
-            {
-                foreach (var m in hhType.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
-                {
-                    if ((object)m == null) continue;
-                    string n = m.Name;
-                    if (n != "Kill" && n != "DealDamage" && n != "SetDead" && n != "OnDeath") continue;
-                    try
-                    {
-                        var pf = AccessTools.Method(typeof(Plugin), nameof(OnPlayerDamageOrDeath_Postfix));
-                        _harmony.Patch(m, postfix: new HarmonyMethod(pf));
-                        patched++;
-                    }
-                    catch { }
-                }
-            }
-            // CharacterInformation death methods
-            if ((object)ciType != null)
-            {
-                foreach (var m in ciType.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
-                {
-                    if ((object)m == null) continue;
-                    string n = m.Name;
-                    if (n != "Die" && n != "OnDeath" && n != "SetDead") continue;
-                    try
-                    {
-                        var pf = AccessTools.Method(typeof(Plugin), nameof(OnPlayerDamageOrDeath_Postfix));
-                        _harmony.Patch(m, postfix: new HarmonyMethod(pf));
-                        patched++;
-                    }
-                    catch { }
-                }
-            }
-            // Killbox triggers
-            var kfType = AccessTools.TypeByName("KillingFloor");
-            if ((object)kfType != null)
-            {
-                var m = AccessTools.Method(kfType, "OnTriggerEnter");
-                if ((object)m != null)
-                {
-                    try
-                    {
-                        var pf = AccessTools.Method(typeof(Plugin), nameof(OnPlayerDamageOrDeath_Postfix));
-                        _harmony.Patch(m, postfix: new HarmonyMethod(pf));
-                        patched++;
-                    }
-                    catch { }
-                }
-            }
-            Log.LogInfo($"[DEATH-3] Patched {patched} additional death entry points.");
-        }
-
-        // Common postfix used by all death paths — only clears the gate if
-        // somebody actually died. Cheap: a single field read + write.
-        private static void OnPlayerDamageOrDeath_Postfix(object __instance)
-        {
-            try
-            {
-                if ((object)__instance == null) return;
-                var ciF = AccessTools.Field(__instance.GetType(), "characterInformation");
-                if ((object)ciF == null)
-                    ciF = AccessTools.Field(__instance.GetType(), "mCharacterInformation");
-                if ((object)ciF != null)
-                {
-                    var ci = ciF.GetValue(__instance);
-                    if ((object)ci != null)
-                    {
-                        var deadF = AccessTools.Field(ci.GetType(), "isDead");
-                        if ((object)deadF != null && !(bool)deadF.GetValue(ci)) return;
-                    }
-                }
-                var hostType = AccessTools.TypeByName("SFHeadlessHost.Plugin");
-                if ((object)hostType == null) return;
-                if ((object)_cachedHostPlugin == null)
-                    _cachedHostPlugin = UnityEngine.Object.FindObjectOfType(hostType);
-                if ((object)_cachedHostPlugin == null) return;
-                var onDeath = AccessTools.Method(hostType, "ScheduleRoundAdvanceOnDeath");
-                if ((object)onDeath != null)
-                    onDeath.Invoke(_cachedHostPlugin, new object[] { "SFBoxFix.death-path" });
-                else
-                {
-                    var clear = AccessTools.Method(hostType, "ClearRoundAdvanceBlockedGate");
-                    if ((object)clear != null)
-                        clear.Invoke(_cachedHostPlugin, new object[] { "SFBoxFix.death-path" });
-                }
-            }
-            catch { /* silent */ }
-        }
+        // (D1/D2 code-review) Removed DEATH-2 (redundant — SFHeadlessHost already
+        // postfixes HealthHandler.Die, and runs in the same oracle process) and
+        // DEATH-3 (dead — it patched 0 methods: Kill/DealDamage/SetDead/OnDeath
+        // don't exist on the real HealthHandler/CharacterInformation, and
+        // KillingFloor has no OnTriggerEnter; its postfix also read the wrong field
+        // name). Death-driven round advance lives entirely in SFHeadlessHost (Die
+        // postfix + PktPlayerFallOut + killing-blow relay + auth-rig death poll).
 
         // BOX-ROT note: the NSO snapshot wire format only syncs rotZ (the
         // camera-facing axis). If server physics tumbled a box around X/Y the

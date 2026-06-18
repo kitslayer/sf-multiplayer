@@ -37,8 +37,6 @@ namespace SFServerBrowser
         internal static readonly Color ColBlue       = new Color(0.24f, 0.52f, 0.96f, 1f);
         internal static readonly Color ColBlueHi     = new Color(0.40f, 0.64f, 1.00f, 1f);
         internal static readonly Color ColRow        = new Color(0.13f, 0.14f, 0.19f, 0.96f);
-        internal static readonly Color ColRowHover   = new Color(0.18f, 0.21f, 0.30f, 1f);
-        internal static readonly Color ColRowEdge    = new Color(1f, 1f, 1f, 0.06f);
         internal static readonly Color ColField      = new Color(0.06f, 0.07f, 0.10f, 1f);
         internal static readonly Color ColFieldFocus = new Color(0.09f, 0.11f, 0.17f, 1f);
         internal static readonly Color ColGood       = new Color(0.34f, 0.80f, 0.44f, 1f);

@@ -224,6 +224,11 @@ internal sealed class MainForm : Form
                 {
                     if (string.IsNullOrEmpty(entry.Name)) continue; // skip directories
                     var target = Path.Combine(sf, entry.FullName.Replace('/', Path.DirectorySeparatorChar));
+                    // (E5) zip-slip guard: reject entries resolving outside the install
+                    // dir. Defense-in-depth — the archive is a trusted HTTPS GitHub asset,
+                    // but a malicious/MITM'd zip with ../ entries must not write out of tree.
+                    var fullRoot = Path.GetFullPath(sf) + Path.DirectorySeparatorChar;
+                    if (!Path.GetFullPath(target).StartsWith(fullRoot, StringComparison.Ordinal)) continue;
                     Directory.CreateDirectory(Path.GetDirectoryName(target)!);
                     using var src = entry.Open();
                     using var dst = File.Create(target);
@@ -236,9 +241,6 @@ internal sealed class MainForm : Form
             ExtractEmbeddedTo(ExpectedHeadlessResource, ourHost);
             progress.SetStatus("Installing plugin: SFClientRecon.dll");
             ExtractEmbeddedTo(ExpectedReconResource, ourRecon);
-
-            // Try to set Steam launch options via registry (works if Steam is installed)
-            TrySetSteamLaunchOptions();
 
             progress.SetStatus("Done.");
             await Task.Delay(500);
@@ -345,17 +347,6 @@ internal sealed class MainForm : Form
             return BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
         }
         catch { return null; }
-    }
-
-    // ---- best-effort Steam launch options ----
-    // Steam stores per-app launch options in localconfig.vdf. We can offer
-    // to write them but Steam must be closed (it caches the file). For
-    // safety, we just hint to the user via the Connect dialog instead.
-    private static void TrySetSteamLaunchOptions()
-    {
-        // No-op for now — would require closing Steam + modifying localconfig.vdf
-        // which is risky. Instead, the Connect dialog copies launch options to
-        // the user's clipboard and tells them to paste in Properties.
     }
 
     // ---- settings persistence ----

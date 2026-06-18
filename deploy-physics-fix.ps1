@@ -2,7 +2,19 @@
 # Team: kitslayer + AlkaDev
 param(
     [switch]$DeployVps,
-    [switch]$InstallLocal
+    [switch]$InstallLocal,
+    # Endpoint baked into the local client config by -InstallLocal (host=line 1,
+    # port=line 2 of sf-oracle-endpoint.txt). Override for a different server.
+    [string]$ServerIp = '69.53.117.43',
+    [int]$ServerPort = 1337,
+    # -DeployVps target. No host/key defaults: the old ALKA host + sf_oracle_alka
+    # key + :2222 forward are gone. Supply your own, e.g.:
+    #   -VpsHost 1.2.3.4 -VpsUser sfdev -VpsKey ~\.ssh\id_ed25519 -VpsPort 22
+    [string]$VpsHost,
+    [string]$VpsUser = 'sfdev',
+    [string]$VpsKey,
+    [int]$VpsPort = 22,
+    [string]$VpsPath = '/home/sfdev/sf-oracle/install/BepInEx/plugins'
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,8 +64,8 @@ if ($InstallLocal) {
     $cfgDir = Join-Path $Sf "BepInEx\config"
     New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
     @"
-69.53.117.43
-1337
+$ServerIp
+$ServerPort
 "@ | Set-Content -Path (Join-Path $cfgDir "sf-oracle-endpoint.txt") -Encoding ASCII
     $hostOff = Join-Path $Plug 'SFHeadlessHost.dll.oracle-client-off'
     $hostPlug = Join-Path $Plug 'SFHeadlessHost.dll'
@@ -65,12 +77,14 @@ if ($InstallLocal) {
 }
 
 if ($DeployVps) {
-    $Key = Join-Path $env:USERPROFILE '.ssh\sf_oracle_alka'
-    $Remote = 'sfdev@69.53.117.43:/home/miles/sf-oracle/install/BepInEx/plugins'
-    scp -i $Key -P 2222 ${HostDll} "${Remote}/SFHeadlessHost.dll"
-    scp -i $Key -P 2222 $BoxFixDll "${Remote}/SFBoxFix.dll"
+    if (-not $VpsHost -or -not $VpsKey) {
+        throw "Deploy target not configured. Pass -VpsHost <ip> -VpsKey <path> [-VpsUser u] [-VpsPort n] [-VpsPath p]. (The old ALKA host + sf_oracle_alka key + :2222 forward are gone.)"
+    }
+    $Remote = "${VpsUser}@${VpsHost}:${VpsPath}"
+    scp -i $VpsKey -P $VpsPort ${HostDll} "${Remote}/SFHeadlessHost.dll"
+    scp -i $VpsKey -P $VpsPort $BoxFixDll "${Remote}/SFBoxFix.dll"
     Write-Host 'Uploaded SFHeadlessHost.dll + SFBoxFix.dll — restart: sudo systemctl restart sf-oracle.service'
-    Write-Host 'Verify log: grep -E "SFBoxFix v0.2.4|SFHeadlessHost" /tmp/sf-oracle-plugin-11337.log | tail -20'
+    Write-Host 'Verify log: grep -E "SFBoxFix|SFHeadlessHost" /tmp/sf-oracle-plugin-11337.log | tail -20'
 }
 
 Write-Host ('OK Host DLL:    ' + ${HostDll})

@@ -76,7 +76,7 @@ namespace SFHeadlessHost
     {
         public const string PluginGuid = "com.stickfightdev.headless-host";
         public const string PluginName = "SFHeadlessHost";
-        public const string PluginVersion = "0.4.1";
+        public const string PluginVersion = "0.4.2";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance;
@@ -1742,19 +1742,6 @@ namespace SFHeadlessHost
             return true;
         }
 
-        // NSO.Start postfix on client: force the static mHasControl=true so
-        // the client's NSO.LateUpdate broadcasts position deltas.
-        internal static void NsoStartPostfix_Client(object __instance)
-        {
-            try
-            {
-                var t = __instance.GetType();
-                var f = AccessTools.Field(t, "mHasControl");
-                if ((object)f != null) f.SetValue(null, true);
-            }
-            catch { /* swallow — Mono inlining may have us miss */ }
-        }
-
         // Per-patch install with status tracking. A single try/catch around
         // the whole block silently skipped patches if any one threw early.
         // Failures now accumulate in _p65MissingPatches for a post-install
@@ -2457,9 +2444,22 @@ namespace SFHeadlessHost
                     var cli = _sfClients[k];
                     Log.LogInfo($"[SF] Dropping stale client {k} (slot={cli.Slot} steamID={cli.SteamID}, last seen {Time.realtimeSinceStartup - cli.LastSeen:0.0}s ago)");
                     _sfClients.Remove(k);
-                    // Also forget the v26 endpoint + rate guard for the slot,
-                    // otherwise we'd keep sending snapshots into the void.
-                    if (cli.Slot >= 0) _slotV26Endpoint.Remove(cli.Slot);
+                    // Also forget the v26 endpoint + death-tracking for the slot,
+                    // otherwise we'd keep sending snapshots into the void. (A2)
+                    // Only clear slot-keyed state if no LIVE client has since taken
+                    // this slot — a reconnect reuses the slot, and clearing then
+                    // would delete the live client's endpoint and mark its slot
+                    // already-dead. (cli is already removed from _sfClients above.)
+                    if (cli.Slot >= 0)
+                    {
+                        bool slotReused = false;
+                        foreach (var kv2 in _sfClients) if (kv2.Value.Slot == cli.Slot) { slotReused = true; break; }
+                        if (!slotReused)
+                        {
+                            _slotV26Endpoint.Remove(cli.Slot);
+                            _deathSlotsHandled.Remove(cli.Slot);
+                        }
+                    }
                     _rateGuards.Remove(k);
                 }
                 // Lobby emptied out: clear the match flag so the next player's
@@ -2498,6 +2498,14 @@ namespace SFHeadlessHost
             _pendingClientStartMatchAt = -1f;
             _pendingClientStartMatchFired = false;
             _pendingRoundAdvanceAt = -1f;
+            // B1 (code-review): also reset the oracle's per-match latches + clear
+            // stale authoritative rigs. _authSpawnDone is otherwise reset ONLY on
+            // round-advance, so across a lobby empty→refill it stays true and the
+            // NEXT match never spawns server-authoritative rigs — server-side
+            // box-push / hit-reg / auth-death silently stop until the first round
+            // advance flips the latch. ResetOracleStateForRoundAdvance resets the
+            // whole chain (auth-spawn + NSO inventory + map-sync) and clears rigs.
+            ResetOracleStateForRoundAdvance();
         }
 
         // Parse the wrapper and route by msgType. Body bytes are forwarded
@@ -2613,6 +2621,14 @@ namespace SFHeadlessHost
                     RelayBodyToAll(msgType, data, bodyOffset, bodyLen, channel);
                     break;
 
+                // SECURITY (code-review A1): drop client-originated PktKickPlayer.
+                // The patched DLL acts on a received KickPlayer, so relaying one
+                // would let any client boot another player. Legitimate kicks are
+                // emitted server-side only (see /kick → BroadcastSfPacket(PktKickPlayer)).
+                case PktKickPlayer:
+                    if (Verbose) Log.LogWarning($"[SF] Dropped client-originated PktKickPlayer from {from}.");
+                    break;
+
                 // "Relay to all OTHER clients" — SF's host passes ignoreUserID =
                 // sender so they don't get duplicate force events / fall-outs.
                 case PktPlayerForceAdded:
@@ -2623,7 +2639,6 @@ namespace SFHeadlessHost
                 case PktOptionsChanged:      // lobby option toggles (ALKA BUGS_BACKLOG P0-4)
                 case PktLerpPlayer:          // patched-DLL ext, remote-lerp trigger (ALKA P1-4)
                 case PktColorChanged:        // patched-DLL ext, player color (ALKA P1-4)
-                case PktKickPlayer:          // host kick — patched DLL emits, peer clients see who got booted
                     if (msgType == PktPlayerTalked)
                     {
                         LogPlayerTalkedTelemetry(cli, data, bodyOffset, bodyLen, channel);
@@ -3563,30 +3578,12 @@ namespace SFHeadlessHost
             Log.LogInfo($"[DEATH] Round advance gate cleared ({reason}).");
         }
 
-        private static bool TryReadHealthHandlerIsDead(object healthHandler)
-        {
-            if ((object)healthHandler == null) return false;
-            try
-            {
-                var ciF = AccessTools.Field(healthHandler.GetType(), "characterInformation");
-                if ((object)ciF == null)
-                    ciF = AccessTools.Field(healthHandler.GetType(), "mCharacterInformation");
-                if ((object)ciF == null) return true;
-                var ci = ciF.GetValue(healthHandler);
-                if ((object)ci == null) return true;
-                var deadField = AccessTools.Field(ci.GetType(), "isDead");
-                if ((object)deadField != null) return (bool)deadField.GetValue(ci);
-                var deadProp = AccessTools.Property(ci.GetType(), "isDead");
-                if ((object)deadProp != null) return (bool)deadProp.GetValue(ci, null);
-                return true;
-            }
-            catch { return true; }
-        }
-
         /// <summary>Death signal — clears gate and schedules next map (queues during map load).</summary>
         internal void ScheduleRoundAdvanceOnDeath(string reason)
         {
-            AcResetRound();
+            // (B2) AcResetRound moved to AdvanceRound (the real round boundary).
+            // Firing it per-death over-incremented _acRoundIndex and zeroed the
+            // behavioral-AC accumulators mid-round on every kill.
             ClearRoundAdvanceBlockedGate(reason);
             TryScheduleRoundAdvance(reason);
         }
@@ -3696,12 +3693,6 @@ namespace SFHeadlessHost
             _roundAdvanceQueuedAfterMapLoad = false;
         }
 
-        /// <summary>Solo-only: death without scoring still reloads oracle map logic for QA.</summary>
-        private void TryScheduleSoloTestRoundAdvance(string reason)
-        {
-            if (!IsSoloTestLobby()) return;
-            TryScheduleRoundAdvance(reason);
-        }
         private float _pendingStartMatchAt = -1f;
         private int _roundCounter;
 
@@ -3751,6 +3742,7 @@ namespace SFHeadlessHost
         private void AdvanceRound()
         {
             ResetDeathTrackingForNewRound();
+            AcResetRound();   // (B2) reset behavioral-AC accumulators at the real round boundary
             _roundCounter++;
             // Pick a random scene we haven't visited in the last few rounds.
             int nextScene = _allLandfallMaps[_mapRng.Next(_allLandfallMaps.Length)];
@@ -4020,6 +4012,13 @@ namespace SFHeadlessHost
                         evict.Add(kv.Key);
                         Log.LogInfo($"[SF] Evicting stale reconnect: SteamID={other.SteamID} was on {kv.Key} slot={other.Slot}; new conn from {cli.Addr} reusing slot {other.Slot}.");
                         cli.Slot = other.Slot;
+                        // (A2) Invalidate the prior occupant's slot-keyed state so
+                        // it doesn't outlive them: the stale v26 endpoint (re-set on
+                        // the reconnect's first input) and the death-handled mark
+                        // (else the reused slot is treated as already-dead and the
+                        // reconnected player's death won't advance the round).
+                        _slotV26Endpoint.Remove(other.Slot);
+                        _deathSlotsHandled.Remove(other.Slot);
                     }
                 }
                 if (evict != null) foreach (var k in evict) _sfClients.Remove(k);
@@ -5240,9 +5239,6 @@ namespace SFHeadlessHost
             catch (Exception e) { Log.LogWarning($"[P6.17 explosion] {e.Message}"); }
         }
 
-        private bool ProjectileHitWall(Vector3 from, Vector3 to) =>
-            TryProjectileWallHit(from, to, out _, out _);
-
         private bool TryProjectileWallHit(Vector3 from, Vector3 to, out Vector3 hitPoint, out Collider hitCollider)
         {
             hitPoint = to;
@@ -6013,8 +6009,18 @@ namespace SFHeadlessHost
 
         private void BroadcastSfPacket(byte msgType, byte[] body, ulong steamID, byte channel)
         {
+            // Gate on Initialized (issue #2): a client between
+            // ClientRequestingAccepting and ClientInit has no slot/roster yet, and
+            // the patched DLL NREs in ReadMessageBuffer if it processes an early
+            // gameplay broadcast (e.g. PktMapChange) before its own ClientInit
+            // lands. The handshake packets (ClientAccepted/ClientInit) are unicast
+            // via SendSfPacket, and PktClientSpawned only fires after Initialized is
+            // set, so gating the broadcast here is safe.
             foreach (var kv in _sfClients)
+            {
+                if (!kv.Value.Initialized) continue;
                 SendSfPacket(kv.Value.Addr, msgType, body, steamID, channel);
+            }
         }
 
         // === codec primitives ===
@@ -6864,41 +6870,6 @@ namespace SFHeadlessHost
                     Log.LogWarning($"WriteInputsToRigs: {e.Message}");
                 }
             }
-        }
-
-        // SetTwoAxis writes (x, y) to the named TwoAxisInputControl on the
-        // CharacterActions instance by poking its private `thisValue` Vector2
-        // field directly. Stock InControl exposes Value as a getter only
-        // and no setter API for "fake" input — we have to bypass.
-        private static void SetTwoAxis(object actions, string fieldName, Vector2 v)
-        {
-            var f = AccessTools.Field(actions.GetType(), fieldName);
-            if ((object)f == null) return;
-            var ctrl = f.GetValue(actions);
-            if ((object)ctrl == null) return;
-            var t = ctrl.GetType();
-            var thisValueField = AccessTools.Field(t, "thisValue");
-            if ((object)thisValueField != null) thisValueField.SetValue(ctrl, v);
-            // X / Y are protected properties; their backing fields are auto-
-            // generated (<X>k__BackingField). Update them too so anything that
-            // reads .X / .Y sees the new value.
-            var xBacking = AccessTools.Field(t, "<X>k__BackingField");
-            var yBacking = AccessTools.Field(t, "<Y>k__BackingField");
-            if ((object)xBacking != null) xBacking.SetValue(ctrl, v.x);
-            if ((object)yBacking != null) yBacking.SetValue(ctrl, v.y);
-        }
-
-        // SetOneAxisOrButton writes a button-press state by setting the
-        // PlayerAction's private thisValue (float, 0.0 / 1.0).
-        private static void SetOneAxisOrButton(object actions, string fieldName, bool pressed)
-        {
-            var f = AccessTools.Field(actions.GetType(), fieldName);
-            if ((object)f == null) return;
-            var ctrl = f.GetValue(actions);
-            if ((object)ctrl == null) return;
-            var t = ctrl.GetType();
-            var thisValueField = AccessTools.Field(t, "thisValue");
-            if ((object)thisValueField != null) thisValueField.SetValue(ctrl, pressed ? 1.0f : 0.0f);
         }
 
         // === tiny JSON field extractors (avoid dragging in JSON.NET) ===

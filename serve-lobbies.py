@@ -543,15 +543,22 @@ def _merge_static(lobbies: list[dict]) -> list[dict]:
 # Short-TTL cache for the router's per-code client counts so a fleet of browser
 # clients polling GET /lobbies at ~1Hz doesn't fan out one router hit each.
 _bycode_cache: dict = {"at": 0.0, "data": None}
+_bycode_cache_lock = threading.Lock()
 
 
 def _router_bycode_cached(ttl: float = 1.0) -> dict | None:
     now = time.time()
-    if now - _bycode_cache["at"] < ttl:
-        return _bycode_cache["data"]
+    # (F3) Guard the cache dict — every GET /lobbies handler runs on its own
+    # thread (ThreadingHTTPServer), so concurrent pollers could interleave the
+    # at/data writes. Fetch OUTSIDE the lock (don't hold it across router I/O);
+    # a rare double-fetch under contention is harmless given the 1s TTL.
+    with _bycode_cache_lock:
+        if now - _bycode_cache["at"] < ttl:
+            return _bycode_cache["data"]
     data = _router_bycode()
-    _bycode_cache["at"] = now
-    _bycode_cache["data"] = data
+    with _bycode_cache_lock:
+        _bycode_cache["at"] = now
+        _bycode_cache["data"] = data
     return data
 
 
@@ -631,6 +638,13 @@ def reaper_loop() -> None:
                     continue
                 seen_codes.add(code)
                 if not l.get("alive"):
+                    # Grace window (issue #5): a freshly-launched lobby may not have
+                    # a reapable pid yet — Proton/Wine startup writes the registry
+                    # entry before the wrapper pid is observable as alive. Reaping
+                    # here would kill the lobby before anyone can join. Skip until it
+                    # clears LOBBY_MIN_AGE, same as the empty-lobby branch below.
+                    if _lobby_age(l) < LOBBY_MIN_AGE:
+                        continue
                     print(f"[reaper] dead pid → stopping stale lobby {code}")
                     stop_lobby(code)
                     _empty_since.pop(code, None)

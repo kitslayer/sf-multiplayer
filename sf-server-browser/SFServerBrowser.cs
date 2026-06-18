@@ -37,7 +37,7 @@ namespace SFServerBrowser
     {
         public const string PluginGuid = "com.stickfightdev.server-browser";
         public const string PluginName = "SFServerBrowser";
-        public const string PluginVersion = "0.5.3";
+        public const string PluginVersion = "0.5.4";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance;
@@ -168,6 +168,7 @@ namespace SFServerBrowser
             {
                 PushToast("Joined " + (_joiningCode ?? "lobby") + " — loading map…", 1);
                 _joiningSince = -1f;
+                _joiningCode = null;   // (E3) don't leave a stale code for later toasts/overlay
             }
         }
 
@@ -188,6 +189,7 @@ namespace SFServerBrowser
             if (_joiningSince > 0f && Time.unscaledTime - _joiningSince > JoiningOverlayTtl)
             {
                 _joiningSince = -1f;
+                _joiningCode = null;   // (E3) clear stale code on connect-timeout
                 PushToast("Still connecting… check the server is up.", 0);
             }
         }
@@ -285,8 +287,17 @@ namespace SFServerBrowser
                 int lobbiesStart = json.IndexOf("\"lobbies\"");
                 if (lobbiesStart < 0) { _statusText = "No 'lobbies' key."; return; }
                 int arrStart = json.IndexOf('[', lobbiesStart);
-                int arrEnd = json.IndexOf(']', arrStart);
-                if (arrStart < 0 || arrEnd < 0) { _statusText = "Malformed array."; return; }
+                if (arrStart < 0) { _statusText = "Malformed array."; return; }
+                // (E2) Find the matching ']' by bracket depth, not the first ']':
+                // the old code truncated the array if any lobby object ever gained
+                // an array-valued field. (Scalar field values here have no brackets.)
+                int arrEnd = -1, bdepth = 0;
+                for (int i = arrStart; i < json.Length; i++)
+                {
+                    if (json[i] == '[') bdepth++;
+                    else if (json[i] == ']') { if (--bdepth == 0) { arrEnd = i; break; } }
+                }
+                if (arrEnd < 0) { _statusText = "Malformed array."; return; }
                 string arr = json.Substring(arrStart + 1, arrEnd - arrStart - 1);
 
                 int depth = 0, start = -1;

@@ -58,6 +58,19 @@ UNIT
   exit 0
 fi
 
+# --- standalone-run guard (code-review) -------------------------------------
+# This is the LEGACY ALKA-era standalone watchdog. Production now runs the
+# systemd stack (sf-router.service + sf-lobbies.service + sf-oracle.service +
+# sf-oracle-watchdog.{sh,timer}). Running this on the live box is HAZARDOUS: it
+# assumes a different topology (router ${ROUTER_PORT} / MAIN on UDP ${MAIN_PORT})
+# than the systemd oracle (router 1338 / MAIN 1337), so it would clobber the
+# registry and double-launch. Require an explicit opt-in for dev boxes.
+if [ "${SF_WATCHDOG_ALLOW_STANDALONE:-0}" != "1" ]; then
+  log "Refusing to run: legacy standalone watchdog conflicts with the systemd stack."
+  log "Production path: systemctl status sf-oracle-watchdog.timer. Dev override: SF_WATCHDOG_ALLOW_STANDALONE=1"
+  exit 1
+fi
+
 # --- health checks ----------------------------------------------------------
 router_up()  { pgrep -f 'sf-router' >/dev/null 2>&1; }
 lobbies_up() { pgrep -f 'serve-lobbies.py' >/dev/null 2>&1; }

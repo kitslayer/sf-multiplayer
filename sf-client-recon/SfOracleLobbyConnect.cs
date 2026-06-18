@@ -14,7 +14,6 @@ namespace SFClientRecon
     {
         private static bool _oracleConnectMode;
         private static bool _oracleLobbyPatchesInstalled;
-        private static bool _oracleAutoConnectStarted;
         private static bool _oracleConnectStarted;
         private static bool _endpointResolved;
         private static string _resolvedOracleHost;
@@ -196,7 +195,6 @@ namespace SFClientRecon
         {
             // After the premature-init fix (0.3.8+), a delayed auto-connect is safe:
             // it covers PLAY ONLINE → walk into lobby box without clicking Quick Match.
-            _oracleAutoConnectStarted = true;
             _autoConnectAt = Time.realtimeSinceStartup + 4f;
             Log.LogInfo("[oracle-lobby] Auto-connect scheduled in 4s (backup if Quick Match not clicked).");
         }
@@ -354,6 +352,11 @@ namespace SFClientRecon
         {
             code = (code ?? "").Trim().ToUpper();
             if (code.Length == 0) { Log.LogWarning("[oracle-lobby] RequestJoinLobby: empty code ignored."); return; }
+            if (IsMatchInProgress())
+            {
+                Log.LogWarning($"[oracle-lobby] RequestJoinLobby({code}) ignored — a match is in progress. Leave to the menu first; switching lobbies mid-match re-inits the netstack under the live game and desyncs it. (issue #5)");
+                return;
+            }
             SelectedLobbyCode = code;
             Log.LogInfo($"[oracle-lobby] RequestJoinLobby({code}) — SELECT + connect via router.");
             var inst = Instance;
@@ -371,6 +374,22 @@ namespace SFClientRecon
             // Allow a re-connect from the menu (the autoconnect guard latches this).
             _oracleConnectStarted = false;
             BeginOracleLobbyConnect("ServerBrowser:" + code);
+        }
+
+        // True if a match is actively in progress. GameManager.inFight is a
+        // STATIC bool, so it's read with GetValue(null) — no instance lookup.
+        // Used to refuse a mid-match lobby switch (which would re-init the
+        // netstack under a live game). (issue #5)
+        private static bool IsMatchInProgress()
+        {
+            try
+            {
+                var gmType = RefOk(_gmType) ? _gmType : AccessTools.TypeByName("GameManager");
+                if (!RefOk(gmType)) return false;
+                var inFightF = AccessTools.Field(gmType, "inFight");
+                return RefOk(inFightF) && (bool)inFightF.GetValue(null);
+            }
+            catch { return false; }
         }
 
         private static object GetPktHandler()
@@ -476,7 +495,8 @@ namespace SFClientRecon
                     ForceInitializedFromServer(null);
                 t.Method("CheckForPackagesOnChannel", new object[] { 1, false }).GetValue();
                 t.Method("CheckForPackagesOnChannel", new object[] { 0, false }).GetValue();
-                if (sentOrRx) t.Field("mHasSentOrReceived").SetValue(true);
+                // (C3) removed a no-op: SetValue("mHasSentOrReceived", true) only
+                // ran when sentOrRx was already true (just read from that field).
             }
             catch (Exception e)
             {

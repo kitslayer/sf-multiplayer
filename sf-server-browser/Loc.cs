@@ -28,8 +28,6 @@ namespace SFServerBrowser
 
         internal static bool IsSpanish { get { return Lang == Language.Spanish; } }
 
-        internal static void Toggle(Language l) { Lang = l; }
-
         // key -> { English, Spanish }
         private static readonly Dictionary<string, string[]> _t = new Dictionary<string, string[]>
         {

@@ -8,10 +8,10 @@ Wants=network-online.target
 Type=simple
 User=miles
 Group=miles
-WorkingDirectory=/home/miles/sf-oracle/install
+WorkingDirectory=%h/sf-oracle/install
 
 # Environment — change SFHEADLESS_PORT here to host on a different port.
-Environment=SF_ORACLE_ROOT=/home/miles/sf-oracle
+Environment=SF_ORACLE_ROOT=%h/sf-oracle
 Environment=SFHEADLESS_PORT=1337
 Environment=SFHEADLESS_BRIDGEPORT=11337
 Environment=SF_LOBBY_CODE=MAIN
@@ -26,7 +26,7 @@ Environment=SF_NEXT_MATCH_DELAY=2.0
 Environment=SFHEADLESS_LOGFILE=/tmp/sf-oracle-plugin-11337.log
 
 # Launcher
-ExecStart=/home/miles/sf-multiplayer/deploy/start-oracle-server.sh
+ExecStart=%h/sf-multiplayer/deploy/start-oracle-server.sh
 
 # Native SF crashes a lot under Proton — auto-restart on failure with backoff
 Restart=on-failure
