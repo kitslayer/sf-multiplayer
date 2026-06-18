@@ -1,3 +1,16 @@
+# What's new — 2026-06-17 audit-leftover fixes (shipped)
+
+Correctness + robustness pass closing the verified-real items from the June audit (issues #2/#5); the security P0s were already closed in the June-11 hardening. Versions: host `0.4.2`, installer/client `0.6.2` (box-fix `0.3.1` unchanged).
+
+- **Half-joined clients no longer NRE on an early map change.** `BroadcastSfPacket` now skips clients that haven't completed `ClientInit`, so a `MapChange`/`StartMatch` firing mid-handshake can't reach a client that has no slot/roster yet. (#2d)
+- **No mid-match lobby switching.** The in-game server browser's join path (`RequestJoinLobby`) now refuses to re-init the netstack while a match is in progress (`GameManager.inFight`) — leave to the menu first, which prevents a live-game desync. (#5c)
+- **Lobby reaper grace for fresh lobbies.** The reaper's dead-pid branch now honors `LOBBY_MIN_AGE`, so a lobby still coming up under Proton/Wine isn't killed before anyone can join. (#5d)
+- **`stop-lobby.sh` hardening.** The pid/bridge values read from the registry are validated numeric before the kill patterns use them. (#5e)
+
+> Audit items already fixed earlier (projectile-speed clamp, 5th-client rejection, OnGUI guard, atomic create-cap) are not repeated here. Deferred (need a live 2-player session or external tooling): real weaponType/aim wiring, OPEN-1..6 re-verify, the patched-DLL IP scrub.
+
+---
+
 # What's new — 2026-06-14 keeper fixes + 60 Hz snapshots (shipped + deployed)
 
 Server-side quality pass, merged to `main` and **deployed live to `.115`** (host 0.4.1, box-fix 0.3.1; installer/client 0.6.1):

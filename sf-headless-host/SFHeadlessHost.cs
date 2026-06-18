@@ -76,7 +76,7 @@ namespace SFHeadlessHost
     {
         public const string PluginGuid = "com.stickfightdev.headless-host";
         public const string PluginName = "SFHeadlessHost";
-        public const string PluginVersion = "0.4.1";
+        public const string PluginVersion = "0.4.2";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance;
@@ -6013,8 +6013,18 @@ namespace SFHeadlessHost
 
         private void BroadcastSfPacket(byte msgType, byte[] body, ulong steamID, byte channel)
         {
+            // Gate on Initialized (issue #2): a client between
+            // ClientRequestingAccepting and ClientInit has no slot/roster yet, and
+            // the patched DLL NREs in ReadMessageBuffer if it processes an early
+            // gameplay broadcast (e.g. PktMapChange) before its own ClientInit
+            // lands. The handshake packets (ClientAccepted/ClientInit) are unicast
+            // via SendSfPacket, and PktClientSpawned only fires after Initialized is
+            // set, so gating the broadcast here is safe.
             foreach (var kv in _sfClients)
+            {
+                if (!kv.Value.Initialized) continue;
                 SendSfPacket(kv.Value.Addr, msgType, body, steamID, channel);
+            }
         }
 
         // === codec primitives ===

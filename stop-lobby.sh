@@ -19,6 +19,12 @@ PID=$(grep '^pid=' "$CONF" | cut -d= -f2)
 PORT=$(grep '^port=' "$CONF" | cut -d= -f2)
 
 BRIDGE=$(grep '^bridge=' "$CONF" | cut -d= -f2)
+# Guard (issue #5): pid and bridge must be numeric. A blank/garbage bridge would
+# make the pkill patterns below ("...sf-oracle-unity-${BRIDGE}.log") misfire.
+# Blank a non-numeric value so the `-n` guards below skip that kill rather than
+# match unintended processes.
+case "$PID"    in ''|*[!0-9]*) PID="" ;;    esac
+case "$BRIDGE" in ''|*[!0-9]*) BRIDGE="" ;; esac
 echo "Stopping lobby '$CODE' (pid ${PID:-?}, port ${PORT:-?}, bridge ${BRIDGE:-?})..."
 
 # If the recorded launcher pid is still alive, reap its descendants too (Proton

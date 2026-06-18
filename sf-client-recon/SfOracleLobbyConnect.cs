@@ -354,6 +354,11 @@ namespace SFClientRecon
         {
             code = (code ?? "").Trim().ToUpper();
             if (code.Length == 0) { Log.LogWarning("[oracle-lobby] RequestJoinLobby: empty code ignored."); return; }
+            if (IsMatchInProgress())
+            {
+                Log.LogWarning($"[oracle-lobby] RequestJoinLobby({code}) ignored — a match is in progress. Leave to the menu first; switching lobbies mid-match re-inits the netstack under the live game and desyncs it. (issue #5)");
+                return;
+            }
             SelectedLobbyCode = code;
             Log.LogInfo($"[oracle-lobby] RequestJoinLobby({code}) — SELECT + connect via router.");
             var inst = Instance;
@@ -371,6 +376,22 @@ namespace SFClientRecon
             // Allow a re-connect from the menu (the autoconnect guard latches this).
             _oracleConnectStarted = false;
             BeginOracleLobbyConnect("ServerBrowser:" + code);
+        }
+
+        // True if a match is actively in progress. GameManager.inFight is a
+        // STATIC bool, so it's read with GetValue(null) — no instance lookup.
+        // Used to refuse a mid-match lobby switch (which would re-init the
+        // netstack under a live game). (issue #5)
+        private static bool IsMatchInProgress()
+        {
+            try
+            {
+                var gmType = RefOk(_gmType) ? _gmType : AccessTools.TypeByName("GameManager");
+                if (!RefOk(gmType)) return false;
+                var inFightF = AccessTools.Field(gmType, "inFight");
+                return RefOk(inFightF) && (bool)inFightF.GetValue(null);
+            }
+            catch { return false; }
         }
 
         private static object GetPktHandler()

@@ -631,6 +631,13 @@ def reaper_loop() -> None:
                     continue
                 seen_codes.add(code)
                 if not l.get("alive"):
+                    # Grace window (issue #5): a freshly-launched lobby may not have
+                    # a reapable pid yet — Proton/Wine startup writes the registry
+                    # entry before the wrapper pid is observable as alive. Reaping
+                    # here would kill the lobby before anyone can join. Skip until it
+                    # clears LOBBY_MIN_AGE, same as the empty-lobby branch below.
+                    if _lobby_age(l) < LOBBY_MIN_AGE:
+                        continue
                     print(f"[reaper] dead pid → stopping stale lobby {code}")
                     stop_lobby(code)
                     _empty_since.pop(code, None)
