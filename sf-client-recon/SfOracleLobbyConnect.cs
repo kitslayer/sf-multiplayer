@@ -14,7 +14,6 @@ namespace SFClientRecon
     {
         private static bool _oracleConnectMode;
         private static bool _oracleLobbyPatchesInstalled;
-        private static bool _oracleAutoConnectStarted;
         private static bool _oracleConnectStarted;
         private static bool _endpointResolved;
         private static string _resolvedOracleHost;
@@ -196,7 +195,6 @@ namespace SFClientRecon
         {
             // After the premature-init fix (0.3.8+), a delayed auto-connect is safe:
             // it covers PLAY ONLINE → walk into lobby box without clicking Quick Match.
-            _oracleAutoConnectStarted = true;
             _autoConnectAt = Time.realtimeSinceStartup + 4f;
             Log.LogInfo("[oracle-lobby] Auto-connect scheduled in 4s (backup if Quick Match not clicked).");
         }
@@ -497,7 +495,8 @@ namespace SFClientRecon
                     ForceInitializedFromServer(null);
                 t.Method("CheckForPackagesOnChannel", new object[] { 1, false }).GetValue();
                 t.Method("CheckForPackagesOnChannel", new object[] { 0, false }).GetValue();
-                if (sentOrRx) t.Field("mHasSentOrReceived").SetValue(true);
+                // (C3) removed a no-op: SetValue("mHasSentOrReceived", true) only
+                // ran when sentOrRx was already true (just read from that field).
             }
             catch (Exception e)
             {

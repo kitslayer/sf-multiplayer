@@ -467,9 +467,9 @@ namespace SFHeadlessHost
             int n = EnsureMapSyncObjectsRegistered(scene);
             Log.LogInfo($"[v26.6] MapSync retry pass {_mapSyncRetryPass}: registered={n}");
             _mapSyncRetryPass++;
-            if (_mapSyncRetryPass < MapSyncRetryMaxPasses && n == 0)
-                _mapSyncRetryAt = Time.realtimeSinceStartup + MapSyncRetryIntervalSec;
-            else if (_mapSyncRetryPass < MapSyncRetryMaxPasses)
+            // (D3) Both branches were identical (the `n == 0` distinction was dead);
+            // collapsed. Retries run up to MapSyncRetryMaxPasses regardless of n.
+            if (_mapSyncRetryPass < MapSyncRetryMaxPasses)
                 _mapSyncRetryAt = Time.realtimeSinceStartup + MapSyncRetryIntervalSec;
         }
 

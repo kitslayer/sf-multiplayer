@@ -8,11 +8,11 @@ Wants=network-online.target
 Type=simple
 User=miles
 Group=miles
-WorkingDirectory=/home/miles/sf-multiplayer
+WorkingDirectory=%h/sf-multiplayer
 
 # Secret token for create/stop (POST). Lives outside git; '-' = optional so a
 # fresh checkout without the file still starts (create just stays token-gated).
-EnvironmentFile=-/home/miles/sf-oracle/sf-control.env
+EnvironmentFile=-%h/sf-oracle/sf-control.env
 Environment=SF_LOBBIES_DIR=/tmp/sf-lobbies
 Environment=SF_MAX_LOBBIES=6
 Environment=SF_ROUTER_STATS=http://127.0.0.1:8081/router/stats
@@ -24,7 +24,7 @@ Environment=PYTHONUNBUFFERED=1
 # DEAD-pid (crashed) lobbies every pass. Lower for a busy public server.
 Environment=SF_LOBBY_EMPTY_TTL=86400
 
-ExecStart=/usr/bin/python3 /home/miles/sf-multiplayer/serve-lobbies.py --host 0.0.0.0 --port 8080
+ExecStart=/usr/bin/python3 %h/sf-multiplayer/serve-lobbies.py --host 0.0.0.0 --port 8080
 
 # CRITICAL: this service SPAWNS lobby backends (launch-lobby.sh). KillMode=process
 # kills only the python main process on stop/restart, leaving running lobbies

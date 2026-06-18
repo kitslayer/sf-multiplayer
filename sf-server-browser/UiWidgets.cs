@@ -16,13 +16,6 @@ namespace SFServerBrowser
     {
         // ---- Easing -----------------------------------------------------------
         internal static float EaseOutCubic(float t) { t = Mathf.Clamp01(t); float u = 1f - t; return 1f - u * u * u; }
-        internal static float EaseOutBack(float t)
-        {
-            t = Mathf.Clamp01(t);
-            const float c1 = 1.70158f, c3 = c1 + 1f;
-            float u = t - 1f;
-            return 1f + c3 * u * u * u + c1 * u * u;
-        }
         // Frame-rate independent approach toward a target (for hover states etc.).
         internal static float Approach(float cur, float target, float speed)
         {
@@ -42,13 +35,6 @@ namespace SFServerBrowser
             var prev = GUI.backgroundColor; GUI.backgroundColor = fill;
             GUI.Box(r, GUIContent.none, RoundStyle(radius));
             GUI.backgroundColor = prev;
-        }
-
-        // 1px-ish rounded outline by drawing a slightly larger tinted rect behind.
-        internal static void RoundRectOutline(Rect r, Color fill, Color edge, int radius, float edgeW)
-        {
-            RoundRect(new Rect(r.x - edgeW, r.y - edgeW, r.width + edgeW * 2, r.height + edgeW * 2), edge, radius + 1);
-            RoundRect(r, fill, radius);
         }
 
         // Soft drop shadow behind a rounded surface.

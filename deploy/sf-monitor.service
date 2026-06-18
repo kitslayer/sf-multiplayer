@@ -8,14 +8,14 @@ Wants=network-online.target
 Type=simple
 User=miles
 Group=miles
-WorkingDirectory=/home/miles/sf-multiplayer
+WorkingDirectory=%h/sf-multiplayer
 
 # Loopback only — view via an SSH tunnel; no firewall change, no exposure.
 Environment=SF_MON_BIND=127.0.0.1:8090
 Environment=SF_MON_INTERVAL=5
-Environment=SF_MON_DATADIR=/home/miles/sf-monitor/data
+Environment=SF_MON_DATADIR=%h/sf-monitor/data
 Environment=SF_MON_RETAIN_DAYS=14
-ExecStart=/usr/bin/python3 /home/miles/sf-multiplayer/monitoring/sf-monitor.py
+ExecStart=/usr/bin/python3 %h/sf-multiplayer/monitoring/sf-monitor.py
 
 Restart=on-failure
 RestartSec=5

@@ -215,6 +215,10 @@ namespace SFClientRecon
             Instance._nsoCacheRebuildAt = 0;
             Instance._crateConfigured.Clear();
             Instance._appliedGwIds.Clear();   // new map → new ground-weapon ids
+            // (C1) crate safe-pos/-time caches are keyed by rigidbody instanceID;
+            // a new map = new ids, so without this they grow unbounded per session.
+            _crateSafePos.Clear();
+            _crateSafeAt.Clear();
             ClearPushableLerpCache();
             // v0.6.0 — NSO ids collide while both map scenes coexist after the
             // additive load. Suppress reconciliation + target intake until the

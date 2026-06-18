@@ -1,13 +1,23 @@
-# What's new — 2026-06-17 audit-leftover fixes (shipped)
+# What's new — 2026-06-17 full code-review pass (bugs + dead-code cleanup)
 
-Correctness + robustness pass closing the verified-real items from the June audit (issues #2/#5); the security P0s were already closed in the June-11 hardening. Versions: host `0.4.2`, installer/client `0.6.2` (box-fix `0.3.1` unchanged).
+A codebase-wide review (every component) for correctness bugs and dead/unnecessary code. The June security P0s were already closed in the June-11 hardening; this is the follow-up sweep. Versions: host `0.4.2`, installer/client `0.6.2`, box-fix `0.3.2`, server-browser `0.5.4`.
 
-- **Half-joined clients no longer NRE on an early map change.** `BroadcastSfPacket` now skips clients that haven't completed `ClientInit`, so a `MapChange`/`StartMatch` firing mid-handshake can't reach a client that has no slot/roster yet. (#2d)
-- **No mid-match lobby switching.** The in-game server browser's join path (`RequestJoinLobby`) now refuses to re-init the netstack while a match is in progress (`GameManager.inFight`) — leave to the menu first, which prevents a live-game desync. (#5c)
-- **Lobby reaper grace for fresh lobbies.** The reaper's dead-pid branch now honors `LOBBY_MIN_AGE`, so a lobby still coming up under Proton/Wine isn't killed before anyone can join. (#5d)
-- **`stop-lobby.sh` hardening.** The pid/bridge values read from the registry are validated numeric before the kill patterns use them. (#5e)
+**Bug fixes**
+- **Server-authoritative rigs respawn after a lobby empties (B1).** A latch (`_authSpawnDone`) was only reset on round-advance, so after the lobby emptied and refilled, the next match spawned no server-side rigs — degrading box-push / hit-reg / death detection until a round passed. Reset on lobby-empty now.
+- **Spoofable kick closed (A1).** A client-originated `PktKickPlayer` was relayed to all peers; legit kicks are server-only, so the inbound relay is dropped.
+- **Reconnect slot hygiene (A2).** Reusing a slot on reconnect now clears the prior occupant's snapshot endpoint + death mark; the stale-client sweep no longer deletes a live reconnect's endpoint.
+- **Anti-cheat round accounting (B2).** `AcResetRound` moved from per-death to the real round boundary (it was zeroing accumulators / over-counting rounds on every kill).
+- **Client crate-cache leak (C1)** and **RX source-filter armed before the receive thread starts (C5).**
+- **Half-joined clients no longer NRE on an early MapChange (#2d); no mid-match lobby switching (#5c); lobby reaper grace for freshly-launched lobbies (#5d); `stop-lobby.sh` numeric pid/bridge guard (#5e).**
+- **Server browser:** lobby-list parser handles future nested-array JSON (E2); stale "joining" code cleared on scene change / timeout (E3).
+- **Control plane:** concurrent lobby-create no longer races onto the same port (`flock`-guarded reservation, F1); the router's public port is reserved out of the lobby pool (F2); registry `.conf` writes are atomic (F6); the router-count cache is lock-guarded (F3).
 
-> Audit items already fixed earlier (projectile-speed clamp, 5th-client rejection, OnGUI guard, atomic create-cap) are not repeated here. Deferred (need a live 2-player session or external tooling): real weaponType/aim wiring, OPEN-1..6 re-verify, the patched-DLL IP scrub.
+**Cleanup**
+- Removed an active per-frame cost on the client: an input-history recorder that ran `FindObjectsOfType` every input packet to populate structures nothing read.
+- Removed redundant/dead death-patches in SFBoxFix (one duplicated the host; the other patched zero real methods), dead host helper methods + stale config, and unused server-browser UI helpers.
+- Neutralized the legacy standalone `oracle-watchdog.sh` (the systemd stack is production; it now requires an explicit dev opt-in); parameterized `deploy-physics-fix.ps1` (dropped departed-collaborator host/key defaults); `%h`-templated the systemd unit paths.
+
+> Deferred (need a live 2-player session or external tooling): real `weaponType`/aim wiring, OPEN-1..6 re-verify, the patched-DLL IP scrub. The Windows launcher got two source-only fixes (zip-slip guard, dead-code removal) but is **not** rebuilt here (no Windows toolchain) — `dist/SFLauncher.exe` is unchanged.
 
 ---
 

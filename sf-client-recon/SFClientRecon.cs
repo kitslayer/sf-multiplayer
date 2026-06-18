@@ -80,7 +80,7 @@ namespace SFClientRecon
 
         private int _listenPort;
         private UdpClient _socket;       // bidirectional: RX snapshots + TX inputs
-        private IPEndPoint _serverEp;    // oracle's address (read from -address/-port argv)
+        private volatile IPEndPoint _serverEp;    // oracle's address (read from -address/-port argv); volatile — read on RX thread (C5)
         private Thread _rxThread;
         private volatile bool _running;
 
@@ -88,18 +88,11 @@ namespace SFClientRecon
         private uint _inputSeq;
         private float _lastInputSendAt;
         private const float InputSendInterval = 1.0f / 60.0f;  // 60Hz cap
-        // Phase 6.12.2 prep — latest server-acked input seq from snapshots.
-        private uint _serverLastAckedSeq;
-        // Ring buffer of (sequenceNum → local player position at time of send).
-        // When a snapshot arrives we look up the position WE thought we were at
-        // when input N was sent, compare to server's reported position, and log
-        // divergence. Foundation for the future replay-rollback loop.
-        private const int InputHistoryCap = 240;  // 4s at 60Hz
-        private readonly Queue<uint>     _historySeq = new Queue<uint>(InputHistoryCap);
-        private readonly Queue<Vector3>  _historyPos = new Queue<Vector3>(InputHistoryCap);
-        private readonly Dictionary<uint, Vector3> _historyLookup = new Dictionary<uint, Vector3>(InputHistoryCap);
-        private uint _divergenceLogged;
-        private float _lastShiftAt = -1f;
+        // (C2) Removed the input-history ring buffer (_historySeq/_historyPos/
+        // _historyLookup), _serverLastAckedSeq, and _divergenceLogged/_lastShiftAt:
+        // nothing read them (the ApplySnapshot drift-diff is disabled), yet the
+        // recorder ran FindObjectsOfType(NetworkPlayer) on every input send. Re-add
+        // when input-replay rollback is actually implemented.
 
         // Pending snapshot (set on RX thread, applied on main thread).
         private readonly object _snapLock = new object();
@@ -305,21 +298,9 @@ namespace SFClientRecon
             InstallMapScriptLocalPatches();
             InstallMusicCrashGuard();
 
-            Log.LogInfo($"{PluginName} {PluginVersion}: starting v26 snapshot listener on UDP :{_listenPort}. vSync off, FPS uncapped.");
-            try
-            {
-                _socket = new UdpClient(_listenPort);
-                _running = true;
-                _rxThread = new Thread(RxLoop) { IsBackground = true, Name = "SFClientRecon-RX" };
-                _rxThread.Start();
-                Log.LogInfo("RX thread started (bidirectional — same socket also TXes PlayerInput).");
-            }
-            catch (Exception e)
-            {
-                Log.LogError($"UDP bind on {_listenPort} failed: {e.Message}. Reconciliation disabled.");
-            }
-
-            // Phase 6.12 — server endpoint for outbound PktPlayerInput.
+            // Phase 6.12 — resolve the server endpoint BEFORE starting the RX
+            // thread so the RX source-address filter (_serverEp != null) is armed
+            // from the first datagram (C5: no brief unfiltered window at startup).
             // Mirrors the patched DLL's CLI parsing: -address X -port Y, or
             // BepInEx/config/sf-oracle-endpoint.txt when launched from Steam.
             ResolveOracleEndpoint();
@@ -336,6 +317,20 @@ namespace SFClientRecon
             catch (Exception e)
             {
                 Log.LogError($"Server addr parse failed: {e.Message}. PlayerInput disabled.");
+            }
+
+            Log.LogInfo($"{PluginName} {PluginVersion}: starting v26 snapshot listener on UDP :{_listenPort}. vSync off, FPS uncapped.");
+            try
+            {
+                _socket = new UdpClient(_listenPort);
+                _running = true;
+                _rxThread = new Thread(RxLoop) { IsBackground = true, Name = "SFClientRecon-RX" };
+                _rxThread.Start();
+                Log.LogInfo("RX thread started (bidirectional — same socket also TXes PlayerInput).");
+            }
+            catch (Exception e)
+            {
+                Log.LogError($"UDP bind on {_listenPort} failed: {e.Message}. Reconciliation disabled.");
             }
         }
 
@@ -1863,42 +1858,8 @@ namespace SFClientRecon
             try { _socket.Send(pkt, pkt.Length, _serverEp); }
             catch (Exception e) { Log.LogWarning($"TX: {e.Message}"); }
 
-            // Phase 6.12.2 — snapshot the local player's position at the time
-            // of this send, keyed by sequenceNum. Server replies with this
-            // seq + the position IT thinks we were at, and we diff them in
-            // ApplySnapshot above. Ring-buffer size capped to ~4s of inputs.
-            try
-            {
-                var npType = AccessTools.TypeByName("NetworkPlayer");
-                if ((object)npType != null)
-                {
-                    var nps = UnityEngine.Object.FindObjectsOfType(npType);
-                    if (nps != null)
-                    {
-                        foreach (var np in nps)
-                        {
-                            if (!TryGetPlayerSlotFromNetworkPlayer(np, out var pi) || pi != localSlot) continue;
-                            var npComp = np as Component;
-                            if ((object)npComp == null) break;
-                            Vector3 currentPos = npComp.transform.position;
-                            _historySeq.Enqueue(_inputSeq);
-                            _historyPos.Enqueue(currentPos);
-                            _historyLookup[_inputSeq] = currentPos;
-                            while (_historySeq.Count > InputHistoryCap)
-                            {
-                                uint dropSeq = _historySeq.Dequeue();
-                                _historyPos.Dequeue();
-                                _historyLookup.Remove(dropSeq);
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-            catch { /* best-effort */ }
-
             if (VerboseDiag && (_inputSeq == 1 || _inputSeq % 300 == 0))
-                Log.LogInfo($"[P6.12] Sent PlayerInput #{_inputSeq} slot={localSlot} stick=({sx:0.00},{sy:0.00}) btns=0x{btns:X} hist={_historySeq.Count}");
+                Log.LogInfo($"[P6.12] Sent PlayerInput #{_inputSeq} slot={localSlot} stick=({sx:0.00},{sy:0.00}) btns=0x{btns:X}");
         }
 
         // Emit a SELECT control datagram to the sf-router so it pins this client
@@ -2259,8 +2220,8 @@ namespace SFClientRecon
                         // the player at /start. The rate-limited version still felt
                         // weird. For now, let local prediction own the player
                         // entirely; the server's authoritative position is reflected
-                        // by InjectInput / movement only. Just track the acked seq.
-                        _serverLastAckedSeq = entry.LastInputSeq;
+                        // by InjectInput / movement only. (C2: dropped the unused
+                        // acked-seq tracking — nothing read _serverLastAckedSeq.)
                     }
                     else
                     {

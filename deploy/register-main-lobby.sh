@@ -25,10 +25,13 @@ fi
 
 # systemd exports MAINPID to ExecStartPost; fall back to our own pid otherwise.
 PID="${MAINPID:-$$}"
-cat > "$CONF" <<EOF
+# Atomic write (F6): temp + rename so the Go router (2s refresh) and serve-lobbies
+# loader never observe a half-written MAIN.conf during (re)registration.
+cat > "$CONF.tmp" <<EOF
 code=${CODE}
 port=${SFHEADLESS_PORT:-1337}
 bridge=${SFHEADLESS_BRIDGEPORT:-11337}
 pid=${PID}
 started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
+mv -f "$CONF.tmp" "$CONF"

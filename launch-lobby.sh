@@ -38,24 +38,52 @@ if [ -f "$REGISTRY/${CODE}.conf" ]; then
   rm "$REGISTRY/${CODE}.conf"
 fi
 
-# Ports the V26 CLIENT (SFClientRecon) might bind on the same machine. We
-# skip these so a local oracle never collides with a local client's snapshot
-# listener. Set SF_RESERVED_PORTS="1339 1340 1341" to extend.
-RESERVED_PORTS="${SF_RESERVED_PORTS:-1339 1340}"
+# Ports we must NOT hand to a lobby backend: the V26 CLIENT (SFClientRecon)
+# snapshot listeners, AND the sf-router's public port (1338, see
+# deploy/sf-router.service) which sits inside this BASE_PORT pool — a lobby must
+# never grab the router's own port (F2). Extend via SF_RESERVED_PORTS.
+RESERVED_PORTS="${SF_RESERVED_PORTS:-1338 1339 1340}"
 
-# --- Resolve port ---
+# Atomic registry writer (F6): write a temp then rename so concurrent readers
+# (the Go router's 2s refresh, serve-lobbies' loader + reaper) never observe a
+# half-written .conf (e.g. code= present but port= not yet). STARTED fixed once.
+STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+write_conf() {  # $1 = pid
+  cat > "$REGISTRY/${CODE}.conf.tmp" <<EOF
+code=${CODE}
+port=${PORT}
+bridge=${BRIDGEPORT}
+pid=${1}
+log=${LOG}
+beplog=${BEPLOG}
+pluginlog=${PLUGINLOG}
+started=${STARTED}
+EOF
+  mv -f "$REGISTRY/${CODE}.conf.tmp" "$REGISTRY/${CODE}.conf"
+}
+
+# --- Resolve + reserve a port atomically (F1) ---
+# The old code wrote the .conf only AFTER the ~20s Proton spawn, so two creates
+# racing inside that window both saw the port free (ss: not bound yet; registry:
+# no .conf yet) and picked the same one — the second backend then failed to bind.
+# Fix: hold a registry-wide lock across [port pick + reservation write] so a
+# racing create sees the port already claimed. The lock fd is closed BEFORE we
+# spawn the long-lived game, so the child never inherits (and pins) the lock.
+exec 9>"$REGISTRY/.launch.lock"
+flock 9
 PORT="${2:-}"
 if [ -z "$PORT" ]; then
   for try in $(seq 0 $((MAX_LOBBIES - 1))); do
     cand=$((BASE_PORT + try))
-    # Skip if reserved for local v26 client listeners
+    # Skip if reserved for local v26 client listeners / the router port
     skip=0
     for rp in $RESERVED_PORTS; do
       if [ "$cand" = "$rp" ]; then skip=1; break; fi
     done
     [ "$skip" = "1" ] && continue
-    # Skip if in our registry
-    if ls "$REGISTRY"/*.conf 2>/dev/null | xargs -r grep -l "^port=${cand}$" >/dev/null; then
+    # Skip if any registry entry already holds it (reliable now: reservations
+    # are written under this same lock before release).
+    if grep -qs "^port=${cand}$" "$REGISTRY"/*.conf 2>/dev/null; then
       continue
     fi
     # Skip if anything else on the system holds it
@@ -67,6 +95,7 @@ if [ -z "$PORT" ]; then
   done
 fi
 if [ -z "$PORT" ]; then
+  flock -u 9; exec 9>&-
   echo "No free port in range ${BASE_PORT}-$((BASE_PORT + MAX_LOBBIES - 1))." >&2
   exit 1
 fi
@@ -79,6 +108,13 @@ BEPLOG="$HOME/sf-mirror-local/BepInEx/LogOutput.log"
 # same install don't trample each other in the shared LogOutput.log.
 PLUGINLOG="/tmp/sf-oracle-plugin-${BRIDGEPORT}.log"
 rm -f "$PLUGINLOG"
+
+# Reserve the port in the registry NOW (pid = this script's pid, a live
+# placeholder) so a concurrent create skips it; then release the lock + close
+# the fd before spawning so the game process doesn't inherit the lock.
+write_conf "$$"
+flock -u 9
+exec 9>&-
 
 # Which headless launcher to use. On a SERVER (bundled Proton under
 # ~/sf-oracle) use deploy/start-oracle-server.sh — it wraps Proton in xvfb-run
@@ -103,17 +139,8 @@ SFHEADLESS_LOGFILE="$PLUGINLOG" \
 PID=$!
 disown
 
-# Record before waiting so stop-lobby can find us even if startup hangs.
-cat > "$REGISTRY/${CODE}.conf" <<EOF
-code=${CODE}
-port=${PORT}
-bridge=${BRIDGEPORT}
-pid=${PID}
-log=${LOG}
-beplog=${BEPLOG}
-pluginlog=${PLUGINLOG}
-started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-EOF
+# Update the reservation with the real backend pid (atomic).
+write_conf "$PID"
 
 # Brief sanity-wait so we can fail fast if Proton refused to boot.
 for i in $(seq 1 30); do
