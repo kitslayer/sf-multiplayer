@@ -33,6 +33,8 @@ output_log.txt
 .vscode/
 .idea/
 *.user
+# Playwright MCP scratch (console/page dumps from autonomous web-UI checks)
+.playwright-mcp/
 
 # ---- macOS / Windows cruft ----
 .DS_Store

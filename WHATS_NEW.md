@@ -1,3 +1,24 @@
+# What's new — 2026-06-22→23 autonomous polish loop (merged to `main`, not yet deployed)
+
+A 15-iteration autonomous "polish loop" against three areas flagged as broken — lobby browser/switching, server-authoritative boxes, anti-cheat — under a hunt-and-be-skeptical protocol (full log + evidence in [`BUGS_LOOP.md`](BUGS_LOOP.md), captures in `loop-evidence/`). Most of the seeded backlog turned out **code-correct or by-design**; the loop shipped four small, low-risk fixes and pinned one regression test. All compile-verified (host + client `dotnet build` clean, `go build`/`go test` green); the box/anti-cheat/death verdicts were checked at the highest feasible *autonomous* level (synthetic packets against a local headless oracle), so the 2-player confirmations remain on kit's punch list.
+
+**Shipped fixes**
+- **Lobby browser `/favicon.ico` → 204 (`serve-lobbies.py`).** Killed the lone console 404 on the web lobby-browser page (Playwright-verified, console errors 1→0).
+- **Mid-match lobby-switch now explains itself (`SfOracleLobbyConnect.cs`, issue #5).** Switching lobbies mid-match is refused (re-init would desync the live game); it used to fail silently behind a "Connecting…" toast. Now shows "Can't switch lobbies mid-match — leave to the menu first."
+- **Damage-handler slot bound (`SFHeadlessHost.cs`, DISC-6, defense-in-depth).** The historic-position lookup now bounds `sender.Slot` to `0..3` before indexing the `[4]` tick-sample arrays, matching the sibling handlers (`AllocSlot` already caps slots today, so this is future-proofing, not a live bug).
+- **Snapshot mapState alloc matches the write cap (`SfMapTerrainHost.cs`, DISC-6, defense-in-depth).** The size estimator now `Math.Min`s each entry's payload to `MapStateMaxPayload`, exactly mirroring the writer, so a future write-side change can't under-allocate the snapshot body.
+- **Pinned regression test (`sf-router/colocated_gamesocket_test.go`).** A `t.Skip`'d characterization of the *documented, accepted* per-IP game-socket limit (two same-IP players in different lobbies mis-route the non-SELECTing game socket) — un-skip when the client-side fix lands.
+
+**Investigated → no code change (sound / by-design / needs live confirm)**
+- **Boxes-fall-to-the-void (P0-23):** runtime-verified NOT reproducing on a live headless oracle — colliders register, floor present, `void(y<-30)=0` over a full match (one map; the systemic fear is disproven).
+- **Round-advance rig respawn (P0-24):** static cross-file trace shows the re-arm cascade is intact — STALE.
+- **Anti-cheat (AC-1):** rate-guard fires at the documented thresholds and is **observe-only** unless `SF_ANTICHEAT_ENFORCE=1` — exactly as designed.
+- **Void/lava death (OPEN-1/2)** and **random chain/ice/box breaks (OPEN-4/5/6):** damage/destruction paths are code-correct; no server-side spurious destruction observed in oracle probes — but these need a real 2-player session to close.
+
+> Verification ceiling: autonomous (compile + local-oracle/web checks). **Not deployed to `.115` and component versions are unchanged** — a deploy + version bump + the 2-player punch-list (see [`BUGS_LOOP.md`](BUGS_LOOP.md) → "Punch list for kit") are kit's call.
+
+---
+
 # What's new — 2026-06-17 full code-review pass (bugs + dead-code cleanup)
 
 A codebase-wide review (every component) for correctness bugs and dead/unnecessary code. The June security P0s were already closed in the June-11 hardening; this is the follow-up sweep. Versions: host `0.4.2`, installer/client `0.6.2`, box-fix `0.3.2`, server-browser `0.5.4`.
