@@ -1,0 +1,7 @@
+LOBBY web browser (serve-lobbies.py) — Playwright verify 2026-06-23
+- GET / renders correctly: header "2 running", both lobbies (ABCD12/WXYZ99) with
+  correct connect strings ("-address 127.0.0.1 -port N") + copy buttons, footer.
+- /lobbies JSON + /healthz both serve correctly (503=degraded is correct for
+  non-responsive static test lobbies).
+- BEFORE fix: 1 console error (favicon.ico 404). AFTER fix (/favicon.ico -> 204): 0 console errors.
+Verdict: web lobby browser works; "doesn't work right" not reproduced in the web UI.

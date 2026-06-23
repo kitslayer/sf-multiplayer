@@ -280,6 +280,11 @@ class LobbyHandler(BaseHTTPRequestHandler):
                                "lobbiesResponsive": responsive}).encode()
             self._send(code, "application/json", body)
             return
+        if self.path == "/favicon.ico":
+            # Browsers auto-request this; answer 204 (No Content) so it doesn't
+            # surface as a console 404 on the lobby-browser page.
+            self._send(204, "image/x-icon", b"")
+            return
         self._send(404, "text/plain", b"Not found. Try GET /  or  GET /lobbies  or  GET /healthz\n")
 
     def do_POST(self) -> None:
