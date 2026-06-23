@@ -2644,6 +2644,19 @@ namespace SFHeadlessHost
                         LogPlayerTalkedTelemetry(cli, data, bodyOffset, bodyLen, channel);
                         TryProcessChatCommand(cli, data, bodyOffset, bodyLen);
                     }
+                    // OPEN-3 ("can't hit guns out of hands") telemetry. Punching a
+                    // BLOCKING player is the only emitter of PlayerForceAddedAndBlock
+                    // (PunchForce.cs:205 → victim NetworkPlayer's event channel). The
+                    // relay below is unconditional (no validation/filter), so if this
+                    // line fires during kit's live test the server-side path is sound
+                    // and the bug is client-side (emit or block/force apply). If it
+                    // NEVER fires when punching a blocker, the patched DLL isn't
+                    // emitting msgType 14 (or sends it on a channel we don't read).
+                    // Sample-logged so frequent punches can't flood. No PII (slot/
+                    // channel/len only).
+                    if (msgType == PktPlayerForceAddedAndBlock
+                        && (_forceBlockRxCount++ < 5 || _forceBlockRxCount % 30 == 0))
+                        Log.LogInfo($"[OPEN-3] rx PlayerForceAddedAndBlock (punch-block) slot={cli.Slot} ch={channel} body={bodyLen}B #{_forceBlockRxCount} → relaying to other client(s)");
                     RelayBodyToOthers(cli, msgType, data, bodyOffset, bodyLen, channel);
                     // Void/lava: FallOut often arrives without a 666 relay (solo or last player).
                     if (msgType == PktPlayerFallOut && _matchStarted)
@@ -5641,6 +5654,7 @@ namespace SFHeadlessHost
         private float _nsoCacheLastRebuildAt = -1f;
         private int _objectUpdateAppliedCount;
         private int _objectUpdateDroppedCount;
+        private int _forceBlockRxCount;   // OPEN-3 punch-block (PlayerForceAddedAndBlock) receipts, sample-logged
         // Cached once — checked per inbound ObjectUpdate packet.
         private static bool? _acceptClientCratesCache;
         private static bool AcceptClientCrates
