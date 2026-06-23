@@ -170,6 +170,8 @@ header small{color:#888;font-size:.85em;}
 .lobby h2{margin:0;font-size:1.8em;font-weight:700;letter-spacing:.1em;color:#7fff7f;font-family:inherit;}
 .lobby .meta{color:#888;font-size:.85em;}
 .lobby .meta span{margin-right:1em;}
+.lobby .meta .players{color:#7fff7f;font-weight:600;}
+.lobby .meta .players.full{color:#ff9f7f;}
 .connect{margin-top:.3em;}
 .connect-string{display:flex;gap:.4em;align-items:center;}
 .connect-string code{background:#0a0a0c;border:1px solid #2a2a30;padding:.4em .6em;border-radius:4px;flex:1;overflow-x:auto;white-space:nowrap;color:#a8c5ff;font-size:.8em;}
@@ -220,9 +222,18 @@ fetch("/lobbies").then(r=>r.json()).then(d=>{
     const pid = esc(l.pid || "?");
     const cmd = `-address ${esc(host)} -port ${port}`;
     const startedShort = esc((l.started||"").slice(11,19));
+    // Live occupancy (server-computed in _enrich_lobbies): players = the router's
+    // per-code flow count, capacity = the lobby .conf. Numbers only — not
+    // injectable, so no escaping needed. Flag "full" when at capacity so players
+    // don't bounce off a full lobby.
+    const players = Math.max(0, Number(l.players) || 0);
+    const capNum = Number(l.capacity);
+    const cap = (capNum > 0) ? capNum : null;
+    const full = (cap !== null && players >= cap);
+    const occ = `<span class="${full ? "players full" : "players"}">${players}/${cap !== null ? cap : "?"} players${full ? " · full" : ""}</span>`;
     return `<div class="lobby">
       <h2>${code}</h2>
-      <div class="meta"><span>port ${port}</span><span>pid ${pid}</span>${startedShort?`<span>since ${startedShort}</span>`:""}</div>
+      <div class="meta">${occ}<span>port ${port}</span><span>pid ${pid}</span>${startedShort?`<span>since ${startedShort}</span>`:""}</div>
       <div class="connect">
         <div class="connect-string">
           <code>${cmd}</code>

@@ -1,0 +1,17 @@
+iter17 — web lobby browser now shows live occupancy (players/capacity)
+Verified 2026-06-23 via Playwright (level B), serve-lobbies.py on test port 8099
+with SF_STATIC_LOBBIES="MAIN:1337,TEST:1338" and a fake router-stats returning
+byCode {MAIN:4, TEST:1}.
+
+GET /lobbies JSON (already enriched by _enrich_lobbies, pre-existing):
+  MAIN  players=4 capacity=4 alive=true
+  TEST  players=1 capacity=4 alive=true
+
+Rendered DOM (accessibility snapshot) BEFORE this change showed only
+"port .. pid .. since ..". AFTER:
+  MAIN card meta: "4/4 players · full"   (.players.full → orange)
+  TEST card meta: "1/4 players"          (.players → green)
+
+So the occupancy data the backend already computed for the server browser is now
+surfaced in the web UI too. Screenshot: lobby-players.png (this dir).
+No PII (lobby codes MAIN/TEST, localhost, synthetic counts).
