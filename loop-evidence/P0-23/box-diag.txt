@@ -1,0 +1,8 @@
+P0-23 runtime verify 2026-06-22 (Option B: synthetic 666.666 lobby-kill → match-start → BOX-DIAG)
+Verdict: boxes do NOT fall into the void on this map — void(y<-30)=0, colliders registered, floor present.
+[Info   :SFHeadlessHost] [BOX-DIAG] nsos=91 void(y<-30)=0 y=[-14.5,69.7] rigs=0 scene=MainScene colliders=108 gravityY=-20.0 floor@center=[y=25.2,obj='Death',layer=24,trig=False] floor@crate=[n/a] crate={no-crate}
+[Info   :SFHeadlessHost] [BOX-DIAG] nsos=46 void(y<-30)=0 y=[-1.5,69.7] rigs=0 scene=MainScene colliders=55 gravityY=-20.0 floor@center=[y=25.2,obj='Death',layer=24,trig=False] floor@crate=[n/a] crate={no-crate}
+[Info   :SFHeadlessHost] [BOX-DIAG] nsos=46 void(y<-30)=0 y=[-1.5,69.7] rigs=0 scene=MainScene colliders=53 gravityY=-20.0 floor@center=[y=25.2,obj='Death',layer=24,trig=False] floor@crate=[n/a] crate={no-crate}
+[Info   :SFHeadlessHost] [BOX-DIAG] nsos=46 void(y<-30)=0 y=[-1.5,69.7] rigs=0 scene=MainScene colliders=53 gravityY=-20.0 floor@center=[y=25.2,obj='Death',layer=24,trig=False] floor@crate=[n/a] crate={no-crate}
+[Info   :SFHeadlessHost] [BOX-DIAG] nsos=46 void(y<-30)=0 y=[-1.5,69.7] rigs=0 scene=MainScene colliders=53 gravityY=-20.0 floor@center=[y=25.2,obj='Death',layer=24,trig=False] floor@crate=[n/a] crate={no-crate}
+[Info   :SFHeadlessHost] [BOX-DIAG] nsos=46 void(y<-30)=0 y=[-1.5,69.7] rigs=0 scene=MainScene colliders=53 gravityY=-20.0 floor@center=[y=25.2,obj='Death',layer=24,trig=False] floor@crate=[n/a] crate={no-crate}
