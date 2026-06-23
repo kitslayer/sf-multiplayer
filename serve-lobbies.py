@@ -61,8 +61,11 @@ CREATE_MIN_INTERVAL = float(os.environ.get("SF_CREATE_MIN_INTERVAL", "10"))  # s
 LAUNCH_TIMEOUT = float(os.environ.get("SF_LAUNCH_TIMEOUT", "45"))  # launch-lobby.sh waits ≤30s for bind
 
 # Lobby codes are A-Z0-9 (router maxCodeLen=16). Validate any client-supplied
-# code before it reaches the shell or a registry file path.
-LOBBY_CODE_RE = re.compile(r"^[A-Z0-9]{1,16}$")
+# code before it reaches the shell or a registry file path. Anchor with \Z, not
+# $: Python's $ also matches just before a trailing newline, so "AAAA\n" would
+# slip through (callers strip today, but the validator must be correct on its
+# own — defense in depth against a future non-stripping caller).
+LOBBY_CODE_RE = re.compile(r"^[A-Z0-9]{1,16}\Z")
 
 # Always-on lobbies that must appear in the browser even though they weren't
 # spawned via launch-lobby.sh — most importantly the persistent MAIN lobby that
