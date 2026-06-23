@@ -395,7 +395,12 @@ class Sampler(threading.Thread):
 
 
 # ---- HTTP -------------------------------------------------------------------
-_LOG_BRIDGE_RE = re.compile(r"^\d{4,6}$")
+# Validates the user-supplied ?bridge= query param before it's interpolated into
+# a log file path in _serve_log. Anchor with \Z, not $: Python's $ also matches
+# just before a trailing newline (same class as serve-lobbies LOBBY_CODE_RE,
+# iter20). Unreachable via HTTP today (query isn't URL-decoded, request parsing
+# strips raw newlines) — defense in depth so the validator is correct standalone.
+_LOG_BRIDGE_RE = re.compile(r"^\d{4,6}\Z")
 
 
 class Handler(BaseHTTPRequestHandler):
