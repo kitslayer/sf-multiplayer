@@ -171,3 +171,11 @@ Per the standing directive. Mark confidence; promote confirmed ones to the main 
 - **Skeptic:** verified the gating actually denies (not just assumed); grep-confirmed IsAdmin-never-reset before claiming DISC-4. Did NOT ship a risky handshake change for a narrow latent gap — consistent with "ship only trivial/safe hardening" (cf. DISC-3 shipped, DISC-1/DISC-4 flagged).
 - No code change this iteration. (This hunt spanned two cron fires — completed + committed as one iteration.)
 
+### Iteration 10 — HUNT (deep): projectile sim + fire-input validation — solid, no bug  [code review]
+- **Hunted** the server-side projectile sim / hit-reg (Phase 6.17) + the fire-input path.
+- **All correct + well-defended:** `HandleClientFireWeapon` (:4999) — len-checked, `ownerSlot>3` rejected (:5011), **slot↔source-IP binding** rejects fires from a non-owner address (:5012-5024, anti-spoof), speed clamped + NaN/Inf-guarded (:5025), zero/NaN dir rejected+normalized (:5028), bullet damage **shadow-by-default** (:5047). `TestProjectileHit` (:5312) — owner excluded (no self-hit), swept segment `Clamp01`'d (:5326), proper sqr-distance. `TryProjectileWallHit` (:5249) — wall occlusion excludes player rigs (:5263) so the sphere-test still runs; wall-then-player ordering sound.
+- **Observation (not new):** fire-owner check compares IP only, not IP:port (:5020) → co-located same-IP players could fire-spoof each other. SAME documented per-IP limit as DISC-1 (intentional — recon fire-socket port ≠ game-socket port; shadow-default damage mitigates). Folded under DISC-1.
+- **META (now ~6 deep areas audited solid):** projectile joins damage/tick/admin/router/boxes as VERIFIED-solid. The codebase is genuinely well-defended; bug-yield is diminishing. Only 1 trivial hardening shipped (DISC-3); the rest are narrow/design leads (DISC-1/4/5).
+- **PIVOT for next iterations:** stop re-confirming code solidity — the highest-value remaining autonomous work is using **Option B (authorized) to runtime-verify the NEEDS-LIVE backlog**: drive a match via the debug bridge (`loadMap`→`spawnPlayer`→`teleport` to Y<-50) to capture a `[BOX-DIAG]` (P0-23) and observe void death (OPEN-1/2). Convert "needs kit" → "verified" where the bridge allows.
+- No code change.
+
