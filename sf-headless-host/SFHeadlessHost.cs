@@ -2947,7 +2947,14 @@ namespace SFHeadlessHost
             // client-processing latency). LookupTickSample retrieves the
             // historical positions; if not available (still in early ticks),
             // fall back to current.
-            if (attackerIdx != 255 && sender.Slot >= 0)
+            // sender.Slot bounded to 0..3 here (not just >=0): below we index
+            // sample.Alive[sender.Slot] / Positions[sender.Slot] into [4] arrays.
+            // AllocSlot caps slots at 0..3 today (so this is defense-in-depth, not
+            // a live bug), but the sibling handlers (e.g. :3918) all bound `> 3`
+            // locally rather than rely on that far-away invariant — match them so a
+            // future slot-allocation change can't turn this into an IndexOutOfRange
+            // that silently drops a client's damage.
+            if (attackerIdx != 255 && sender.Slot >= 0 && sender.Slot <= 3)
             {
                 Vector3 attPos, vicPos;
                 bool gotHistoric = false;
