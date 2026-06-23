@@ -56,7 +56,7 @@ Status: `TODO` / `WIP` / `CANDIDATE` (fix made, needs kit live test) / `VERIFIED
 | ID | Area | Status | Summary & pointer |
 |----|------|--------|-------------------|
 | BOX-1 | boxes | TODO | **P0-23** — server NSOs constantly fall into the void (`Y=-30..-50`, hundreds filtered/min). Backlog calls this *the real root cause of "boxes feel wrong"* — no client fix works while the server drops its own boxes. Diagnostic was staged. Likely `Physics.SyncTransforms()` after additive load, or floor colliders not registered headless. Verify: **C** (headless oracle + filtered-count / collider-summary log). `SFHeadlessHost.cs:~597`. |
-| BOX-2 | boxes | TODO | **P0-24** — auth player rig destroyed on `AdvanceRound`, never re-spawned for rounds 2+ (`rigs=0` after round 1). Backlog: ~5-line fix — re-arm `_authSpawnAt` / `_nsoInventoryDone` chain after the "cleared N rig(s)" line. Verify: **C** (headless oracle, advance a round, grep heartbeat `rigs=`). High value + tractable — **good first item.** |
+| BOX-2 | boxes | STALE | **P0-24 — NOT a live bug (static cross-file trace).** Backlog claimed the round-advance re-arm "never happens." In fact `AdvanceRound`(SFHeadlessHost.cs:3742)→`ResetOracleStateForRoundAdvance`(3783, resets the auth/nso flags + clears rigs)→`ScheduleOracleReloadCurrentMap`(SfMapTerrainHost.cs:1083) which re-arms the FULL cascade incl. `_oracleStartMatchFired=false`(1091). Cascade: StartMatch→CountDown→NSO inventory→`SpawnAuthoritativePlayersForAllClients`. Fixed by `472f447` (2026-05-24). **No code change** — adding a trigger would double-spawn rigs. Runtime confirm → kit punch list. |
 | LOBBY-1 | lobby | TODO | Lobby-switching backend. Suspect `sf-router/` (Go, has 4 test files) selection/registry logic + `serve-lobbies.py`. Reproduce switching bug as a failing go test if possible. Verify: **A** + **B**. |
 | LOBBY-2 | lobby | TODO | In-game browser UI / switching UX — `sf-server-browser/` (`ServerBrowserScreens.cs`, `LobbyOverlay.cs`). Verify: **D** (single-client overlay screenshot) or **E**. |
 | AC-1 | anticheat | TODO | Anti-cheat behavior. Investigate thresholds vs `stress-test-anticheat.py`. RESPECT the log-only / observation-only rules above — confirm calibration, don't enable enforcement. Verify: **A** (run stress test, grep `[anticheat]` warnings). `SFHeadlessHost.cs`. |
@@ -68,7 +68,15 @@ Status: `TODO` / `WIP` / `CANDIDATE` (fix made, needs kit live test) / `VERIFIED
 | OPEN-6 | boxes | TODO | Boxes disappear randomly. Same family as OPEN-5. Verify: **C** then **E**. |
 
 ## Punch list for kit — live 2-player tests only kit can run
-_(The loop appends precise repro + pass/fail criteria here as it produces CANDIDATE fixes. Empty until the first CANDIDATE lands.)_
+- **P0-24 — confirm rigs respawn rounds 2+.** 2 clients, start a match, score a kill so the round advances. After the new map loads, watch the oracle heartbeat: `rigs=` should return to the connected-client count (not stay `rigs=0`) and boxes should be pushable again. If `rigs=0 matchStarted=True` persists past round 1, P0-24 is real after all — reopen. (Static trace says the re-arm is intact; this only confirms it at runtime.)
 
 ## LOG — append-only, newest at the bottom
-_(One entry per iteration: ID, hypothesis, skeptic pass, fix, verification level + evidence path, confidence, commit hash.)_
+### Iteration 1 — BOX-2 / P0-24 — VERDICT: STALE (no code change)  [VERIFIED via static cross-file trace; runtime → kit]
+- **Picked because:** backlog flagged it high-value + "tractable ~5-line fix" + headless-verifiable.
+- **Hypothesis (backlog):** `AdvanceRound` clears the auth rig but never re-arms `_authSpawnAt`/`_nsoInventoryDone`, so `SpawnAuthoritativePlayersForAllClients` never re-fires → `rigs=0` rounds 2+.
+- **Skeptic pass (a) — disproof found:** the re-arm DOES exist. `AdvanceRound`(3742)→`ResetOracleStateForRoundAdvance`(3783) resets `_authSpawnDone`,`_authSpawnAt`,`_nsoInventoryDone`,`_nsoInventoryAt` + clears rigs; then `ScheduleOracleReloadCurrentMap`(SfMapTerrainHost.cs:1083) sets `_oracleStartMatchAt=now+0.5` AND `_oracleStartMatchFired=false`(1091) — the precise guard at SFHeadlessHost.cs:2091 I suspected might stick. Cascade re-fires end-to-end (2091→2106→2116→2127→`SpawnAuthoritativePlayersForAllClients`).
+- **Skeptic pass (c) — DOWNS of "fixing" it:** adding any extra spawn trigger would double-spawn authoritative rigs (2 `NetworkPlayer`s/slot) — a real regression. Correct action = NO CHANGE.
+- **Evidence:** SFHeadlessHost.cs:2091-2132, 3742-3805; SfMapTerrainHost.cs:1083-1100. Fixed by `472f447` ("Fix Oracle multiplayer round flow", 2026-05-24) — same day the backlog row was written, hence the staleness.
+- **Confidence P0-24 is stale:** ~88%. The cited mechanism is definitively false; residual ~12% = runtime timing, or `SpawnAuthoritativePlayersForAllClients` early-returning for some *other* reason — covered by the kit punch-list test.
+- **Follow-up:** `notes/BUGS_BACKLOG.md` P0-24 row should move to "fixed" once kit confirms at runtime.
+
