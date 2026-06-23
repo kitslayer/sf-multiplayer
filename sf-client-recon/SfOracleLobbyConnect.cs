@@ -355,6 +355,11 @@ namespace SFClientRecon
             if (IsMatchInProgress())
             {
                 Log.LogWarning($"[oracle-lobby] RequestJoinLobby({code}) ignored — a match is in progress. Leave to the menu first; switching lobbies mid-match re-inits the netstack under the live game and desyncs it. (issue #5)");
+                // (issue #5 UX) Surface WHY nothing happens — the server-browser's
+                // "Connecting…" toast otherwise just times out silently, which reads
+                // as "switching is broken". Mirrors the SELECT-ACK "not found" banner.
+                var bi = Instance;
+                if (RefOk(bi)) { bi._bannerText = "Can't switch lobbies mid-match — leave to the menu first."; bi._bannerUntilUtc = DateTime.UtcNow.AddSeconds(4); }
                 return;
             }
             SelectedLobbyCode = code;
