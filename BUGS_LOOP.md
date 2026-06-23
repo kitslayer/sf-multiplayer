@@ -241,3 +241,12 @@ Per the standing directive. Mark confidence; promote confirmed ones to the main 
 - **Security note (per the new brief):** purely cosmetic/read-only; no auth/handshake/validation touched. Confidence safe ~99%.
 - Code change: `serve-lobbies.py` (+occupancy render + 2 CSS rules).
 
+### Iteration 18 — sf-router: regression test for the lobby-DEATH flow teardown  [VERIFIED via A: go test]
+- **Context:** this was a STALE fire from the retired 10-min "polish loop" cron (deleted iter17; the live driver is now the 30-min "improve, security-practical" cron `6262b361`). Did one useful iteration anyway. The queue is largely NEEDS-LIVE (E) / BLOCKED / flagged-for-kit (DISC-4/5 security — left per the practical-security steer); OPEN-4/5/6's Option-B "stronger" test has low marginal value (no real pusher to trigger gameplay-driven breaks). So HUNTed a practical, fully-autonomously-verifiable win per the standing directive.
+- **Audited `sf-router` + `registry.go` from scratch:** solid — bounded flow/binding tables + per-IP cap (all but the global caps tested), idle+stale reaper, re-resolve-on-use (no stale backend), correct concurrency. `Registry.Lookup` serves an in-memory cache kept warm by `StartRefresh`; scans run off the hot path → no FS I/O under the router lock in production. No bug.
+- **Found a real COVERAGE gap (not a bug):** the lobby-DEATH path was untested. `TestStaleFlowReresolves` covers a lobby MOVING (resolve → new addr, ok=true); nothing covered a lobby GOING AWAY (resolve → !ok) — a distinct arm of `effectiveBackend`/`teardownStaleLocked` (`!ok` vs "backend changed"). Fires whenever a lobby crashes/is reaped: the flow must tear down and a later datagram must not rebuild without a fresh SELECT.
+- **Shipped:** `TestFlowTornDownWhenLobbyGone` (routing_test.go) — SELECT → flow established (Flows=1) → lobby code stops resolving → `teardownStaleLocked` → assert Flows=0 → later datagram gets no reply + no rebuild.
+- **VERIFIED (level A):** new test PASSES (death-teardown behavior is correct + now pinned); full `go test ./...` green (~1.5s); `go build` clean. (Had the behavior been wrong the test would have failed = a finding; it passed → behavior correct.)
+- **Skeptic ups/downs:** UP = pins an operationally-important untested path (lobby crash/reap) against regression. DOWN ≈ 0 — test-only (can't affect production), isolated (own echo + router). Confidence ~99%. Security: none — test-only, no production/auth change (per the brief).
+- Code change: `sf-router/routing_test.go` (+`TestFlowTornDownWhenLobbyGone`).
+

@@ -257,6 +257,73 @@ func TestStaleFlowReresolves(t *testing.T) {
 	}
 }
 
+// TestFlowTornDownWhenLobbyGone is the regression for the lobby-DEATH path,
+// distinct from TestStaleFlowReresolves' lobby-MOVED path: when a pinned lobby's
+// code stops resolving ENTIRELY (it crashed or was reaped — resolve returns
+// !ok, not a new address), the client's flow must be torn down so the router
+// stops forwarding to a dead backend, and a later datagram must NOT rebuild a
+// flow — the client has to re-SELECT a live lobby first. Exercises the `!ok`
+// arm of effectiveBackend/teardownStaleLocked, which the moved-backend test
+// (resolve still ok, different addr) never reaches.
+func TestFlowTornDownWhenLobbyGone(t *testing.T) {
+	echoA, stopA := startEcho(t, "A")
+	defer stopA()
+
+	var mu sync.Mutex
+	gone := false
+	resolve := func(code string) (*net.UDPAddr, bool) {
+		if code != "AAAA" {
+			return nil, false
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if gone {
+			return nil, false // lobby died — code no longer resolves
+		}
+		return echoA, true
+	}
+	cli, _, r := newRoutingTest(t, resolve)
+	defer r.Close()
+	defer cli.Close()
+
+	selectAndWaitAck(t, cli, "AAAA", 1)
+	if got := sendRecv(t, cli, "p"); got != "A:p" {
+		t.Fatalf("pre-death got %q want A:p", got)
+	}
+	if got := r.Stats().Flows; got != 1 {
+		t.Fatalf("flows = %d, want 1 before lobby death", got)
+	}
+
+	// Lobby AAAA dies — its code no longer resolves.
+	mu.Lock()
+	gone = true
+	mu.Unlock()
+
+	// Reaper-tick equivalent: a stale check tears down flows whose backend no
+	// longer resolves.
+	r.mu.Lock()
+	r.teardownStaleLocked(net.ParseIP("127.0.0.1"))
+	r.mu.Unlock()
+
+	if got := r.Stats().Flows; got != 0 {
+		t.Fatalf("flows = %d after lobby death, want 0 (dead-lobby flow not torn down)", got)
+	}
+
+	// A later datagram must not rebuild a flow (nothing live to resolve) and
+	// must get no reply.
+	if _, err := cli.Write([]byte("q")); err != nil {
+		t.Fatalf("write after death: %v", err)
+	}
+	_ = cli.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	buf := make([]byte, 2048)
+	if n, err := cli.Read(buf); err == nil {
+		t.Errorf("got reply %q after lobby death, want none (flow must not rebuild without a live SELECT)", string(buf[:n]))
+	}
+	if got := r.Stats().Flows; got != 0 {
+		t.Errorf("flows = %d after post-death datagram, want 0 (must not rebuild)", got)
+	}
+}
+
 // sendRecv writes payload and returns the string reply (2s deadline).
 func sendRecv(t *testing.T, cli *net.UDPConn, payload string) string {
 	t.Helper()
