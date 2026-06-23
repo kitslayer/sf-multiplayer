@@ -36,27 +36,38 @@ def main() -> int:
     args = ap.parse_args()
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.settimeout(args.timeout)
     try:
-        pkt = build_ping()
         t0 = time.time()
-        sock.sendto(pkt, (args.host, args.port))
-        try:
-            data, _ = sock.recvfrom(1500)
-        except socket.timeout:
-            print(f"DOWN — no response from {args.host}:{args.port} within {args.timeout}s")
-            return 1
-        rtt_ms = (time.time() - t0) * 1000
-        if len(data) < 14:
-            print(f"DOWN — bad reply ({len(data)} bytes)")
-            return 1
-        msg_type = data[4]
-        # MsgType 1 = PingResponse. Some impls just echo Ping back as 0.
-        if msg_type not in (0, 1):
-            print(f"WARN — got msgType={msg_type} (expected 0/1) but server is alive")
+        deadline = t0 + args.timeout
+        # UDP is lossy: a single dropped Ping would false-report DOWN and could
+        # trigger a needless restart/alert in a watchdog/monitor. Resend within
+        # the total --timeout budget (every <=0.5s) so transient loss doesn't
+        # flap — a real outage still times out and reports DOWN as before.
+        attempt_timeout = min(0.5, args.timeout)
+        pings = 0
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                print(f"DOWN — no response from {args.host}:{args.port} within {args.timeout}s ({pings} ping(s))")
+                return 1
+            sock.settimeout(min(attempt_timeout, remaining))
+            sock.sendto(build_ping(), (args.host, args.port))
+            pings += 1
+            try:
+                data, _ = sock.recvfrom(1500)
+            except socket.timeout:
+                continue  # lost or slow — resend until the budget runs out
+            rtt_ms = (time.time() - t0) * 1000
+            if len(data) < 14:
+                print(f"DOWN — bad reply ({len(data)} bytes)")
+                return 1
+            msg_type = data[4]
+            # MsgType 1 = PingResponse. Some impls just echo Ping back as 0.
+            if msg_type not in (0, 1):
+                print(f"WARN — got msgType={msg_type} (expected 0/1) but server is alive")
+                return 0
+            print(f"OK — {args.host}:{args.port} replied in {rtt_ms:.1f}ms (msgType={msg_type}, {pings} ping(s))")
             return 0
-        print(f"OK — {args.host}:{args.port} replied in {rtt_ms:.1f}ms (msgType={msg_type})")
-        return 0
     finally:
         sock.close()
 

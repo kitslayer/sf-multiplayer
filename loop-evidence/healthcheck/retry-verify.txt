@@ -1,0 +1,20 @@
+iter19 — healthcheck.py now resends the Ping within the --timeout budget so a
+single dropped UDP packet doesn't false-report DOWN (which could trigger a
+needless watchdog restart / monitor alert).
+
+Verified 2026-06-23 functionally with a fake UDP pong responder (no oracle):
+
+1) OK case (responder always replies, :14501):
+   OK — 127.0.0.1:14501 replied in 0.4ms (msgType=1, 1 ping(s))   exit=0
+
+2) RETRY case (responder DROPS the first 2 pings = simulated UDP loss, :14502):
+   OK — 127.0.0.1:14502 replied in 1001.3ms (msgType=1, 3 ping(s))  exit=0
+   ^ the OLD single-ping code would have sent 1 ping, lost it, returned DOWN.
+     NEW code resent and got the 3rd reply within the 2s budget → OK.
+
+3) DOWN case (dead port :14599, --timeout 1):
+   DOWN — no response from 127.0.0.1:14599 within 1.0s (2 ping(s))  exit=1
+   ^ a real outage still correctly reports DOWN within the timeout budget.
+
+No PII (loopback, synthetic ports). The total --timeout contract is preserved
+(deadline-bounded loop); validation (len<14 / msgType) unchanged.
