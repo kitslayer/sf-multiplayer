@@ -1,0 +1,6 @@
+AC-1 live test 2026-06-22 — rate-guard calibration (test oracle, port 1437)
+Sent 500 pps x6s; thresholds All=240 PlayerUpd=120 Damage=30 Object=480; SF_ANTICHEAT_ENFORCE unset (observe-only)
+[Warning:SFHeadlessHost] [anticheat] 127.0.0.1:<port> exceeded total rate (241/s) — violation #1. Observation only; not dropping.
+[Warning:SFHeadlessHost] [anticheat] 127.0.0.1:<port> exceeded total rate (497/s) — violation #2497. Observation only; not dropping.
+peak rx (heartbeat window):
+[Info   :SFHeadlessHost] heartbeat: scene=MainScene tick=33 | clients=0 spawned=0 | rx=0.0/s snap=0.0/s input=0.0/s | rigs=0 matchStarted=False

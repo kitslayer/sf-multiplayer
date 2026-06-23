@@ -5,6 +5,8 @@
 ## Mission
 Aggressive full-fix pass on three problem areas kit flagged as broken: **(1)** lobby browser + lobby-switching, **(2)** server-authoritative boxes, **(3)** anti-cheat. Attempt real end-to-end fixes — *including* parts that ultimately need kit's live 2-player test — but always be honest about which level of verification each fix actually reached.
 
+**STANDING DIRECTIVE (kit, 2026-06-22): do NOT limit yourself to the seeded queue — there is "way more hidden in plain sight or hidden deep." Actively HUNT.** Every iteration, while investigating your chosen item, code-review the surrounding code + the paths it touches and log any new suspicions in the **DISCOVERY queue** (with a confidence + evidence). Promote confirmed ones to the main queue. Stay skeptical of your OWN finds too — a "bug" that turns out to be a sampling artifact or an intentional trade-off must be marked DISPROVEN/by-design, not shipped (see AC-1's rx=141 false alarm).
+
 ## HARD RULES — never violate
 - **KEEP the quick-draw / pickup-instant-shot behavior** (pickup with no cooldown + no recoil). It is *wanted* in the comp scene. Do NOT "fix" it, ever.
 - **The anti-cheat low-damage-kill kick is intentionally log-only** (gated behind `SF_AC_KICK=1`). Anticheat is observation-only by default (`SF_ANTICHEAT_ENFORCE=1` flips it) — that is **by design** (backlog P2-6). Do NOT "re-enable" either as if it were a bug.
@@ -73,13 +75,20 @@ Status: `TODO` / `WIP` / `CANDIDATE` (fix made, needs kit live test) / `VERIFIED
 | BOX-2 | boxes | STALE | **P0-24 — NOT a live bug (static cross-file trace).** Backlog claimed the round-advance re-arm "never happens." In fact `AdvanceRound`(SFHeadlessHost.cs:3742)→`ResetOracleStateForRoundAdvance`(3783, resets the auth/nso flags + clears rigs)→`ScheduleOracleReloadCurrentMap`(SfMapTerrainHost.cs:1083) which re-arms the FULL cascade incl. `_oracleStartMatchFired=false`(1091). Cascade: StartMatch→CountDown→NSO inventory→`SpawnAuthoritativePlayersForAllClients`. Fixed by `472f447` (2026-05-24). **No code change** — adding a trigger would double-spawn rigs. Runtime confirm → kit punch list. |
 | LOBBY-1 | lobby | BLOCKED | Backend switching is **sound** (`go test` green; SELECT/rebind/stale-reresolve all tested). The one switching issue found = the **DOCUMENTED, accepted per-IP limit**: two same-IP players in DIFFERENT lobbies mis-route the non-SELECTing game socket (notes/ROUTER.md:93-96, ROUTER_LIVE_TEST.md:60). Reproduced + pinned as a skipped regression in `colocated_gamesocket_test.go`. Real fix is client-side (out of router scope). **BLOCKED on kit:** is this your symptom (two LOCAL instances, different lobbies)? If not, need the exact repro → Punch list. |
 | LOBBY-2 | lobby | TODO | In-game browser UI / switching UX — `sf-server-browser/` (`ServerBrowserScreens.cs`, `LobbyOverlay.cs`). Verify: **D** (single-client overlay screenshot) or **E**. |
-| AC-1 | anticheat | TODO | Anti-cheat behavior. Investigate thresholds vs `stress-test-anticheat.py`. RESPECT the log-only / observation-only rules above — confirm calibration, don't enable enforcement. Verify: **A** (run stress test, grep `[anticheat]` warnings). `SFHeadlessHost.cs`. |
+| AC-1 | anticheat | VERIFIED | **Live-tested 2026-06-22** (Option B oracle, 500pps→port 1437): rate-guard fires at the documented threshold (`exceeded total rate (241/s)` then `(497/s)`) and is **observe-only** ("not dropping") with `SF_ANTICHEAT_ENFORCE` unset — exactly as designed. Thresholds All=240/PlayerUpd=120/Damage=30/Object=480 (SFHeadlessHost.cs:3386-3389). Evidence: `loop-evidence/AC-1/`. No change. Self-check: an early `rx=141/s` heartbeat looked like packet loss but was a mid-ramp sample — guard confirmed 497/s received → DISPROVEN. |
 | OPEN-1 | boxes/dmg | TODO | Can't die to void. Trace void damage through `ValidateDamagePacket` (void = self-attacker, should pass). Verify: **C** then **E**. |
 | OPEN-2 | boxes/dmg | TODO | Lava no damage — same family as OPEN-1. Verify: **C** then **E**. |
 | OPEN-3 | boxes/dmg | TODO | Can't hit guns out of players' hands. Trace `PktPlayerForceAddedAndBlock` / damage-type filtering in `SfDispatch`. Verify: **C** then **E**. |
 | OPEN-4 | boxes | TODO | Chains randomly break. Likely fixed by P0-11 revert (`4affabc`) — verify it stays fixed. Verify: **C** then **E**. |
 | OPEN-5 | boxes | TODO | Ice randomly breaks. Likely fixed by dynamic-NSO revert. Verify: **C** then **E**. |
 | OPEN-6 | boxes | TODO | Boxes disappear randomly. Same family as OPEN-5. Verify: **C** then **E**. |
+
+## DISCOVERY queue — bugs/leads the loop found by HUNTING (not from the backlog)
+Per the standing directive. Mark confidence; promote confirmed ones to the main queue; mark false alarms DISPROVEN.
+| ID | Area | Confidence | Lead |
+|----|------|-----------|------|
+| DISC-1 | anticheat | LOW (eval, partly by-design) | Rate-guard keys on `IP:port` (per-endpoint), not per-IP (SFHeadlessHost.cs:3398). A source-port-randomizing flood from ONE IP makes a new `RateGuard` per port → fills the 256 cap → emergency-prune idle → if still full, NEW sources are fail-closed dropped (3402-3423). The cap is an *intentional* anti-OOM mitigation (comment 3381-3383), but the residual is: a legit NEW client joining *during* such a flood could be dropped, and per-endpoint keying means the per-source rate limits never trip for the spoofer. Evaluate per-IP aggregation / connection-level gating. Found while verifying AC-1. |
+| DISC-X | — | — | (next hunt findings append here) |
 
 ## Punch list for kit — live 2-player tests only kit can run
 - **⚠ DECISION (unblocks the loop): how should it verify runtime-gated bugs?** Three top items (P0-24, LOBBY-1, P0-23) turned out code-complete; the rest (boxes, anti-cheat, OPEN-1..6) need a *running oracle* to verify. Pick one — **(A)** kit drops in live logs from a normal session (a `[BOX-DIAG]` line, the oracle heartbeat, any `[anticheat]` lines); or **(B)** kit OKs the loop running the headless oracle itself for level-C checks (process-risky — needs a safe port + confirmation no live/local game is using it). Until then the loop sticks to code-only investigation (OPEN-1..6 damage paths), which needs neither.
@@ -125,4 +134,12 @@ Status: `TODO` / `WIP` / `CANDIDATE` (fix made, needs kit live test) / `VERIFIED
 - **Verified live:** launched an isolated oracle (bridge 1441 / port 1437 / own prefix+logfile); it booted under Proton (Unity log active), then torn down cleanly — `loop144[1]`=0, game-exe=0, proton=0, log stale. No collateral (only ever killed by the 1441 marker / explicit PIDs; the unrelated SSH job ended on its own).
 - **Footgun caught + fixed:** a plain `pkill -f 'sf-oracle-unity-1441'` matched the iteration's OWN shell → killed it mid-cleanup (exit 144) → orphan risk. Procedure now mandates `setsid`+PGID kill, bracket-trick patterns, and a `timeout 200` backstop (see the Option-B section).
 - No queue bug this iteration; hardened the Option-B procedure so unattended cron runs cannot accumulate processes or touch kit's game. Next code-progressable item: OPEN-1..6 damage paths.
+
+### Iteration 6 — AC-1 — VERIFIED live via Option B + first HUNT finding  [VERIFIED via C: live oracle + stress test]
+- **Picked because:** cleanest Option-B target (purpose-built stress test, no 2nd client needed); first real use of the now-authorized headless-oracle capability.
+- **Ran:** launched isolated oracle (bridge 1441/port 1437, hardened procedure), booted clean (14+ heartbeats), fired `stress-test-anticheat.py --pps 500 --duration 6 --port 1437`, grepped the plugin log, then **cleaned up (0 procs after)**.
+- **Result:** rate-guard fired at threshold — `[anticheat] exceeded total rate (241/s)` then `(497/s) ... Observation only; not dropping`. Calibrated + observe-only as designed. AC-1 = VERIFIED, no change. Evidence in `loop-evidence/AC-1/`.
+- **Skeptic self-check (DISPROVEN a false find):** an early heartbeat showed `rx=141/s` for a 500pps send → looked like ~70% packet loss. The fuller log (`497/s`, violation #2497) shows the oracle received the full rate; the 141 was a mid-ramp sample. NOT a bug — did not ship it.
+- **HUNT (per the new standing directive):** logged **DISC-1** — AC rate-guard keys per-`IP:port`, so a source-port-randomizing flood evades per-source limits + can fail-closed-drop legit new clients. Low confidence / partly by-design; flagged for evaluation, not "fixed."
+- **Process safety:** Option-B procedure exercised end-to-end (orphan-guard → setsid/PGID launch → drive → PGID cleanup → verify 0). Clean.
 
