@@ -1224,7 +1224,12 @@ namespace SFHeadlessHost
             int n = 2;
             if (entries == null) return n;
             foreach (var e in entries)
-                n += 8 + 1 + (e.Data?.Length ?? 0);
+                // Must mirror WriteMapStateSection's per-entry size EXACTLY: it
+                // caps the payload at MapStateMaxPayload, so the alloc must too,
+                // else an oversized payload leaves trailing zero slack in the body
+                // (currently harmless — write <= alloc — but the invariant should
+                // hold so a future write-side change can't under-allocate).
+                n += 8 + 1 + Math.Min(MapStateMaxPayload, e.Data?.Length ?? 0);
             return n;
         }
 
