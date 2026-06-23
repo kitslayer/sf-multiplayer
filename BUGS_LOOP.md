@@ -36,6 +36,19 @@ Aggressive full-fix pass on three problem areas kit flagged as broken: **(1)** l
 - **D — Single-client in-game screenshot (display-coupled, process-risky).** Launch ONE SF client against a local test oracle, screenshot the in-game browser overlay / map. Only if safe; obey process discipline; label as partial.
 - **E — Two-player live (NOT autonomous — cannot be done in the loop).** Do NOT fake it. Write it into the **Punch list for kit** with a precise repro + pass/fail criterion.
 
+### Running the headless oracle — Option B (AUTHORIZED by kit 2026-06-22)
+The loop MAY run a LOCAL headless oracle for level-C/D checks. It is process-risky (killing kit's game twice is on record), so follow this EXACTLY:
+- **Dedicated isolation marker — ALWAYS.** Bridge `1441`, game port `1437`, prefix `/tmp/sf-oracle-prefix-loop1441`, logfile `/tmp/sf-oracle-unity-1441.log`. The token `1441`/`loop1441` is the ONLY thing you may target/kill. The live oracle (`.115`, remote machine) and kit's Steam game never use it.
+- **1. ORPHAN GUARD (FIRST, every time):** reap any leftover loop oracle from a crashed prior iteration — `kill -KILL -- -$(cat /tmp/sf-oracle-loop-1441.pgid 2>/dev/null) 2>/dev/null`, then bracket-trick sweep `pkill -KILL -f 'oracle-unity-144[1]'` and `pkill -KILL -f 'prefix-loop144[1]'`; confirm `pgrep -fc 'loop144[1]'` is `0`. Anti-accumulation net for unattended runs.
+- **2. Precheck:** `pgrep -afi 'stickfight|proton'` and log it. If kit's game is up it's still safe (you only ever touch the `1441` marker), but note it.
+- **3. Launch in its OWN process group + a HARD TIMEOUT** (so the whole tree is killable by PGID and self-dies even if cleanup fails): `setsid bash -c 'echo $$ > /tmp/sf-oracle-loop-1441.pgid; exec timeout 200 env SFHEADLESS_BRIDGEPORT=1441 SFHEADLESS_PORT=1437 SFHEADLESS_DEBUG=1 SFHEADLESS_PREFIX=/tmp/sf-oracle-prefix-loop1441 bash /home/miles/sf-multiplayer/launch-sf-headless.sh' >/tmp/sf-oracle-loop-1441.out 2>&1 & disown` (verified 2026-06-22: boots under Proton in well under 200s).
+- **4. Wait for boot via Monitor or a bounded poll** on `/tmp/sf-oracle-unity-1441.log` for a boot/heartbeat line — do NOT bare-`sleep`.
+- **5. Drive via the debug bridge** (UDP → `127.0.0.1:1441`) to probe WITHOUT a real client: `loadMap <n>` → `spawnPlayer` → `boxes`/`rigs` dumps; or read the periodic `[BOX-DIAG]` once a match has started. (Match-start needs a kill/`/start`/client; if unreachable via bridge, the `boxes`/`rigs` dumps still give NSO state.)
+- **6. MANDATORY cleanup (END + on ANY error path):** `kill -KILL -- -$(cat /tmp/sf-oracle-loop-1441.pgid 2>/dev/null) 2>/dev/null`, then bracket-trick sweep `pkill -KILL -f 'oracle-unity-144[1]'`; confirm `pgrep -fc 'loop144[1]'` == `0`. NEVER leave it running between iterations.
+- **NEVER** blanket-`pkill` stickfight/proton/wine without the `1441` marker; never target by install path; never touch a process that doesn't match `1441`.
+- **⚠ SELF-MATCH HAZARD (proven in the 2026-06-22 smoke test):** NEVER `pkill -f` with a plain marker your OWN command line contains (e.g. `pkill -f 'sf-oracle-unity-1441'`) — pkill matches the iteration's own shell and kills it mid-cleanup (exit 144), orphaning the oracle. ALWAYS kill by saved PID/PGID or the bracket-trick (`'oracle-unity-144[1]'`), and verify with `pgrep -fc 'loop144[1]'`. Same trap if a verify command echoes plain trigger words ('StickFight'/'proton') — they self-match `pgrep -af`.
+- **Scrub evidence:** copy only the relevant `[BOX-DIAG]`/dump lines into `loop-evidence/`, IP/username/SteamID redacted (public-`main` rule).
+
 ## Commit message format
 ```
 <scope>: <one-line summary>  [VERIFIED via A/B/C/D | CANDIDATE — needs E]
@@ -106,4 +119,10 @@ Status: `TODO` / `WIP` / `CANDIDATE` (fix made, needs kit live test) / `VERIFIED
 - **Skeptic c — DOWNS of each candidate change, all rejected:** (1) default the safety floor ON → flat 2000×2000 Y=0 collider breaks pit/multi-level maps; (2) speculative static-collider re-registration → unverifiable without runtime, risks side effects; (3) extend BOX-DIAG → already reports floor layer + crate physics, redundant.
 - **Verdict:** no safe high-confidence code change. Runtime-gated — one live `[BOX-DIAG]` line resolves it. Confidence code is complete ~85%.
 - **META (3rd in a row):** P0-24, LOBBY-1, P0-23 are all code-complete/stale + runtime-gated; the autonomous code-only surface (router) is exhausted (LOBBY-1 blocked). To keep finding *fixable* bugs the loop needs (A) kit's live logs or (B) go-ahead to run the headless oracle. Code-only damage-path investigation (OPEN-1..6) is still progressable → next iteration.
+
+### Iteration 5 — Option B AUTHORIZED + safety-verified  [smoke test passed; self-match footgun fixed]
+- kit chose **B** (loop may run the local headless oracle) and is away → safety for unattended runs is the priority.
+- **Verified live:** launched an isolated oracle (bridge 1441 / port 1437 / own prefix+logfile); it booted under Proton (Unity log active), then torn down cleanly — `loop144[1]`=0, game-exe=0, proton=0, log stale. No collateral (only ever killed by the 1441 marker / explicit PIDs; the unrelated SSH job ended on its own).
+- **Footgun caught + fixed:** a plain `pkill -f 'sf-oracle-unity-1441'` matched the iteration's OWN shell → killed it mid-cleanup (exit 144) → orphan risk. Procedure now mandates `setsid`+PGID kill, bracket-trick patterns, and a `timeout 200` backstop (see the Option-B section).
+- No queue bug this iteration; hardened the Option-B procedure so unattended cron runs cannot accumulate processes or touch kit's game. Next code-progressable item: OPEN-1..6 damage paths.
 
