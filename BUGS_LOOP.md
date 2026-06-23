@@ -79,9 +79,9 @@ Status: `TODO` / `WIP` / `CANDIDATE` (fix made, needs kit live test) / `VERIFIED
 | OPEN-1 | dmg | NEEDS-LIVE | **Damage path is code-correct.** `ValidateDamagePacket` allows env (`attackerIdx==255`, :2920) and skips its distance check for it (:2950); self-attacker would also pass (dist 0). Killing-blow `PktPlayerTookDamage` is echoed to the victim **incl. sender** (:2615-2617) so they `Die()`; `PktPlayerFallOut` → `ScheduleRoundAdvanceOnDeath` (:2649). Client reconciliation does NOT touch the local player (shift-correction disabled, SFClientRecon.cs:2215-2225) → cannot rescue them from the void. No code bug → live confirm only. |
 | OPEN-2 | dmg | NEEDS-LIVE | Lava — same code path + verdict as OPEN-1 (env/self damage validates; relay echoes the killing blow; no reconciliation interference). No code bug → live confirm. |
 | OPEN-3 | boxes/dmg | TODO | Can't hit guns out of players' hands. Trace `PktPlayerForceAddedAndBlock` / damage-type filtering in `SfDispatch`. Verify: **C** then **E**. |
-| OPEN-4 | boxes | TODO | Chains randomly break. Likely fixed by P0-11 revert (`4affabc`) — verify it stays fixed. Verify: **C** then **E**. |
-| OPEN-5 | boxes | TODO | Ice randomly breaks. Likely fixed by dynamic-NSO revert. Verify: **C** then **E**. |
-| OPEN-6 | boxes | TODO | Boxes disappear randomly. Same family as OPEN-5. Verify: **C** then **E**. |
+| OPEN-4 | boxes | LIKELY-FIXED (partial runtime) | Chains randomly break. **iter12 Option-B probe:** across several no-input matches (random maps), **0 `[destruction] Skip server-originated` lines** (server emits no chain/ice stress-break destructions to forward) + SFBoxFix NSO-vs-NSO destruction guard active (`[CAJAS-2]`). Suggestive of fixed. CAVEAT: maps random (chain-heavy presence unconfirmed), no real client, short matches. Stronger test: `loadMap` to a known chain index + real-client check. Evidence: `loop-evidence/OPEN-4-5-6/`. |
+| OPEN-5 | boxes | LIKELY-FIXED (partial) | Ice randomly breaks — same family + same iter12 evidence as OPEN-4 (0 server destructions; SFBoxFix NSO-vs-NSO guard active). |
+| OPEN-6 | boxes | LIKELY-FIXED (partial) | Boxes disappear randomly — same family as OPEN-5; same iter12 partial evidence. |
 
 ## DISCOVERY queue — bugs/leads the loop found by HUNTING (not from the backlog)
 Per the standing directive. Mark confidence; promote confirmed ones to the main queue; mark false alarms DISPROVEN.
@@ -186,5 +186,12 @@ Per the standing directive. Mark confidence; promote confirmed ones to the main 
 - **Skeptic/caveats:** one map (57); `rigs=0` (server-solo physics, no pusher); `crate={no-crate}` sampled — but `void(y<-30)` counts ALL NSOs, none void. Other maps could differ; the SYSTEMIC fear is disproven, not every map.
 - **Capability unlocked:** synthetic-kill → match-start makes match-gated physics checks autonomously testable (reusable). Corrects my iter11-mid pessimism — autonomous match-gated runtime-verify IS feasible; validates the iter10 pivot.
 - **Cleanup:** killed by marker — 0 orphans, 0 `ckFight.exe` verified (the transient "1" was my oracle dying). `b3btyoros` bg-task "failed exit 1" = my `pkill` killing its wrapper (expected). No collateral; kit's game not present.
+- No code change.
+
+### Iteration 12 — Option B: OPEN-4/5/6 (random chain/ice/box breaks) — no server-side spurious destruction observed (PARTIAL)  [runtime probe]
+- **Method:** launch (run_in_background) → synthetic `666.666` kill → match-start → no input → watch `[destruction] Skip server-originated` + NSO trend.
+- **Result:** **0** `[destruction] Skip server-originated` lines across the run (server emits no chain/ice stress-break destructions to forward); **SFBoxFix NSO-vs-NSO destruction guard confirmed active** (`[CAJAS-2] … no longer destroys`); NSOs stable, `void=0`. No spurious server-side destruction on any sampled map. Evidence: `loop-evidence/OPEN-4-5-6/`.
+- **Skeptic / honest hedge (WEAKER than P0-23):** the synthetic-client match doesn't sustain (no real spawned player → maps cycled randomly via round-advance), so I did NOT confirm a chain/ice-heavy map was among those sampled, and there's no real client to see the client-side view. So: "no server-originated random breaks observed across sampled maps + the guard is active" — NOT a full clearance. The 91→1/→2 NSO swings were map churn, not destruction.
+- **Stronger follow-up (next iteration / kit):** `loadMap` to a known chain/ice index → confirm 0 destructions *there*; plus a real-client live check.
 - No code change.
 

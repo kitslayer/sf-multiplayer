@@ -1,0 +1,11 @@
+OPEN-4/5/6 (chains/ice/boxes randomly break) — runtime probe 2026-06-22 (Option B)
+Method: synthetic-kill match-start, no input, observe across several (random) maps.
+- [destruction] Skip server-originated lines (server chain/ice stress-breaks suppressed): 0
+0
+- SFBoxFix NSO-vs-NSO destruction guard:
+[Info   :  SFBoxFix] [CAJAS-2] Patched DestructiblePiece.OnCollisionEnter — NSO-vs-NSO no longer destroys.
+- NSO stability (void=0 throughout):
+[Info   :SFHeadlessHost] [BOX-DIAG] nsos=2 void(y<-30)=0 y=[-2.3,69.7] rigs=0 scene=<s> colliders=28 gravityY=-20.0 floor@center=[y=25.2,obj='Death',layer=24,trig=False] floor@crate=[n/a] crate={no-crate}
+[Info   :SFHeadlessHost] [BOX-DIAG] nsos=2 void(y<-30)=0 y=[-7.5,69.7] rigs=0 scene=<s> colliders=28 gravityY=-20.0 floor@center=[y=25.2,obj='Death',layer=24,trig=False] floor@crate=[n/a] crate={no-crate}
+[Info   :SFHeadlessHost] [BOX-DIAG] nsos=2 void(y<-30)=0 y=[-7.5,69.7] rigs=0 scene=<s> colliders=28 gravityY=-20.0 floor@center=[y=25.2,obj='Death',layer=24,trig=False] floor@crate=[n/a] crate={no-crate}
+CAVEATS: maps random (chain-heavy presence unconfirmed); no real client; short matches.
