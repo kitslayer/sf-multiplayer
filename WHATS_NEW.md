@@ -1,6 +1,6 @@
-# What's new — 2026-06-22→23 autonomous polish loop (merged to `main`, not yet deployed)
+# What's new — 2026-06-22→23 autonomous polish loop (21 iters, consolidated to `main` + pushed to `origin`; not yet deployed)
 
-A 15-iteration autonomous "polish loop" against three areas flagged as broken — lobby browser/switching, server-authoritative boxes, anti-cheat — under a hunt-and-be-skeptical protocol (full log + evidence in [`BUGS_LOOP.md`](BUGS_LOOP.md), captures in `loop-evidence/`). Most of the seeded backlog turned out **code-correct or by-design**; the loop shipped four small, low-risk fixes and pinned one regression test. All compile-verified (host + client `dotnet build` clean, `go build`/`go test` green); the box/anti-cheat/death verdicts were checked at the highest feasible *autonomous* level (synthetic packets against a local headless oracle), so the 2-player confirmations remain on kit's punch list.
+A 21-iteration autonomous "polish loop" against three areas flagged as broken — lobby browser/switching, server-authoritative boxes, anti-cheat — under a hunt-and-be-skeptical protocol (full log + evidence in [`BUGS_LOOP.md`](BUGS_LOOP.md), captures in `loop-evidence/`). Most of the seeded backlog turned out **code-correct or by-design**; the loop shipped a series of small, low-risk fixes (below) and stood up the project's first Python test harness. All compile-verified (host + client `dotnet build` clean, `go build`/`go test` + `unittest` green); the box/anti-cheat/death verdicts were checked at the highest feasible *autonomous* level (synthetic packets against a local headless oracle), so the 2-player confirmations remain on kit's punch list. **The 30-min driver cron is now stopped and the work is consolidated onto `main` + pushed to `origin`; a `.115` deploy + version bump still await kit's 2-player punch-list.**
 
 **Shipped fixes**
 - **Lobby browser `/favicon.ico` → 204 (`serve-lobbies.py`).** Killed the lone console 404 on the web lobby-browser page (Playwright-verified, console errors 1→0).
@@ -8,6 +8,13 @@ A 15-iteration autonomous "polish loop" against three areas flagged as broken �
 - **Damage-handler slot bound (`SFHeadlessHost.cs`, DISC-6, defense-in-depth).** The historic-position lookup now bounds `sender.Slot` to `0..3` before indexing the `[4]` tick-sample arrays, matching the sibling handlers (`AllocSlot` already caps slots today, so this is future-proofing, not a live bug).
 - **Snapshot mapState alloc matches the write cap (`SfMapTerrainHost.cs`, DISC-6, defense-in-depth).** The size estimator now `Math.Min`s each entry's payload to `MapStateMaxPayload`, exactly mirroring the writer, so a future write-side change can't under-allocate the snapshot body.
 - **Pinned regression test (`sf-router/colocated_gamesocket_test.go`).** A `t.Skip`'d characterization of the *documented, accepted* per-IP game-socket limit (two same-IP players in different lobbies mis-route the non-SELECTing game socket) — un-skip when the client-side fix lands.
+
+**Shipped fixes — iters 16–21 (continuation, same loop)**
+- **OPEN-3 rx telemetry (`SFHeadlessHost.cs`, iter16).** The "hit guns out of hands" relay is code-correct; added receive-side telemetry so the mechanic can be confirmed on a live session.
+- **Web lobby browser shows live players/capacity (iter17).** Each lobby card now reads `N/4 players · full` from the registry, not just a code/port.
+- **sf-router lobby-death teardown regression test (`routing_test.go`, iter18).** Pins the flow-teardown path when a lobby dies, so a future routing change can't silently leak flows.
+- **`healthcheck.py` retries the liveness Ping within the timeout budget (iter19).** A single dropped UDP Ping no longer trips a false "down"; it retries inside the existing deadline.
+- **Two input-validator hardenings + the project's first Python tests (iter20–21).** `serve-lobbies` `LOBBY_CODE_RE` and `sf-monitor` `_LOG_BRIDGE_RE` both moved `$`→`\Z` (Python's `$` also matches just before a trailing newline) so each path/registry-input validator is correct standalone; each is pinned by a red→green `unittest` (`test_serve_lobbies.py`, `test_sf_monitor.py`).
 
 **Investigated → no code change (sound / by-design / needs live confirm)**
 - **Boxes-fall-to-the-void (P0-23):** runtime-verified NOT reproducing on a live headless oracle — colliders register, floor present, `void(y<-30)=0` over a full match (one map; the systemic fear is disproven).
