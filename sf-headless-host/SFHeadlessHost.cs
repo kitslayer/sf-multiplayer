@@ -894,6 +894,7 @@ namespace SFHeadlessHost
             }
             _sceneLoadRealtime = Time.realtimeSinceStartup;
             _nsoSpawnPos.Clear();
+            _nsoVoidResetCount.Clear();   // per-NSO-index void-rescue budget — reset with the map (ids get reassigned)
             _nsoPeriodicKeyframeNextAt = Time.realtimeSinceStartup + 1f;
             Log.LogInfo($"[P6.9 settle] Scene loaded: '{scene.name}' (buildIndex={scene.buildIndex}); starting settle coroutine.");
             StartCoroutine(SettlePhaseCoroutine(scene));
@@ -977,6 +978,7 @@ namespace SFHeadlessHost
             _nsoLastBroadcastPos.Clear();
             _nsoLastMovedAt.Clear();
             _nsoSpawnPos.Clear();
+            _nsoVoidResetCount.Clear();   // per-NSO-index void-rescue budget — reset with the map (ids get reassigned)
             RebuildNsoIndexCache();
             _nsoCacheLastRebuildAt = Time.realtimeSinceStartup;
             MarkSceneNsosMovedAfterSettle();
@@ -1088,6 +1090,7 @@ namespace SFHeadlessHost
                     inst._nsoLastBroadcastPos.Clear();
                     inst._nsoLastMovedAt.Clear();
                     inst._nsoSpawnPos.Clear();
+                    inst._nsoVoidResetCount.Clear();
                     inst.RebuildNsoIndexCache();
                     inst._nsoCacheLastRebuildAt = Time.realtimeSinceStartup;
                 }
@@ -3761,6 +3764,14 @@ namespace SFHeadlessHost
 
         private void AdvanceRound()
         {
+            if (_allLandfallMaps.Length == 0)
+            {
+                // Misconfig guard: SF_EXCLUDE_MAPS can empty the pool, and
+                // _mapRng.Next(0)==0 → _allLandfallMaps[0] would throw (caught by
+                // Update, but it wedges round progression). Bail cleanly instead.
+                Log.LogError("[SF] AdvanceRound: no playable Landfall maps (SF_EXCLUDE_MAPS too broad) — staying on the current scene.");
+                return;
+            }
             ResetDeathTrackingForNewRound();
             AcResetRound();   // (B2) reset behavioral-AC accumulators at the real round boundary
             _roundCounter++;
@@ -3819,6 +3830,7 @@ namespace SFHeadlessHost
             // `recentlyActive` again — see Bug B in
             // notes/bug-investigations/2026-05-24_v0.3.4-session-bugs.md.
             _nsoSpawnPos.Clear();
+            _nsoVoidResetCount.Clear();   // per-NSO-index void-rescue budget — reset with the map (ids get reassigned)
             _nsoByIndexCache.Clear();
             _nsoCacheLastRebuildAt = -1f;
             ClearAuthoritativeRigsForRoundAdvance();
@@ -4039,6 +4051,10 @@ namespace SFHeadlessHost
                         // reconnected player's death won't advance the round).
                         _slotV26Endpoint.Remove(other.Slot);
                         _deathSlotsHandled.Remove(other.Slot);
+                        // Also drop the prior occupant's last InputFrame: otherwise it
+                        // drives the reused slot's new rig as a one-frame phantom (a held
+                        // throw/fire/move) before the reconnecting client's first packet.
+                        SlotInputs.Remove(other.Slot);
                     }
                 }
                 if (evict != null) foreach (var k in evict) _sfClients.Remove(k);
