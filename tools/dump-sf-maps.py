@@ -51,6 +51,9 @@ def main():
     ap.add_argument("--only", type=int, default=None)
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args()
+    # The default --data embeds $HOME (and a user may pass ~); expand both so
+    # UnityPy.load / os.listdir get a real path, not the literal "$HOME/...".
+    args.data = os.path.expanduser(os.path.expandvars(args.data))
 
     os.makedirs(args.out, exist_ok=True)
 

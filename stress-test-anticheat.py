@@ -51,13 +51,34 @@ def build_player_input_packet(seq: int = 0) -> bytes:
     )
 
 
+def _is_loopback(host: str) -> bool:
+    """True only if host is the loopback interface. This tool emits a sustained
+    UDP packet storm, so by default it refuses any other target (see docstring)."""
+    if host in ("localhost", "127.0.0.1", "::1"):
+        return True
+    try:
+        import ipaddress
+        return ipaddress.ip_address(socket.gethostbyname(host)).is_loopback
+    except Exception:
+        return False
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=1337)
     ap.add_argument("--pps", type=int, default=200, help="packets per second")
     ap.add_argument("--duration", type=float, default=5.0, help="seconds to run")
+    ap.add_argument("--allow-remote", action="store_true",
+                    help="permit a non-loopback --host; only for a test target you "
+                         "are authorized to hit (this floods UDP, see the docstring)")
     args = ap.parse_args()
+
+    if not args.allow_remote and not _is_loopback(args.host):
+        print(f"Refusing to flood non-loopback host {args.host!r}: this is a UDP "
+              f"stress tool, not for production. Re-run with --allow-remote only "
+              f"against a test target you are authorized to hit.", file=sys.stderr)
+        return 2
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     addr = (args.host, args.port)
