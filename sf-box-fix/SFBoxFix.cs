@@ -27,8 +27,8 @@ namespace SFBoxFix
     //   • CAJAS-3: NSO force-unkinematic on scene load (Christmas/Halloween
     //              prefabs sometimes ship as kinematic by default)
     //   • SNAKES-1: SnakeAI.damageMultiplier = 0 (snakes don't deal damage)
-    //   • DEATH-1: Reduce RoundMinPlaySec from 12s → 2s (faster round advance
-    //              when somebody dies quickly)
+    //   • DEATH-1: Pin RoundMinPlaySec to 0s (no post-map-load kill gate, so a
+    //              quick first-seconds death still advances the round)
 
     [BepInPlugin(PluginGuid, PluginName, PluginVersion)]
     [BepInDependency("com.stickfightdev.headless-host", BepInDependency.DependencyFlags.SoftDependency)]
@@ -224,17 +224,23 @@ namespace SFBoxFix
             bool isPlayer;
             if (!_rigIsPlayerCache.TryGetValue(rootId, out isPlayer))
             {
-                try { isPlayer = (object)rb.transform.root.GetComponent(_ctrlType) != null; }
-                catch { isPlayer = true; }  // on error, default to vanilla behavior
-                _rigIsPlayerCache[rootId] = isPlayer;
-
-                // Periodic prune to avoid unbounded growth (rigs get destroyed
-                // between rounds, instance ids get reused).
-                _cacheCounter++;
-                if (_cacheCounter > 500)
+                bool resolved = false;
+                try { isPlayer = (object)rb.transform.root.GetComponent(_ctrlType) != null; resolved = true; }
+                catch { isPlayer = true; }  // this collision → vanilla behavior, but do NOT
+                                            // cache a transient GetComponent failure below: a
+                                            // one-time error must not stick as a permanent
+                                            // "is player" verdict — retry next collision instead.
+                if (resolved)
                 {
-                    _cacheCounter = 0;
-                    _rigIsPlayerCache.Clear();
+                    _rigIsPlayerCache[rootId] = isPlayer;
+                    // Periodic prune backstop (the cache is also cleared on every
+                    // scene load); rigs get destroyed between rounds, ids get reused.
+                    _cacheCounter++;
+                    if (_cacheCounter > 500)
+                    {
+                        _cacheCounter = 0;
+                        _rigIsPlayerCache.Clear();
+                    }
                 }
             }
 
@@ -273,11 +279,11 @@ namespace SFBoxFix
             catch (Exception e) { Log.LogWarning($"[SNAKES-1 awake] {e.Message}"); }
         }
 
-        // ========== DEATH-1: Reduce RoundMinPlaySec ==========
-        // SFHeadlessHost has `internal static float RoundMinPlaySec = 12f`. This
-        // blocks round advance for 12s after match start. If a player dies in
-        // the first 2-3 seconds, the round still waits until 12s elapse.
-        // Reduce to 2f for snappy round advance.
+        // ========== DEATH-1: Pin RoundMinPlaySec to 0 ==========
+        // RoundMinPlaySec blocks round advance for that many seconds after a map
+        // loads, so a player who dies in the first 2-3s would otherwise wait out
+        // the gate. The host already defaults this to 0f (SFHeadlessHost.cs:97);
+        // this pins it to 0 so the no-gate behavior holds regardless of build.
         private void ApplyFastRoundAdvance()
         {
             var hostType = AccessTools.TypeByName("SFHeadlessHost.Plugin");
@@ -317,6 +323,16 @@ namespace SFBoxFix
         // destructibles, flip kinematic=false if mass > 50 (real boxes), useGravity=true.
         private void OnSceneLoadedUnfreezeXmas(Scene scene, LoadSceneMode mode)
         {
+            // Invalidate the "is this root a player rig?" cache on EVERY scene load.
+            // It's keyed by transform.root.GetInstanceID(), and Unity recycles
+            // instance ids as rigs and crates are destroyed/recreated across rounds
+            // and scenes. A stale entry would misclassify a new crate as a player
+            // (vanilla destruction runs → boxes break each other, CAJAS-2's whole
+            // point) or a new player rig as a non-player (player can't break boxes).
+            // Clearing here bounds the reuse window to a single scene; the 500-miss
+            // prune below is just a within-scene backstop.
+            _rigIsPlayerCache.Clear();
+            _cacheCounter = 0;
             if (scene.name == "MainScene") return;
             // ALWAYS schedule a post-settle pass — needed for BOX-ROT (freeze
             // X/Y rotation on all pushable crates). Unfreeze pass inside is
