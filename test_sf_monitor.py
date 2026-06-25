@@ -50,5 +50,28 @@ def _match(mon, s):
     return mon._LOG_BRIDGE_RE.match(s) is not None
 
 
+class TestClampInt(unittest.TestCase):
+    """Handler._clamp_int hardens the untrusted ?n= query param. A bare int()
+    (the old code) raised ValueError on ?n=abc and 500'd the request inside
+    ThreadingHTTPServer; this pins the graceful clamp-and-fallback instead."""
+    def _c(self, raw, default=240, hi=2880):
+        return mon.Handler._clamp_int(raw, default, hi)
+
+    def test_valid_passthrough(self):
+        self.assertEqual(self._c("100"), 100)
+        self.assertEqual(self._c("0"), 0)
+
+    def test_clamps_to_hi(self):
+        self.assertEqual(self._c("99999"), 2880)
+
+    def test_clamps_negative_to_zero(self):
+        self.assertEqual(self._c("-5"), 0)
+
+    def test_non_numeric_falls_back_to_default_without_raising(self):
+        # The red→green case: each of these would raise on a bare int().
+        for bad in ("abc", "", "1.5", "0x10", "12;rm", None):
+            self.assertEqual(self._c(bad), 240, f"{bad!r} should fall back")
+
+
 if __name__ == "__main__":
     unittest.main()

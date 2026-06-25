@@ -263,7 +263,10 @@ class Sampler(threading.Thread):
             return
         try:
             with open(path) as f:
-                lines = f.readlines()[-RING.maxlen:]
+                # Stream the tail: deque(maxlen) keeps only the last RING.maxlen
+                # lines without slurping the whole day's JSONL into memory (at 5s
+                # sampling that's ~17k lines/day read at once on every restart).
+                lines = collections.deque(f, maxlen=RING.maxlen)
             with RING_LOCK:
                 for ln in lines:
                     try:
@@ -414,6 +417,18 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    @staticmethod
+    def _clamp_int(raw, default, hi):
+        """Parse an untrusted int query param and clamp to [0, hi]; fall back to
+        default on anything non-numeric. Never raises into do_GET — a bad ?n=
+        must not 500 the request (and leak a stack trace) the way a bare int()
+        would. The dashboard always sends a valid n; this just hardens the path."""
+        try:
+            v = int(raw)
+        except (TypeError, ValueError):
+            v = default
+        return max(0, min(v, hi))
+
     def do_GET(self):
         path = self.path.split("?")[0]
         q = dict(p.split("=", 1) for p in self.path.partition("?")[2].split("&") if "=" in p)
@@ -426,7 +441,7 @@ class Handler(BaseHTTPRequestHandler):
                        json.dumps({"now": cur, "uptimeSec": round(time.time() - START_TS),
                                    "host": os.uname().nodename, "interval": INTERVAL}).encode())
         elif path == "/api/metrics":
-            n = min(int(q.get("n", "240") or 240), RING.maxlen)
+            n = self._clamp_int(q.get("n", "240"), 240, RING.maxlen)
             with RING_LOCK:
                 data = list(RING)[-n:]
             self._send(200, "application/json", json.dumps(data).encode())
@@ -438,10 +453,10 @@ class Handler(BaseHTTPRequestHandler):
     def _serve_log(self, q):
         bridge = q.get("bridge", "")
         kind = q.get("kind", "plugin")
-        n = min(int(q.get("n", "200") or 200), 2000)
         if not _LOG_BRIDGE_RE.match(bridge) or kind not in ("plugin", "unity"):
             self._send(400, "text/plain", b"bad params")
             return
+        n = self._clamp_int(q.get("n", "200"), 200, 2000)
         fname = f"/tmp/sf-oracle-{'plugin' if kind == 'plugin' else 'unity'}-{bridge}.log"
         try:
             with open(fname, "rb") as f:
