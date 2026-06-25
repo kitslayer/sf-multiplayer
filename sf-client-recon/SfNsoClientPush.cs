@@ -402,6 +402,18 @@ namespace SFClientRecon
         private int _reconHardSnaps;
         private float _boxSyncLogAt = -1f;
 
+        // Defense-in-depth: a non-finite server pose must never reach rb.position —
+        // a NaN/Inf would poison this crate's PhysX state and spread through
+        // contacts. The host sanitizes its snapshot at the source now too; this
+        // guards against a buggy/rogue server. net46 has no float.IsFinite, so
+        // test components with the IsNaN/IsInfinity pair.
+        private static bool IsFiniteVec(Vector3 v)
+        {
+            return !float.IsNaN(v.x) && !float.IsInfinity(v.x)
+                && !float.IsNaN(v.y) && !float.IsInfinity(v.y)
+                && !float.IsNaN(v.z) && !float.IsInfinity(v.z);
+        }
+
         internal void ReconcilePushableCrates()
         {
             if (!CrateReconcileActive) return;
@@ -420,6 +432,7 @@ namespace SFClientRecon
                 if (rb == null || rb.isKinematic) continue;
                 var pose = kv.Value;
                 if (pose == null || !pose.HasRender) continue;
+                if (!IsFiniteVec(pose.Pos) || !IsFiniteVec(pose.Vel)) continue;
                 float age = now - pose.LastRecvAt;
                 if (age < 0f) age = 0f;
                 // No fresh server data (round transition, packet loss burst):

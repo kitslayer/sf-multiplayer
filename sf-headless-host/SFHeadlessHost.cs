@@ -5524,9 +5524,9 @@ namespace SFHeadlessHost
                 if ((object)rig == null) continue;
                 body[off++] = (byte)kv.Key;
                 Vector3 p = rig.transform.position;
-                WriteF32LE(body, off, p.x); off += 4;
-                WriteF32LE(body, off, p.y); off += 4;
-                WriteF32LE(body, off, p.z); off += 4;
+                WriteF32LE(body, off, Finite(p.x)); off += 4;
+                WriteF32LE(body, off, Finite(p.y)); off += 4;
+                WriteF32LE(body, off, Finite(p.z)); off += 4;
                 uint lastSeq = 0;
                 slotSeq.TryGetValue(kv.Key, out lastSeq);
                 WriteU32LE(body, off, lastSeq); off += 4;
@@ -5547,19 +5547,19 @@ namespace SFHeadlessHost
                 WriteU32LE(body, off, p.Id); off += 4;
                 body[off++] = p.OwnerSlot;
                 body[off++] = p.WeaponType;
-                WriteF32LE(body, off, p.Position.x); off += 4;
-                WriteF32LE(body, off, p.Position.y); off += 4;
-                WriteF32LE(body, off, p.Position.z); off += 4;
+                WriteF32LE(body, off, Finite(p.Position.x)); off += 4;
+                WriteF32LE(body, off, Finite(p.Position.y)); off += 4;
+                WriteF32LE(body, off, Finite(p.Position.z)); off += 4;
             }
             // P0-14 — MapInfoSyncableBase entries (v26.5 section).
             WriteU16LE(body, off, (ushort)mapSyncEntries.Count); off += 2;
             foreach (var m in mapSyncEntries)
             {
-                WriteF32LE(body, off, m.StartX); off += 4;
-                WriteF32LE(body, off, m.StartY); off += 4;
-                WriteF32LE(body, off, m.X); off += 4;
-                WriteF32LE(body, off, m.Y); off += 4;
-                WriteF32LE(body, off, m.Z); off += 4;
+                WriteF32LE(body, off, Finite(m.StartX)); off += 4;
+                WriteF32LE(body, off, Finite(m.StartY)); off += 4;
+                WriteF32LE(body, off, Finite(m.X)); off += 4;
+                WriteF32LE(body, off, Finite(m.Y)); off += 4;
+                WriteF32LE(body, off, Finite(m.Z)); off += 4;
             }
             off = WriteMapStateSection(body, off, mapStateEntries);
             // v26.7 — NSO up-vector appendix (same ids/order as the NSO section).
@@ -5613,7 +5613,7 @@ namespace SFHeadlessHost
                     if ((object)_nsoIndexProp != null) id = (ushort)_nsoIndexProp.GetValue(nso, null);
                     else if ((object)_nsoIndexField != null) id = (ushort)_nsoIndexField.GetValue(nso);
                     var p = comp.transform.position;
-                    if (p.y < -30f) continue;
+                    if (!IsFiniteVec3(p) || p.y < -30f) continue;
                     var e = comp.transform.eulerAngles;
                     var up = comp.transform.up;
                     result.Add(new NsoSnap { Id = id, X = p.x, Y = p.y, Z = p.z, RotZ = e.z, UpY = up.y, UpZ = up.z });
@@ -5883,7 +5883,7 @@ namespace SFHeadlessHost
                     catch { needRebuild = true; continue; }
 
                     var rb = ent.Rb;
-                    if (p.y < -30f) continue;
+                    if (!IsFiniteVec3(p) || p.y < -30f) continue;
 
                     bool dynamicBody = rb && !rb.isKinematic;
                     if (dynamicBody && ent.Pushable)
@@ -6052,6 +6052,26 @@ namespace SFHeadlessHost
             buf[off + 1] = (byte)(v >>  8 & 0xFF);
             buf[off + 2] = (byte)(v >> 16 & 0xFF);
             buf[off + 3] = (byte)(v >> 24 & 0xFF);
+        }
+
+        // Defense-in-depth for the outbound world-state snapshot: a non-finite
+        // position copied straight from a live transform would be serialized and
+        // broadcast, then written to rb.position on every client — poisoning that
+        // body's PhysX state and propagating through contacts (the best in-repo
+        // match for the live +Infinity incident, notes/REVIEW_2026-06-10 §0). The
+        // `p.y < -30f` void skips do NOT catch this: NaN < -30f is false. net46
+        // has no float.IsFinite, so use the IsNaN/IsInfinity pair like the inbound
+        // validators (:2926/:4315). NSO entries are dropped at collect; the inline
+        // rig/projectile/mapsync writes (pre-counted, can't skip) are coerced.
+        private static bool IsFiniteVec3(Vector3 v)
+        {
+            return !float.IsNaN(v.x) && !float.IsInfinity(v.x)
+                && !float.IsNaN(v.y) && !float.IsInfinity(v.y)
+                && !float.IsNaN(v.z) && !float.IsInfinity(v.z);
+        }
+        private static float Finite(float v)
+        {
+            return (float.IsNaN(v) || float.IsInfinity(v)) ? 0f : v;
         }
 
         private static void WriteF32LE(byte[] buf, int off, float v)
