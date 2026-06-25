@@ -80,12 +80,13 @@ Active development (see the [commit history](https://github.com/kitslayer/sf-mul
 - **In-game menu** is clickable again (IMGUI control-id shift was eating clicks).
 - **Lobby UI** auto-finds the server, English/Spanish toggle, native uGUI lobby (**F2**), team scoreboard (RED vs BLUE + extra players, **F4**).
 - **Performance** — killed per-frame reflection + log spam; uncapped FPS; input sent at a fixed 60 Hz regardless of your frame rate.
+- **Stability/hardening** (ongoing review passes) — server-snapshot NaN/Inf sanitization, crate-classification cache correctness, plus input-validator + monitoring hardening. See [`WHATS_NEW.md`](WHATS_NEW.md).
 
 ## What’s in this repo
 
 |Path                                                                                                                                                         |What it is                                                                                                                                                                                                                                                                                            |
 |-------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-|[`sf-headless-host/`](sf-headless-host)                                                                                                                      |**Server-side plugin.** BepInEx + Harmony plugin (~6,400 lines, plus a ~1,280-line map-terrain helper) that turns headless Stick Fight into a v25 + v26-speaking authoritative server. Drives SF’s own host-side gameplay via Harmony patches, broadcasts state snapshots, processes client inputs, validates damage with tick-history rewind.|
+|[`sf-headless-host/`](sf-headless-host)                                                                                                                      |**Server-side plugin.** BepInEx + Harmony plugin (~7,100 lines, plus a ~1,280-line map-terrain helper) that turns headless Stick Fight into a v25 + v26-speaking authoritative server. Drives SF’s own host-side gameplay via Harmony patches, broadcasts state snapshots, processes client inputs, validates damage with tick-history rewind.|
 |[`sf-client-recon/`](sf-client-recon)                                                                                                                        |**Client-side companion plugin.** BepInEx plugin shipped to each player’s install. Receives `WorldStateSnapshot`, smoothly reconciles local state toward server values, detects divergence, sends `PktPlayerInput` at 60Hz, emits projectile-fire events.                                             |
 |[`sf-server-browser/`](sf-server-browser) |**In-game lobby browser plugin.** IMGUI "SERVERS" menu — lists lobbies (`GET /lobbies`), JOIN / join-by-code, and CREATE (`POST`, token-gated). Reads `SF_LOBBY_ENDPOINT`.|
 |[`sf-router/`](sf-router) |**Single-port UDP router (Go).** One public port fronts many lobbies; routes each client to its lobby's backend `SF.exe` via a SELECT control datagram + the `/tmp/sf-lobbies` registry. Unit-tested (`go test -race`).|
@@ -172,7 +173,7 @@ This builds both plugins and deploys them to your local oracle + Steam installs.
 Every packet wraps the SF MsgType body in a 14-byte envelope:
 `[u32 timestamp LE][u8 msgType][N body][u64 steamID LE][u8 channel]`
 
-SF’s stock `P2PPackageHandler.MsgType` enum has 38 entries (`Ping=0` … `KickPlayer=38`). This repo extends with **v26.6** (current snapshot wire version):
+SF’s stock `P2PPackageHandler.MsgType` enum has 38 entries (`Ping=0` … `KickPlayer=38`). This repo extends with **v26.7** (current snapshot wire version — append-only sections, so older clients ignore trailing ones):
 
 |ID|Direction              |Purpose                                                                                                                                 |
 |--|-----------------------|----------------------------------------------------------------------------------------------------------------------------------------|
@@ -196,7 +197,7 @@ Implementation lives in [`sf-headless-host/SFHeadlessHost.cs`](sf-headless-host/
 - [`notes/PROTOCOL.md`](notes/PROTOCOL.md) — wire-format spec
 - [`notes/OBJECT_SYNC.md`](notes/OBJECT_SYNC.md) — debugging guide for SF’s three world-object sync mechanisms (NSO, MapInfoSyncableBase, DestructiblePiece)
 - [`notes/BUGS_BACKLOG.md`](notes/BUGS_BACKLOG.md) — incident log with root causes + fixes
-- [`notes/AUDIT_2026-05-23.md`](notes/AUDIT_2026-05-23.md) — latest end-of-session deep audit
+- [`notes/REVIEW_2026-06-10.md`](notes/REVIEW_2026-06-10.md) — last standalone full-repo deep audit (the 2026-06-22 polish loop and 2026-06-25 review sweep that followed are logged in [`WHATS_NEW.md`](WHATS_NEW.md))
 
 Issues and PRs welcome.
 

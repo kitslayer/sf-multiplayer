@@ -35,7 +35,7 @@ Subsequent launches just open the lobby browser directly (install step is skippe
 | `install-sf-client.sh` | (Optional Linux) install-only script. Same as above. |
 | `SFClientRecon.dll` | Client-side plugin: snapshot reconciliation + input + lobby SELECT. |
 | `SFServerBrowser.dll` | Client-side plugin: in-game SERVERS menu (F3) + uGUI lobby (F2). |
-| `SFBoxFix.dll` | Client-side plugin: crate physics smoothing. |
+| `SFBoxFix.dll` | **Server-side** plugin — runs on the oracle alongside `SFHeadlessHost` (crate/box physics: CAJAS-1/2/3, snake damage, round-advance gate). NOT a client plugin. |
 | `Assembly-CSharp.srv.v25.dll` | Patched game assembly (CLI `-address`/`-port` connect target). The piece the `dist/` scripts wrongly omit. |
 | `SFHeadlessHost.dll` | **Server-side** plugin — runs on the oracle, NOT a player's machine. Present here only for operators. |
 
