@@ -80,7 +80,7 @@ Active development (see the [commit history](https://github.com/kitslayer/sf-mul
 - **In-game menu** is clickable again (IMGUI control-id shift was eating clicks).
 - **Lobby UI** auto-finds the server, English/Spanish toggle, native uGUI lobby (**F2**), team scoreboard (RED vs BLUE + extra players, **F4**).
 - **Performance** — killed per-frame reflection + log spam; uncapped FPS; input sent at a fixed 60 Hz regardless of your frame rate.
-- **Stability/hardening** (ongoing review passes) — server-snapshot NaN/Inf sanitization, crate-classification cache correctness, plus input-validator + monitoring hardening. See [`WHATS_NEW.md`](WHATS_NEW.md).
+- **Stability/hardening** (ongoing review passes) — server-snapshot NaN/Inf sanitization, crate-classification cache correctness, round-boundary projectile cleanup, lobby-switch slot handling, control-plane/ops-script safety, plus input-validator + monitoring hardening. See [`WHATS_NEW.md`](WHATS_NEW.md).
 
 ## What’s in this repo
 

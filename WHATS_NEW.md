@@ -1,3 +1,22 @@
+# What's new — 2026-06-26 second review sweep + ops/infra hardening
+
+A follow-up skeptical sweep (four parallel reviewers) targeting **fresh surface** the first sweep didn't cover — the operational shell scripts that run the live server and the player-facing installer — plus differently-focused second passes on host and client. All *code* fixes compile/test-verified; the installer findings are PowerShell that can't be tested here, so they're documented below for the next installer refresh (where they get a Windows test) rather than blind-edited on a path that can brick a player's install.
+
+**Shipped fixes**
+- **The control plane can no longer reap the systemd MAIN oracle (`serve-lobbies.py`, `deploy/register-main-lobby.sh`, `stop-all-lobbies.sh`).** The reaper and `stop-all-lobbies.sh` treated the systemd-managed MAIN oracle as an ordinary registry lobby and could call `stop-lobby.sh` on it — which kills the process **and `rm -rf`s its live wineprefix**. MAIN is now marked `static=true`; both refuse to reap static lobbies, and the broad orphan-kill in `stop-all-lobbies.sh` is gated behind `--orphans`. (Dormant on the live box thanks to `EMPTY_TTL=86400`, but a real landmine under a config change.)
+- **`launch-lobby.sh` no longer leaks ports** — a crashed lobby's stale conf (dead pid) no longer permanently removes its port from the pool when the reaper is down (the `ss` bind-check still guards a genuinely in-use port). **`launch-sf-headless.sh`** now guards `cd "$SF_DIR"`.
+- **Client lobby-switch slot reset (`SfOracleLobbyConnect.cs`).** Switching lobbies left the previous lobby's cached `_localSlot`, so 60 Hz input was sent under the old slot number (rejected by the new host) until the first `MapChange`. Reset on join now.
+- **Client cache hygiene (`SfMapTerrainClient.cs`).** `_recentLerpAt` is now cleared on map change (was a slow session leak on destructible-free maps); the mapSync-cache refresh countdown was dead code (`_mapSyncCacheRebuildAt` never decremented), so a `MapInfoSyncableBase` spawned mid-map was never synced — restored.
+- **Host clears in-flight projectiles at the round boundary (`SFHeadlessHost.cs`, `0.4.3`→`0.4.4`).** A mid-flight bullet/thrown-weapon survived a round transition and could nudge/blast the **next** map's crates within its ≤3 s lifetime.
+
+**Flagged — installer (PowerShell; fix during the installer refresh, with a Windows test)**
+- **CRITICAL:** the shipped zip's `1-click-install/zip-src/install.ps1` does a blanket `Copy-Item * -Recurse -Force` that overwrites a player's existing `doorstop_config.ini` / `winhttp.dll` / `BepInEx/core` with **no backup**, and `uninstall.ps1` never restores them — so a player who already ran other BepInEx mods is left with this mod's loader after "uninstall", breaking the README's "restores your game exactly as it was" promise. (The main `install-sf-multiplayer.ps1` does individually-backed-up copies correctly — the zip-src one should mirror it.)
+- **HIGH:** the two uninstallers disagree on deleting the vanilla backup (one orphans it → a later uninstall can restore a now-stale assembly); no partial-failure rollback (a mid-copy failure leaves a half-installed, unbootable game); the deprecated `dist/` & `deploy/` `.bat`/`.sh` client installers still copy the wrong (server) DLL, omit the patched assembly, and miss custom Steam-library paths — delete them or fix them.
+
+> Versions: host **0.4.4** on `main` (live `.115` is **0.4.3** — this sweep's projectile fix is undeployed); `SFBoxFix 0.3.3` live; client/browser unchanged (`0.6.2`/`0.5.4` — installer not refreshed). The infra-script fixes take effect on `.115` on the next rsync + service restart. The installer fixes + the client-side changes ship on the next installer refresh.
+
+---
+
 # What's new — 2026-06-25 multi-agent code-review sweep (fixes on `main`, not yet deployed)
 
 A skeptical bug-hunt across the live components (host, client, server-browser, box-fix, Go router, Python infra) run by four parallel reviewers, then triaged and fixed by hand. Three+ prior review passes had cleared the easy stuff, so these are the subtler residuals. All compile/test-verified (host + client `dotnet build` clean, Python `unittest` 15 green, `go build`/`go test` green); the C# changes touch the live gameplay path and need a 2-player live re-verify before deploy.
