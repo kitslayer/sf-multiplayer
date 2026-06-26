@@ -36,7 +36,7 @@ namespace SFBoxFix
     {
         public const string PluginGuid = "com.stickfightdev.box-fix";
         public const string PluginName = "SFBoxFix";
-        public const string PluginVersion = "0.3.2";
+        public const string PluginVersion = "0.3.3";
 
         internal static ManualLogSource Log;
         private static Type _dpType;
