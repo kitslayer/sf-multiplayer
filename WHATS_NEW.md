@@ -13,7 +13,7 @@ A skeptical bug-hunt across the live components (host, client, server-browser, b
 - **`Controller.mHasControl` gate (client, HIGH).** The client fire packet (msgType 41) and the local player's ice/destructible breaks are both gated on `mHasControl`, which the slot-discovery rework treats as always-false in oracle mode. If so, the server-side projectile sim is inert for real clients and local ice-breaks are suppressed — but "fixing" it on an unverified premise could break a working relay path. Needs a 2-player session to confirm before any code change.
 - LOW: router co-located-LEAVE `ipBind` (same root as the documented/accepted per-IP game-socket limit); F3-HUD per-frame reflection (perf); SFBoxFix rapid-scene-change crate-config drop; client `_playerTargets` not cleared on map change (opt-in smoothing path only); SFLauncher port-as-string contract (source-only/unshipped).
 
-> Verification ceiling: autonomous (compile + unit/local checks). **Not deployed to `.115`; component versions unchanged.** A deploy + the `mHasControl` live confirm are kit's call.
+> Verification ceiling at write time was autonomous (compile + unit/local checks). **Update 2026-06-26: the server-side fixes (host + box-fix) are now DEPLOYED to `.115` as `SFHeadlessHost 0.4.3` / `SFBoxFix 0.3.3` — verified live (clean boot, v25 Ping OK on LAN + public).** The client-side NaN guard ships on the next installer refresh (client/browser unchanged for players so far); the `mHasControl` live confirm is still kit's call (its code is untouched).
 
 ---
 
