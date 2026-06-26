@@ -220,6 +220,11 @@ namespace SFClientRecon
             _crateSafePos.Clear();
             _crateSafeAt.Clear();
             ClearPushableLerpCache();
+            // _recentLerpAt is keyed by crate transform.root instanceID (new map →
+            // new ids). It's otherwise pruned only inside DestructibleCollisionPrefix
+            // every 100 hits, so on a map with no destructible collisions it would
+            // accumulate across the session; clear it with the other id-keyed caches.
+            _recentLerpAt.Clear();
             // v0.6.0 — NSO ids collide while both map scenes coexist after the
             // additive load. Suppress reconciliation + target intake until the
             // old scene is gone, or the reconciler chases ghosts of the
@@ -691,6 +696,14 @@ namespace SFClientRecon
                         }
                     }
                     _mapSyncCacheRebuildAt = 60;
+                }
+                else
+                {
+                    // Count down to a periodic rebuild (mirrors the NSO cache at
+                    // SFClientRecon.cs:1591). Without this decrement the `<= 0`
+                    // branch was dead and the cache never refreshed within a map,
+                    // so a MapInfoSyncableBase that spawns mid-map was never synced.
+                    _mapSyncCacheRebuildAt--;
                 }
                 int applied = 0;
                 foreach (var e in snap)

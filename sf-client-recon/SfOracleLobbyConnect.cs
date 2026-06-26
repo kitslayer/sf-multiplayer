@@ -373,6 +373,14 @@ namespace SFClientRecon
                 inst._lastSeenSnapCount = inst._snapsReceived;
                 inst._lastSnapGrowAt = -1f;
                 inst._lastSelectAt = -1f;
+                // Drop any slot discovered in the PREVIOUS lobby. FindLocalSlot
+                // short-circuits on a cached _localSlot >= 0, so without this the
+                // 60Hz input loop keeps sending under the old lobby's slot number
+                // until the NEW lobby's first MapChange re-derives it — and the new
+                // host rejects input for a slot whose handshaken owner doesn't match,
+                // so the player's input is silently dropped until then.
+                inst._localSlot = -1;
+                inst._lastAnnouncedSlot = -2;
                 try { inst.SendSelectLobbyPacket(); }
                 catch (Exception e) { Log.LogWarning($"[oracle-lobby] SELECT send: {e.Message}"); }
             }
