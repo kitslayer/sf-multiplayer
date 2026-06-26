@@ -651,11 +651,20 @@ def reaper_loop() -> None:
             bycode = _router_bycode()
             now = time.time()
             seen_codes = set()
+            static_codes = {s["code"] for s in _static_lobbies()}
             for l in lobbies:
                 code = l.get("code", "")
                 if not code:
                     continue
                 seen_codes.add(code)
+                # Never reap a static (systemd-managed) lobby — e.g. the always-on
+                # MAIN oracle. stop-lobby.sh would kill the systemd process AND
+                # rm -rf its live wineprefix; and MAIN's registry pid is the xvfb
+                # wrapper (stays alive), so its dead-pid branch is unreliable too.
+                # systemd owns these — the control plane must keep its hands off.
+                if code in static_codes or str(l.get("static", "")).lower() in ("1", "true", "yes"):
+                    _empty_since.pop(code, None)
+                    continue
                 if not l.get("alive"):
                     # Grace window (issue #5): a freshly-launched lobby may not have
                     # a reapable pid yet — Proton/Wine startup writes the registry

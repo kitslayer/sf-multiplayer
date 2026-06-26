@@ -24,6 +24,12 @@ if [ "$ACTION" = "unregister" ]; then
 fi
 
 # systemd exports MAINPID to ExecStartPost; fall back to our own pid otherwise.
+# NOTE: MAINPID is the xvfb-run wrapper, not SF.exe, so it stays alive even if the
+# game loop wedges — don't trust this pid for liveness (the UDP-probe watchdog is
+# the real signal). `static=true` below is the authoritative marker: the control
+# plane (serve-lobbies reaper, stop-all-lobbies.sh) must NEVER reap a static
+# lobby — systemd owns its lifecycle, and reaping it would kill the process AND
+# rm -rf its live wineprefix.
 PID="${MAINPID:-$$}"
 # Atomic write (F6): temp + rename so the Go router (2s refresh) and serve-lobbies
 # loader never observe a half-written MAIN.conf during (re)registration.
@@ -32,6 +38,7 @@ code=${CODE}
 port=${SFHEADLESS_PORT:-1337}
 bridge=${SFHEADLESS_BRIDGEPORT:-11337}
 pid=${PID}
+static=true
 started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
 mv -f "$CONF.tmp" "$CONF"

@@ -81,11 +81,17 @@ if [ -z "$PORT" ]; then
       if [ "$cand" = "$rp" ]; then skip=1; break; fi
     done
     [ "$skip" = "1" ] && continue
-    # Skip if any registry entry already holds it (reliable now: reservations
-    # are written under this same lock before release).
-    if grep -qs "^port=${cand}$" "$REGISTRY"/*.conf 2>/dev/null; then
-      continue
-    fi
+    # Skip if a LIVE registry entry holds it. A stale conf left by a crashed
+    # lobby (dead pid) must NOT block reuse — otherwise crashes permanently
+    # shrink the port pool whenever the reaper is down. (The ss check below still
+    # guards a port that's genuinely bound; pid=static = systemd MAIN, always held.)
+    held=0
+    for cf in "$REGISTRY"/*.conf; do
+      grep -qs "^port=${cand}$" "$cf" 2>/dev/null || continue
+      cpid=$(sed -n 's/^pid=//p' "$cf" | head -1)
+      if [ "$cpid" = "static" ] || { [ -n "$cpid" ] && kill -0 "$cpid" 2>/dev/null; }; then held=1; break; fi
+    done
+    [ "$held" = "1" ] && continue
     # Skip if anything else on the system holds it
     if ss -lunH "sport = :${cand}" 2>/dev/null | grep -q .; then
       continue

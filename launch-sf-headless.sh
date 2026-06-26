@@ -28,6 +28,6 @@ export WINEDLLOVERRIDES="winhttp=n,b;winepulse.drv=;winealsa.drv=;wineoss.drv="
 export WINEDEBUG=-all
 export PROTON_USE_XALIA=0
 
-cd "$SF_DIR"
+cd "$SF_DIR" || { echo "SF install not found at $SF_DIR (set SFHEADLESS_INSTALL)" >&2; exit 1; }
 exec "$PROTON" run "$SF_DIR/StickFight.exe" -batchmode -nographics \
   -logFile "/tmp/sf-oracle-unity-${SFHEADLESS_BRIDGEPORT:-1341}.log"
