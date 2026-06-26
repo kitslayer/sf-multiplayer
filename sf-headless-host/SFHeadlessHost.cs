@@ -76,7 +76,7 @@ namespace SFHeadlessHost
     {
         public const string PluginGuid = "com.stickfightdev.headless-host";
         public const string PluginName = "SFHeadlessHost";
-        public const string PluginVersion = "0.4.3";
+        public const string PluginVersion = "0.4.4";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance;
@@ -3833,6 +3833,12 @@ namespace SFHeadlessHost
             _nsoVoidResetCount.Clear();   // per-NSO-index void-rescue budget — reset with the map (ids get reassigned)
             _nsoByIndexCache.Clear();
             _nsoCacheLastRebuildAt = -1f;
+            // Drop any still-in-flight projectiles at the round boundary. TickProjectiles
+            // runs every FixedUpdate (not gated on _matchStarted) and reads live SlotToRig,
+            // so a bullet/thrown-weapon mid-flight at round end would otherwise survive the
+            // map change and nudge/blast the NEXT map's crates (or, with bullet-damage on,
+            // phantom-hit a freshly spawned player) within its remaining lifetime.
+            _projectiles.Clear();
             ClearAuthoritativeRigsForRoundAdvance();
         }
 
