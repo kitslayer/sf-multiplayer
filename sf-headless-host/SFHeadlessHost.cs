@@ -2461,6 +2461,21 @@ namespace SFHeadlessHost
                         {
                             _slotV26Endpoint.Remove(cli.Slot);
                             _deathSlotsHandled.Remove(cli.Slot);
+                            // Destroy this slot's authoritative rig and drop its last
+                            // input. Otherwise the rig lingers until the next round
+                            // advance: still serialized into snapshots (a frozen
+                            // phantom), still tested by projectile hit-reg, and still
+                            // driven by the stale SlotInputs frame (a held move/fire/
+                            // throw keeps applying). A disconnect that leaves a single
+                            // player alive advances no round, so it would otherwise
+                            // persist indefinitely. (Mirrors the reconnect-eviction
+                            // cleanup above, plus a Destroy since no one reuses it.)
+                            if (SlotToRig.TryGetValue(cli.Slot, out var staleRig))
+                            {
+                                if ((object)staleRig != null) UnityEngine.Object.Destroy(staleRig);
+                                SlotToRig.Remove(cli.Slot);
+                            }
+                            SlotInputs.Remove(cli.Slot);
                         }
                     }
                     _rateGuards.Remove(k);
@@ -5560,7 +5575,7 @@ namespace SFHeadlessHost
                 WriteF32LE(body, off, e.X); off += 4;
                 WriteF32LE(body, off, e.Y); off += 4;
                 WriteF32LE(body, off, e.Z); off += 4;
-                WriteF32LE(body, off, e.RotZ); off += 4;
+                WriteF32LE(body, off, Finite(e.RotZ)); off += 4;
             }
             // Phase 6.17 — projectile entries.
             WriteU16LE(body, off, (ushort)_projectiles.Count); off += 2;
@@ -5589,8 +5604,8 @@ namespace SFHeadlessHost
             foreach (var e in nsoEntries)
             {
                 WriteU16LE(body, off, e.Id); off += 2;
-                WriteF32LE(body, off, e.UpY); off += 4;
-                WriteF32LE(body, off, e.UpZ); off += 4;
+                WriteF32LE(body, off, Finite(e.UpY)); off += 4;
+                WriteF32LE(body, off, Finite(e.UpZ)); off += 4;
             }
             return body;
         }
