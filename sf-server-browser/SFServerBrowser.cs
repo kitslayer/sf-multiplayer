@@ -51,6 +51,9 @@ namespace SFServerBrowser
         private float _overlayAnim;          // 0 closed → 1 open (eased)
         private Tab _tab = Tab.Browse;
         private bool _showHud;               // in-match player list (F3)
+        private List<PlayerRow> _hudRoster;  // cached F3 roster — refreshed at 2Hz in Update
+        private float _hudRosterAt;          // next roster refresh (unscaled time)
+        private static readonly List<PlayerRow> _emptyRoster = new List<PlayerRow>();
 
         // ---- Browse ----------------------------------------------------------
         private readonly List<ServerEntry> _servers = new List<ServerEntry>();
@@ -180,6 +183,15 @@ namespace SFServerBrowser
 
             if (Input.GetKeyDown(KeyCode.F3) && _currentSceneName != "MainScene")
                 _showHud = !_showHud;
+
+            // Refresh the F3 HUD roster at 2Hz (mirrors the uGUI overlay's _nextPoll).
+            // GetConnectedPlayers does heavy reflection and OnGUI fires several times
+            // per frame, so calling it from DrawHudPanel ran that path 3-5x/frame.
+            if (_showHud && Time.unscaledTime >= _hudRosterAt)
+            {
+                _hudRosterAt = Time.unscaledTime + 0.5f;
+                _hudRoster = GetConnectedPlayers();
+            }
 
             // Esc closes the overlay if open (don't swallow the vanilla pause).
             if (_overlayOpen && Input.GetKeyDown(KeyCode.Escape))

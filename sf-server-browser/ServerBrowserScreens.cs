@@ -287,7 +287,9 @@ namespace SFServerBrowser
             GUI.Label(new Rect(header.xMax - 130, header.y, 110, header.height),
                 "F3 to close", StLabel(FzTiny, ColInkFaint, FontStyle.Normal, TextAnchor.MiddleRight));
 
-            var list = GetConnectedPlayers();
+            // Read the 2Hz-refreshed cache (populated in Update), not GetConnectedPlayers
+            // per OnGUI pass — that ran the heavy reflection path 3-5x/frame.
+            var list = _hudRoster ?? _emptyRoster;
             var body = new Rect(panel.x + S3, header.yMax + S2, panel.width - S3 * 2, panel.yMax - header.yMax - S4);
             if (list.Count == 0)
             {
