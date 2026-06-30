@@ -1,3 +1,30 @@
+# What's new — 2026-06-30 third review sweep (six reviewers; fixes on `main`)
+
+A third skeptical sweep — six parallel reviewers fanned out by component (host gameplay/state, client prediction, box-fix + server-browser, Go router, Python control plane, shell + installer), each hunting *new* correctness/reliability bugs rather than re-flagging the known-deferred items. The router and box-fix came back clean. All fixes compile/test-verified (host + client + browser `dotnet build` clean, Python `unittest` 15 green, router `go test -race` green); the host changes touch the live sim and need a 2-player live re-verify before deploy.
+
+**Shipped fixes**
+- **Static-lobby guard on the HTTP stop path (`stop-lobby.sh`, `serve-lobbies.py`).** `POST /lobbies/stop` went straight to `stop-lobby.sh`, which — unlike the reaper and `stop-all-lobbies.sh` — had no `static=true` guard. A holder of `SF_CONTROL_TOKEN` (the token shared with players to *create* in-game lobbies) could therefore stop the always-on MAIN oracle, killing it **and `rm -rf`'ing its live wineprefix**. The guard is now authoritative in `stop-lobby.sh` (covers every caller) plus a fast `409` in `_handle_stop`. Verified: refuses a static conf (exit 1, conf preserved), still stops a normal one.
+- **`_handle_stop` body-read hardening (`serve-lobbies.py`).** Now reads via `_read_json()`, which rejects a negative `Content-Length` (`read(-1)` → read-to-EOF, defeating the OOM cap) and catches a mid-read `OSError` (previously escaped and killed the worker thread).
+- **Host: orphaned authoritative rig on mid-match disconnect (`SFHeadlessHost.cs`).** `SweepStaleClients` dropped a timed-out client but left its rig + last `SlotInputs` frame in place (`SlotToRig` was only cleared wholesale at round advance). The orphan stayed serialized into snapshots (a frozen phantom), still registered projectile hits, and was still driven by the stale held input; a disconnect that left one player alive advances no round, so it persisted indefinitely. Destroyed + input-dropped in the existing `!slotReused` branch.
+- **Host: `Finite()`-guard the NSO rotation/up fields (`SFHeadlessHost.cs`).** The 30 Hz snapshot routed every position through `Finite()` but wrote `RotZ`/`UpY`/`UpZ` raw — a non-finite rotation would broadcast NaN and the client rebuilds it into a NaN quaternion that poisons PhysX (same class as the live +Inf incident). Wrapped the three writes.
+- **Client: drop reordered/late snapshots (`SFClientRecon.cs`).** The apply path had no tick-ordering guard, so a reordered UDP snapshot was applied as newest and reversed extrapolation for one interval. Now gated on a monotonic-tick check; a large backward jump is treated as a server restart (tick reset) and accepted, so a mid-session oracle restart resyncs rather than freezing.
+- **Client: trim dead per-snapshot work (`SFClientRecon.cs`).** `ApplySnapshot` ran a `FindObjectsOfType(NetworkPlayer)` whose result was never read, plus a per-snapshot env read (~30×/s), to do nothing in the default config; now reads the env flag once and skips the scan when remote-smoothing is off.
+- **Server-browser: throttle the F3 HUD roster to 2Hz (`SFServerBrowser.cs`, `ServerBrowserScreens.cs`).** `DrawHudPanel` rebuilt the full reflection roster (`FindObjectOfType` + per-player reflection) 3-5×/frame in the OnGUI path; now cached and refreshed at 2 Hz in `Update`, mirroring the uGUI `LobbyOverlay`.
+- **Low (same commits):** RX listener no longer starts with an unarmed source filter when the server endpoint fails to resolve; `_crateFallStartedAt` + `_lastRelayPos` are cleared on map change with the other id-keyed caches; `sf-monitor` no longer crashes on a port-less `SF_MON_BIND`; `list-lobbies.sh` shows a static lobby as `STATIC` not `STALE`; `stop-all-lobbies.bat` mirrors the `.sh` static guard.
+
+**Verified clean (no fix needed)**
+- **Go router** — `go vet`/`build`/`test -race` (×3) green; buffer aliasing, mutex scoping, goroutine lifetime, registry reload, and SELECT bounds all traced and correct or documented by-design.
+- **SFBoxFix** — rig-cache invalidation, force/rotation math, null/lifetime safety all sound (post the 2026-06-25 fixes).
+
+**Not changed (deliberately deferred)**
+- Server-browser JSON parser isn't string-aware (truncates on an unbalanced bracket/brace *inside a string value*) — only fires if our own `serve-lobbies.py` emits such a value; defensive-only.
+- Client `IsLocalPlayerCollisionRigidbody` allocates via `GetComponentsInChildren` per destructible collision — the obvious singular-`GetComponentInChildren` rewrite would change the "any child Controller" semantics if a rig root ever holds >1 Controller; not worth a collision-path behavior change for a GC micro-win without a live test.
+- The installer PowerShell items from the 2026-06-26 sweep (BepInEx clobber/restore parity, no rollback, `dist/`+`deploy/` wrong DLL) — still flagged for the installer refresh with a Windows test, not blind-edited here.
+
+> Versions unchanged (bump at deploy/installer-refresh time): `main` now carries host changes **beyond `0.4.4`** (orphan-rig + NSO-rotation finite guard, undeployed — `.115` stays `0.4.3`) and client/browser changes beyond the keeper (`0.6.2`/`0.5.4`, players still on the installer's `0.6.1`/`0.5.3`). The infra fixes (`stop-lobby.sh` guard, `serve-lobbies.py`, `sf-monitor`) take effect on `.115` on the next rsync + service restart.
+
+---
+
 # What's new — 2026-06-26 second review sweep + ops/infra hardening
 
 A follow-up skeptical sweep (four parallel reviewers) targeting **fresh surface** the first sweep didn't cover — the operational shell scripts that run the live server and the player-facing installer — plus differently-focused second passes on host and client. All *code* fixes compile/test-verified; the installer findings are PowerShell that can't be tested here, so they're documented below for the next installer refresh (where they get a Windows test) rather than blind-edited on a path that can brick a player's install.
