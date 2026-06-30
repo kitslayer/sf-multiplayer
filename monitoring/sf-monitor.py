@@ -581,9 +581,16 @@ document.getElementById('logkind').addEventListener('change',tailLog);
 
 
 def main():
-    host, _, port = BIND.rpartition(":")
+    host, sep, port = BIND.rpartition(":")
+    if not sep:                      # no ":" in BIND → treat the whole value as host
+        host, port = BIND, "8090"
+    try:
+        port_i = int(port)
+    except ValueError:
+        raise SystemExit(
+            f"[sf-monitor] invalid SF_MON_BIND={BIND!r}; expected host:port (e.g. 127.0.0.1:8090)")
     Sampler().start()
-    httpd = ThreadingHTTPServer((host or "127.0.0.1", int(port)), Handler)
+    httpd = ThreadingHTTPServer((host or "127.0.0.1", port_i), Handler)
     print(f"[sf-monitor] sampling every {INTERVAL}s → {DATADIR}; dashboard on http://{BIND}", flush=True)
     httpd.serve_forever()
 

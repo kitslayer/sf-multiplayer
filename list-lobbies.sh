@@ -21,7 +21,9 @@ for conf in "$REGISTRY"/*.conf; do
   pid=$(grep '^pid='      "$conf" | cut -d= -f2)
   log=$(grep '^log='      "$conf" | cut -d= -f2)
   started=$(grep '^started=' "$conf" | cut -d= -f2-)
-  if kill -0 "$pid" 2>/dev/null; then
+  if [ "$pid" = "static" ]; then
+    state="STATIC"
+  elif kill -0 "$pid" 2>/dev/null; then
     state="UP"
   else
     state="STALE"

@@ -14,9 +14,15 @@ if not defined SF_LOBBIES_DIR set "SF_LOBBIES_DIR=%TEMP%\sf-lobbies"
 echo Killing registered lobbies from %SF_LOBBIES_DIR% ...
 if exist "%SF_LOBBIES_DIR%" (
   for %%F in ("%SF_LOBBIES_DIR%\*.conf") do (
-    for /f "usebackq tokens=2 delims==" %%P in (`findstr /b "pid=" "%%~F"`) do (
-      echo   %%~nF: killing pid %%P
-      taskkill /F /PID %%P >nul 2>&1
+    REM Skip static (systemd-managed) lobbies like MAIN — mirror stop-all-lobbies.sh.
+    findstr /x /c:"static=true" "%%~F" >nul 2>&1
+    if errorlevel 1 (
+      for /f "usebackq tokens=2 delims==" %%P in (`findstr /b "pid=" "%%~F"`) do (
+        echo   %%~nF: killing pid %%P
+        taskkill /F /PID %%P >nul 2>&1
+      )
+    ) else (
+      echo   %%~nF: skipping static ^(systemd-managed^) lobby
     )
   )
 )
@@ -28,7 +34,11 @@ timeout /t 1 /nobreak >nul
 
 echo Clearing lobby registry: %SF_LOBBIES_DIR%
 if exist "%SF_LOBBIES_DIR%" (
-  del /Q "%SF_LOBBIES_DIR%\*.conf" >nul 2>&1
+  REM Delete only non-static confs — keep static (systemd-managed) entries like MAIN.
+  for %%F in ("%SF_LOBBIES_DIR%\*.conf") do (
+    findstr /x /c:"static=true" "%%~F" >nul 2>&1
+    if errorlevel 1 del /Q "%%~F" >nul 2>&1
+  )
 )
 
 echo All lobbies stopped.

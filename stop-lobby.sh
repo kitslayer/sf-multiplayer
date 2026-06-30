@@ -15,6 +15,15 @@ if [ ! -f "$CONF" ]; then
   exit 1
 fi
 
+# Never stop a static (systemd-managed) lobby like MAIN: doing so would kill the
+# always-on oracle AND rm -rf its live wineprefix below. The reaper and
+# stop-all-lobbies.sh refuse static lobbies; enforce it here too so EVERY caller
+# (including the HTTP /lobbies/stop control endpoint) is covered.
+if grep -qs '^static=true$' "$CONF"; then
+  echo "Refusing to stop static (systemd-managed) lobby '$CODE'." >&2
+  exit 1
+fi
+
 PID=$(grep '^pid=' "$CONF" | cut -d= -f2)
 PORT=$(grep '^port=' "$CONF" | cut -d= -f2)
 

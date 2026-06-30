@@ -396,16 +396,19 @@ class LobbyHandler(BaseHTTPRequestHandler):
         if not self._authed():
             self._send_json(403, {"error": "forbidden"})
             return
-        try:
-            # Cap the body read so a huge Content-Length can't stall/OOM a thread.
-            length = min(int(self.headers.get("Content-Length", "0")), 4096)
-            body = json.loads(self.rfile.read(length) or b"{}")
-            code = str(body.get("code", "")).strip().upper()
-        except (ValueError, json.JSONDecodeError):
-            self._send_json(400, {"error": "bad json"})
-            return
+        # _read_json caps the body, rejects a negative Content-Length, and swallows
+        # a mid-read OSError (a hand-rolled read here previously did none of those).
+        body = self._read_json()
+        code = str(body.get("code", "")).strip().upper()
         if not LOBBY_CODE_RE.match(code):
             self._send_json(400, {"error": "missing or invalid code"})
+            return
+        # Never stop a static (systemd-managed) lobby like MAIN: stop-lobby.sh would
+        # kill the always-on oracle AND rm -rf its live wineprefix. The reaper and
+        # stop-all-lobbies.sh already refuse static lobbies; the HTTP control path
+        # must too, so a create-token holder can't tear down the front-door oracle.
+        if code in {s["code"] for s in _static_lobbies()}:
+            self._send_json(409, {"error": "refusing to stop a static (systemd-managed) lobby", "code": code})
             return
         ok = stop_lobby(code)
         self._send_json(200 if ok else 500, {"code": code, "stopped": ok})
