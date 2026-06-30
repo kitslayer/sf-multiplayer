@@ -219,6 +219,7 @@ namespace SFClientRecon
             // a new map = new ids, so without this they grow unbounded per session.
             _crateSafePos.Clear();
             _crateSafeAt.Clear();
+            _crateFallStartedAt.Clear();   // same instanceID-keyed lifetime as the two above
             ClearPushableLerpCache();
             // _recentLerpAt is keyed by crate transform.root instanceID (new map →
             // new ids). It's otherwise pruned only inside DestructibleCollisionPrefix

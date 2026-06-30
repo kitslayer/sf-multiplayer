@@ -107,7 +107,11 @@ namespace SFClientRecon
         // Cache: NSO instanceID -> is a pushable ground crate (true => skip the
         // network lerp; local physics owns it). Computed once per object.
         private static readonly Dictionary<int, bool> _pushableLerpCache = new Dictionary<int, bool>();
-        internal static void ClearPushableLerpCache() { _pushableLerpCache.Clear(); }
+        // Cleared on map change (called from OnMapChangedInvalidateCachePostfix).
+        // Both are per-map id-keyed push caches — a new map = new ids, so clearing
+        // here keeps them from growing across a session (and forces a fresh relay of
+        // each crate's first post-map position rather than skipping it as unchanged).
+        internal static void ClearPushableLerpCache() { _pushableLerpCache.Clear(); _lastRelayPos.Clear(); }
 
         // Prefix on NetworkSyncableObject.LerpLocalDummy. Returns false to skip the
         // original (the network-driven transform lerp) for pushable crates.

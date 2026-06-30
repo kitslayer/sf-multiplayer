@@ -102,6 +102,16 @@ namespace SFClientRecon
         private uint _pendingTick;
         private uint _snapsReceived;
         private uint _snapsApplied;
+        // D: monotonic-tick gate — drop a reordered/late snapshot so it can't
+        // regress positions / reverse extrapolation. Unchecked signed delta handles
+        // the 2^32 wrap; a backward jump beyond SnapResyncThreshold is a server
+        // restart (tick reset) and is accepted so we resync rather than freeze.
+        private uint _lastAcceptedTick;
+        private bool _haveAcceptedTick;
+        private uint _snapsDroppedStale;
+        private const int SnapResyncThreshold = 256; // ~8.5s @30Hz; reorders are far smaller
+        // E: SFCLIENTRECON_SMOOTH_REMOTE can't change at runtime — read it once.
+        private bool _smoothRemoteCached, _smoothRemoteRead;
 
         // --- Lobby SELECT (sf-router single-port front-door) --------------------
         // The lobby this client wants. Set from the in-game browser via
@@ -319,6 +329,14 @@ namespace SFClientRecon
                 Log.LogError($"Server addr parse failed: {e.Message}. PlayerInput disabled.");
             }
 
+            if (_serverEp == null)
+            {
+                // C5: the RX source-address filter keys on _serverEp; with no resolved
+                // endpoint, starting the listener would accept datagrams from ANY source
+                // (unarmed filter) — and there's no server to talk to anyway. Skip it.
+                Log.LogError($"{PluginName} {PluginVersion}: no server endpoint resolved — RX listener NOT started. Fix -address/-port and relaunch.");
+                return;
+            }
             Log.LogInfo($"{PluginName} {PluginVersion}: starting v26 snapshot listener on UDP :{_listenPort}. vSync off, FPS uncapped.");
             try
             {
@@ -618,12 +636,24 @@ namespace SFClientRecon
             System.Threading.Monitor.Enter(_snapLock);
             try
             {
-                _pendingSnap = list;
-                _pendingNsoSnap = nsoList;
-                _pendingMapSyncSnap = mapSyncList;
-                _pendingMapStateSnap = mapStateList;
-                _pendingTick = tick;
-                _snapsReceived++;
+                // D: drop a reordered/older snapshot (keep the newer pending). A jump
+                // older than SnapResyncThreshold is a server restart → accept + resync.
+                int d = _haveAcceptedTick ? unchecked((int)(tick - _lastAcceptedTick)) : 1;
+                if (_haveAcceptedTick && d <= 0 && d > -SnapResyncThreshold)
+                {
+                    _snapsDroppedStale++;
+                }
+                else
+                {
+                    _pendingSnap = list;
+                    _pendingNsoSnap = nsoList;
+                    _pendingMapSyncSnap = mapSyncList;
+                    _pendingMapStateSnap = mapStateList;
+                    _pendingTick = tick;
+                    _lastAcceptedTick = tick;
+                    _haveAcceptedTick = true;
+                    _snapsReceived++;
+                }
             }
             finally { System.Threading.Monitor.Exit(_snapLock); }
         }
@@ -2186,54 +2216,35 @@ namespace SFClientRecon
         {
             try
             {
-                int localSlot = FindLocalSlot();
-                if (localSlot < 0) return;
-
-                var npType = AccessTools.TypeByName("NetworkPlayer");
-                if ((object)npType == null) return;
-                var nps = UnityEngine.Object.FindObjectsOfType(npType);
-                if (nps == null) return;
-
-                bool smoothRemote = Environment.GetEnvironmentVariable("SFCLIENTRECON_SMOOTH_REMOTE") == "1";
-                foreach (var entry in snap)
+                // The local-player branch is disabled (client prediction owns the
+                // local rig; the server's authority arrives via InjectInput/movement).
+                // So unless opt-in remote smoothing is on there is nothing to apply
+                // here — and this runs ~30x/sec. Read the env flag once (it can't
+                // change at runtime) and skip the whole scan when it's off. (Also
+                // dropped a dead FindObjectsOfType(NetworkPlayer) whose result was
+                // never read — the loop iterates the snapshot, not the scene.)
+                if (!_smoothRemoteRead)
                 {
-                    bool isLocal = entry.Slot == localSlot;
-                    var target = new Vector3(entry.X, entry.Y, entry.Z);
-
-                    // Phase 6.12.2 v1.0 — SHIFT correction for the local
-                    // player. Instead of "lerp / snap to the stale server
-                    // position" (which pulls the predicting player visually
-                    // BACKWARD by ~RTT-equivalent distance and feels awful),
-                    // compute the drift between server's view at sequence N
-                    // and local's predicted position at sequence N, then
-                    // apply that drift as an OFFSET to the player's CURRENT
-                    // position. Mathematically: new_pos = current_local +
-                    // (server_at_N - predicted_at_N). This is the canonical
-                    // CSGO / Valorant / Overwatch correction — the server's
-                    // adjustment is incorporated WITHOUT the visual snap-back.
-                    // Below SoftDriftThresholdSq → ignore (natural RTT jitter).
-                    if (isLocal)
+                    _smoothRemoteRead = true;
+                    _smoothRemoteCached = Environment.GetEnvironmentVariable("SFCLIENTRECON_SMOOTH_REMOTE") == "1";
+                }
+                if (_smoothRemoteCached)
+                {
+                    int localSlot = FindLocalSlot();
+                    if (localSlot >= 0)
                     {
-                        // Drift correction TEMPORARILY DISABLED. The previous version
-                        // applied a position shift every snapshot when the server's
-                        // view differed from local prediction → caused hyper-push of
-                        // the player at /start. The rate-limited version still felt
-                        // weird. For now, let local prediction own the player
-                        // entirely; the server's authoritative position is reflected
-                        // by InjectInput / movement only. (C2: dropped the unused
-                        // acked-seq tracking — nothing read _serverLastAckedSeq.)
-                    }
-                    else
-                    {
-                        // REMOTE player. Opt-in smoothing via env var; default
-                        // is to let stock forwarded PlayerUpdate (msgType 10)
-                        // drive remote positions.
-                        if (smoothRemote) _playerTargets[entry.Slot] = target;
+                        foreach (var entry in snap)
+                        {
+                            // REMOTE players only; stock forwarded PlayerUpdate
+                            // (msgType 10) drives them, we smooth toward the snapshot.
+                            if (entry.Slot != localSlot)
+                                _playerTargets[entry.Slot] = new Vector3(entry.X, entry.Y, entry.Z);
+                        }
                     }
                 }
                 _snapsApplied++;
                 if (VerboseDiag && (_snapsApplied == 1 || _snapsApplied % 90 == 0))
-                    Log.LogInfo($"[P6.11] Applied snapshot tick={tick} localSlot={localSlot} (received={_snapsReceived}, applied={_snapsApplied}).");
+                    Log.LogInfo($"[P6.11] Applied snapshot tick={tick} (received={_snapsReceived}, applied={_snapsApplied}, staleDropped={_snapsDroppedStale}, smoothRemote={_smoothRemoteCached}).");
             }
             catch (Exception e) { Log.LogWarning($"[P6.11 apply] {e.Message}"); }
         }
