@@ -1,0 +1,41 @@
+name: CI
+
+# The C# BepInEx plugins build against copyrighted Stick Fight / Unity / BepInEx
+# DLLs that can't live in a public runner, so they aren't built here. This
+# workflow locks down the two subsystems that CAN build in the open: the Go
+# router and the Python tooling. See notes/SIMPLIFICATION.md item 6.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  go-router:
+    name: sf-router (build + test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sf-router
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache-dependency-path: sf-router/go.sum
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
+
+  python:
+    name: python tooling (tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pytest
+        run: pip install pytest
+      - name: Run tests
+        run: python -m pytest test_serve_lobbies.py test_sf_monitor.py -v

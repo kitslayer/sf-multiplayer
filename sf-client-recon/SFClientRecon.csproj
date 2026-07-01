@@ -11,6 +11,11 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Shared Mono 2.0 attribute polyfills (single canonical copy in ../shared) -->
+    <Compile Include="..\shared\Mono2Polyfills.cs" Link="Mono2Polyfills.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Reference Include="BepInEx">
       <HintPath>refs\BepInEx.dll</HintPath>
       <Private>False</Private>
