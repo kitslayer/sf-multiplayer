@@ -88,7 +88,7 @@ Total = 5 (prefix) + N (body) + 9 (suffix) = **N + 14**. Minimum packet = 14 byt
 
 ## v26 extensions (this repo)
 
-### msgType 39 — `WorldStateSnapshot` (server → all clients, 30Hz)
+### msgType 39 — `WorldStateSnapshot` (server → all clients, 60Hz default — configurable via `SFHEADLESS_SNAPSHOT_HZ`, clamped 10–120)
 
 Current format is **v26.7**. Sections are append-only and individually length-guarded: a v26.1+ section-aware client tolerates both missing trailing sections (older server) and unknown extra ones (newer server) — see the v26.7 compat note above. Only pre-section clients misparse.
 
