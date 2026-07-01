@@ -56,3 +56,8 @@ The [`recon/`](recon/) directory has the original reverse-engineering notes from
 - `phase6/NN-NAME.md` files are SNAPSHOTS at the time of writing (the prefix index implies write order)
 - `recon/` is FROZEN reference material from earlier sessions
 - `AUDIT_<date>.md` files are point-in-time deep dives; new ones get appended, old ones stay as historical record
+- [`archive/`](archive/) holds former top-level status docs that have been superseded (`PROJECT_STATE.md`, `STATUS.md`)
+
+## Meta
+
+- [`SIMPLIFICATION.md`](SIMPLIFICATION.md) — plan for splitting/deduping the large source files + docs to make the repo easier to work on

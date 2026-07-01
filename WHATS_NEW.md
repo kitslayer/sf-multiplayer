@@ -1,3 +1,31 @@
+# What's new — 2026-07-01 repo simplification / breakdown (structural, no behavior change)
+
+A structural cleanup pass to make the tree easier to work in — **zero runtime
+behavior change**. The plan and rationale are in
+[`notes/SIMPLIFICATION.md`](notes/SIMPLIFICATION.md).
+
+- **Split the two monolith source files into partial-class parts.**
+  `SFHeadlessHost.cs` 7146 → 1174 lines (13 concern files: HarmonyPatches, Boot,
+  Net, ClientHandlers, MatchFlow, Anticheat, Chat, Nso, Projectiles, Snapshot,
+  Rpc, Rigs, Diagnostics + `PerLobbyLogListener.cs`). `SFClientRecon.cs`
+  2359 → 743 lines (Net, Snapshot, CratePhysics, Patches, Console, Slot). All
+  fields stay in the main file (partial-class fields are shared); only whole
+  method/type blocks moved. Mechanically verified: every original line is
+  preserved exactly once and every emitted file is brace-balanced, and — after
+  merging `main`'s 2026-06-30 fixes into the new part files — all four plugins
+  `dotnet build` clean (net46/net35, 0 warnings, 0 errors).
+- **Deduped `Mono2Polyfills.cs`** — three byte-identical copies → one
+  `shared/Mono2Polyfills.cs`, referenced by a linked `Compile` item in all three
+  plugin csprojs.
+- **Added CI** (`.github/workflows/ci.yml`) for the two subsystems that build in
+  the open — `sf-router` (go build/vet/test) and the Python tooling (pytest) —
+  both verified green locally. The C# plugins can't build in public CI (upstream
+  copyrighted DLLs).
+- **Archived superseded docs** — `PROJECT_STATE.md` + `STATUS.md` (both
+  self-marked "Superseded") moved to `notes/archive/`.
+
+---
+
 # What's new — 2026-06-30 third review sweep (six reviewers; fixes on `main`)
 
 A third skeptical sweep — six parallel reviewers fanned out by component (host gameplay/state, client prediction, box-fix + server-browser, Go router, Python control plane, shell + installer), each hunting *new* correctness/reliability bugs rather than re-flagging the known-deferred items. The router and box-fix came back clean. All fixes compile/test-verified (host + client + browser `dotnet build` clean, Python `unittest` 15 green, router `go test -race` green); the host changes touch the live sim and need a 2-player live re-verify before deploy.
