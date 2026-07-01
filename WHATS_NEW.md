@@ -1,3 +1,37 @@
+# What's new — 2026-07-01 deploy: host 0.4.5 to `.115` + installer refresh (client 0.6.3 / browser 0.5.5)
+
+Shipped everything that had accumulated on `main` — the 2026-06-30 review-sweep
+fixes (now living in the post-split part files) plus the version bump.
+
+**Server-side (`.115`)**
+- Bumped `SFHeadlessHost` 0.4.4 → **0.4.5** (carries the orphan-rig-on-disconnect
+  cleanup + NSO `Finite()` guards), rebuilt clean (net46, 0 warnings).
+- Backed up the live 0.4.3 DLL on-box (`SFHeadlessHost.dll.bak-20260701-211445`),
+  swapped in 0.4.5, restarted `sf-oracle.service`.
+- Verified: 0.4.5 boot banner, port 1337 bound, oracle heartbeating, MAIN lobby
+  registered + `alive` in the browser, and a v25 Ping reply on both LAN
+  (`192.168.1.115`) and public (`69.53.117.43:1337`, ~15 ms). `sf-router` untouched
+  and still `active` (SELECT-gated, so a bare Ping to 1338 times out by design).
+- The two boot-log `NullReferenceException`s are pre-existing game-code headless
+  noise (`WeaponPickUp`/`NetworkSyncableObject` `.Awake` under `MultiplayerManager:Awake`),
+  not from our plugins. `SFBoxFix` unchanged (byte-identical 0.3.3, not redeployed).
+
+**Client installer**
+- Bumped `SFClientRecon` 0.6.2 → **0.6.3** (tick-gate + ApplySnapshot trim) and
+  `SFServerBrowser` 0.5.4 → **0.5.5** (F3 HUD 2 Hz throttle); rebuilt clean.
+- Repackaged `sf-multiplayer-StickFight-Installer.zip`: swapped the two plugin DLLs
+  in the `StickFight-DropIn` payload (BepInEx core + patched `Assembly-CSharp.srv.v25`
+  unchanged); refreshed `dist/` and `1-click-install/files/` to match.
+
+**Still owed (not done here)**
+- A 2-player live *disconnect* re-verify of the host orphan-rig/`Finite` fixes — the
+  deploy passed boot + Ping but not a full match with a real disconnect.
+- The flagged PowerShell installer-script hardening (no-backup clobber, missing
+  rollback, deprecated `dist/`+`deploy/` wrong-DLL) — needs a Windows test, so it
+  ships in a later installer pass, not blind-edited here.
+
+---
+
 # What's new — 2026-07-01 repo simplification / breakdown (structural, no behavior change)
 
 A structural cleanup pass to make the tree easier to work in — **zero runtime
