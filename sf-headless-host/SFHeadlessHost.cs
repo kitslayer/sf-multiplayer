@@ -76,7 +76,7 @@ namespace SFHeadlessHost
     {
         public const string PluginGuid = "com.stickfightdev.headless-host";
         public const string PluginName = "SFHeadlessHost";
-        public const string PluginVersion = "0.4.4";
+        public const string PluginVersion = "0.4.5";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance;

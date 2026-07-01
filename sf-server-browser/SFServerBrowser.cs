@@ -37,7 +37,7 @@ namespace SFServerBrowser
     {
         public const string PluginGuid = "com.stickfightdev.server-browser";
         public const string PluginName = "SFServerBrowser";
-        public const string PluginVersion = "0.5.4";
+        public const string PluginVersion = "0.5.5";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance;
