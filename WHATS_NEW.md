@@ -1,3 +1,31 @@
+# What's new — 2026-07-01 repo simplification / breakdown (structural, no behavior change)
+
+A structural cleanup pass to make the tree easier to work in — **zero runtime
+behavior change**. The plan and rationale are in
+[`notes/SIMPLIFICATION.md`](notes/SIMPLIFICATION.md).
+
+- **Split the two monolith source files into partial-class parts.**
+  `SFHeadlessHost.cs` 7146 → 1174 lines (13 concern files: HarmonyPatches, Boot,
+  Net, ClientHandlers, MatchFlow, Anticheat, Chat, Nso, Projectiles, Snapshot,
+  Rpc, Rigs, Diagnostics + `PerLobbyLogListener.cs`). `SFClientRecon.cs`
+  2359 → 743 lines (Net, Snapshot, CratePhysics, Patches, Console, Slot). All
+  fields stay in the main file (partial-class fields are shared); only whole
+  method/type blocks moved. Mechanically verified: every original line is
+  preserved exactly once and every emitted file is brace-balanced. **Not
+  compiled here** (needs `refs/`); it's a pure redistribution of members so a
+  local `dotnet build` should be clean.
+- **Deduped `Mono2Polyfills.cs`** — three byte-identical copies → one
+  `shared/Mono2Polyfills.cs`, referenced by a linked `Compile` item in all three
+  plugin csprojs.
+- **Added CI** (`.github/workflows/ci.yml`) for the two subsystems that build in
+  the open — `sf-router` (go build/vet/test) and the Python tooling (pytest) —
+  both verified green locally. The C# plugins can't build in public CI (upstream
+  copyrighted DLLs).
+- **Archived superseded docs** — `PROJECT_STATE.md` + `STATUS.md` (both
+  self-marked "Superseded") moved to `notes/archive/`.
+
+---
+
 # What's new — 2026-06-26 second review sweep + ops/infra hardening
 
 A follow-up skeptical sweep (four parallel reviewers) targeting **fresh surface** the first sweep didn't cover — the operational shell scripts that run the live server and the player-facing installer — plus differently-focused second passes on host and client. All *code* fixes compile/test-verified; the installer findings are PowerShell that can't be tested here, so they're documented below for the next installer refresh (where they get a Windows test) rather than blind-edited on a path that can brick a player's install.
