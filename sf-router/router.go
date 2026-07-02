@@ -110,6 +110,12 @@ type Router struct {
 	// — no HTTP/website needed. Set once before Run; read on the (cold) LIST path.
 	lister func() []string
 
+	// controller, when set, handles CREATE/RESTART control ops by proxying to the
+	// local control plane (the router can't spawn Proton itself). Called on a
+	// goroutine (lobby spawn/restart takes ~25s), so the client gets an immediate
+	// "accepted" ack. Set once before Run.
+	controller func(op byte, code string)
+
 	// maxFlowsPerIP caps concurrent flows from one source IP (0 = unlimited).
 	// Set once before Run; read under mu on the new-flow path.
 	maxFlowsPerIP int
@@ -348,9 +354,35 @@ func (r *Router) handleControl(cliAddr *net.UDPAddr, data []byte) {
 		r.sendAck(cliAddr, nonce, ackOK)
 		log.Printf("[router] SELECT %q from %s → %s", code, cliAddr, backend)
 		return
+	case opCreate, opRestart:
+		// In-game lobby management. The router can't spawn/restart Proton itself,
+		// so it proxies to the local control plane on a goroutine (the work is
+		// slow) and acks "accepted" immediately; the browser refreshes the list.
+		r.mu.Lock()
+		ctl := r.controller
+		r.mu.Unlock()
+		if ctl == nil {
+			r.sendCtlAck(cliAddr, nonce, ctlRejected)
+			return
+		}
+		go ctl(op, code)
+		r.sendCtlAck(cliAddr, nonce, ctlAccepted)
+		verb := "CREATE"
+		if op == opRestart {
+			verb = "RESTART"
+		}
+		log.Printf("[router] %s %q from %s → dispatched to control plane", verb, code, cliAddr)
+		return
 	default:
 		// Unknown op — ignore.
 		return
+	}
+}
+
+// sendCtlAck writes a create/restart ACK back to the client via the public socket.
+func (r *Router) sendCtlAck(cliAddr *net.UDPAddr, nonce uint32, status byte) {
+	if _, err := r.pub.WriteToUDP(buildCtlAck(nonce, status), cliAddr); err != nil {
+		log.Printf("[router] ctl-ack to %s failed: %v", cliAddr, err)
 	}
 }
 
@@ -429,6 +461,14 @@ func (r *Router) SetDefaultCode(code string) {
 func (r *Router) SetLister(fn func() []string) {
 	r.mu.Lock()
 	r.lister = fn
+	r.mu.Unlock()
+}
+
+// SetController sets the handler for CREATE/RESTART control ops (proxies to the
+// local control plane). Call before Run.
+func (r *Router) SetController(fn func(op byte, code string)) {
+	r.mu.Lock()
+	r.controller = fn
 	r.mu.Unlock()
 }
 

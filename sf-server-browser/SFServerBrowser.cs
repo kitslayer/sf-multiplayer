@@ -37,7 +37,7 @@ namespace SFServerBrowser
     {
         public const string PluginGuid = "com.stickfightdev.server-browser";
         public const string PluginName = "SFServerBrowser";
-        public const string PluginVersion = "0.5.7";
+        public const string PluginVersion = "0.5.8";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance;
@@ -51,6 +51,7 @@ namespace SFServerBrowser
         private int _routerPort = 1338;
         private static readonly byte[] RouterMagic = { 0x53, 0x46, 0x52, 0x54, 0x52, 0x00, 0x00, 0x01 };
         private const byte OpList = 0x03, OpListResp = 0x83;
+        private const byte OpCreate = 0x04, OpRestart = 0x05, OpCtlAck = 0x84;
 
         // ---- Overlay state machine -------------------------------------------
         internal enum Tab { Browse = 0, Create = 1, Join = 2 }
@@ -520,6 +521,59 @@ namespace SFServerBrowser
             _statusText = _servers.Count == 0 ? "No lobbies running." : (_servers.Count + " lobby(ies) online.");
         }
 
+        // Fire a CREATE/RESTART control datagram at the router (no website). The
+        // router acks "accepted" and does the slow spawn/restart async, so this is
+        // fire-and-forget + a toast; the browse list refresh reflects the result.
+        private void SendRouterCtl(byte op, string code)
+        {
+            string host = _routerHost; int port = _routerPort;
+            if (string.IsNullOrEmpty(host)) { PushToast("No router endpoint set.", 2); return; }
+            var th = new System.Threading.Thread(new System.Threading.ThreadStart(delegate
+            {
+                try
+                {
+                    using (var udp = new System.Net.Sockets.UdpClient())
+                    {
+                        udp.Client.ReceiveTimeout = 2500;
+                        IPAddress ip;
+                        if (!IPAddress.TryParse(host, out ip)) ip = Dns.GetHostAddresses(host)[0];
+                        var ep = new IPEndPoint(ip, port);
+                        var req = BuildCtlReq(op, code, (uint)Environment.TickCount);
+                        udp.Send(req, req.Length, ep);
+                        try { var from = new IPEndPoint(IPAddress.Any, 0); udp.Receive(ref from); } catch { /* ack best-effort */ }
+                    }
+                }
+                catch { /* fire-and-forget */ }
+            }));
+            th.IsBackground = true; th.Start();
+        }
+
+        private static byte[] BuildCtlReq(byte op, string code, uint nonce)
+        {
+            // [8]magic [1]op [1]codeLen [N]code [4]nonce (LE) — matches select.go.
+            code = code ?? "";
+            if (code.Length > 16) code = code.Substring(0, 16);
+            var cb = Encoding.ASCII.GetBytes(code);
+            var b = new byte[8 + 2 + cb.Length + 4];
+            Array.Copy(RouterMagic, b, 8);
+            b[8] = op; b[9] = (byte)cb.Length;
+            Array.Copy(cb, 0, b, 10, cb.Length);
+            int o = 10 + cb.Length;
+            b[o] = (byte)(nonce & 0xFF); b[o + 1] = (byte)((nonce >> 8) & 0xFF);
+            b[o + 2] = (byte)((nonce >> 16) & 0xFF); b[o + 3] = (byte)((nonce >> 24) & 0xFF);
+            return b;
+        }
+
+        // Restart a named/always-on lobby from in-game (router → control plane →
+        // systemctl). Only static lobbies restart; the server no-ops others.
+        private void RestartLobby(string code)
+        {
+            if (string.IsNullOrEmpty(code)) return;
+            if (!_useUdpList) { PushToast("Restart needs the router (oracle mode).", 2); return; }
+            SendRouterCtl(OpRestart, code);
+            PushToast("Restarting " + code + "… (named lobbies only)", 1, 4f);
+        }
+
         private static string ResolveOracleHost()
         {
             try
@@ -594,6 +648,13 @@ namespace SFServerBrowser
                 return;
             }
             _createCooldownAt = Time.realtimeSinceStartup + 5f;
+            if (_useUdpList)
+            {
+                // Router mode: create over the router's UDP control op (no website).
+                SendRouterCtl(OpCreate, "");
+                PushToast("Creating lobby… it'll appear in the list shortly.", 1, 4.5f);
+                return;
+            }
             _isCreating = true;
             StartCoroutine(CreateLobbyCoroutine());
         }

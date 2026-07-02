@@ -33,8 +33,14 @@ const (
 	opSelect byte = 0x01
 	opLeave  byte = 0x02
 	opList   byte = 0x03 // client → router: "send me the lobby list" (code empty)
+	opCreate byte = 0x04 // client → router: "create a lobby" (code empty → auto-gen)
+	opRestart byte = 0x05 // client → router: "restart lobby <code>"
 	opAck    byte = 0x81
 	opListResp byte = 0x83 // router → client: the lobby list (see buildListResp)
+	opCtlAck   byte = 0x84 // router → client: create/restart accepted|rejected (status byte)
+
+	ctlAccepted byte = 0x00
+	ctlRejected byte = 0x01
 
 	ackOK         byte = 0x00
 	ackNoSuchCode byte = 0x01
@@ -125,6 +131,19 @@ func buildAck(nonce uint32, status byte) []byte {
 	out := make([]byte, 0, 14)
 	out = append(out, selectMagic...)
 	out = append(out, opAck, status)
+	var n [4]byte
+	binary.LittleEndian.PutUint32(n[:], nonce)
+	out = append(out, n[:]...)
+	return out
+}
+
+// buildCtlAck builds a create/restart ACK: [8]magic [1]op=opCtlAck [1]status [4]nonce.
+// Same layout as the SELECT-ACK but a distinct op so the client's SELECT-ACK
+// handler doesn't confuse a create/restart reply with a lobby-binding result.
+func buildCtlAck(nonce uint32, status byte) []byte {
+	out := make([]byte, 0, 14)
+	out = append(out, selectMagic...)
+	out = append(out, opCtlAck, status)
 	var n [4]byte
 	binary.LittleEndian.PutUint32(n[:], nonce)
 	out = append(out, n[:]...)

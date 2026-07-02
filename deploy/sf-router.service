@@ -15,6 +15,12 @@ Group=miles
 # repointed here, or the patched-DLL game socket before its recon socket's
 # SELECT lands) is routed to MAIN instead of dropped, so the router is safe to
 # use as the single front door.
+# SF_CONTROL_TOKEN for the CREATE/RESTART proxy (-control → localhost serve-lobbies).
+# Same token file serve-lobbies uses; optional (- prefix) so the router still runs
+# without it (create/restart just return 403 then).
+EnvironmentFile=-%h/sf-oracle/sf-control.env
+# -default MAIN: no-SELECT clients + the patched-DLL game socket route to MAIN.
+# CREATE/RESTART control ops proxy to -control (default http://127.0.0.1:8080).
 ExecStart=%h/sf-router -listen 0.0.0.0:1338 -registry /tmp/sf-lobbies -stats 127.0.0.1:8081 -default MAIN
 Restart=on-failure
 RestartSec=3

@@ -161,10 +161,16 @@ namespace SFServerBrowser
             Pill(stR, s.Alive ? "ALIVE" : "DOWN", s.Alive ? ColGood : ColBad);
 
             // join
-            var joinR = new Rect(r.xMax - 132, r.y + (r.height - 46) / 2f, 120, 46);
+            var joinR = new Rect(r.xMax - 122, r.y + (r.height - 46) / 2f, 112, 46);
             bool full = s.Capacity > 0 && s.Players >= s.Capacity;
             if (ThemedButton(joinR, full ? "FULL" : "JOIN", full ? 1 : 3, "join" + idx, !full && s.Alive))
                 JoinLobby(s.Code);
+
+            // restart (named/always-on lobbies; server no-ops ad-hoc ones). Small
+            // button left of JOIN — bounces a wedged lobby without SSH.
+            var reR = new Rect(joinR.x - 52, joinR.y, 46, 46);
+            if (ThemedButton(reR, "RST", 1, "rst" + idx, s.Alive, "Restart this lobby (named lobbies only)"))
+                RestartLobby(s.Code);
         }
 
         private static Color CapacityColor(ServerEntry s)

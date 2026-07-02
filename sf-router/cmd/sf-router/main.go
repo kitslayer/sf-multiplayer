@@ -15,8 +15,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -35,6 +37,7 @@ func main() {
 	regTTL := flag.Duration("registry-ttl", 2*time.Second, "lobby registry cache TTL")
 	maxPerIP := flag.Int("max-flows-per-ip", 64, "max concurrent flows from one source IP (0 = unlimited)")
 	defaultCode := flag.String("default", "", "routing mode: lobby code to route clients that never SELECT (e.g. MAIN); empty = drop unselected traffic")
+	control := flag.String("control", "http://127.0.0.1:8080", "control-plane base URL for the CREATE/RESTART proxy (routing mode)")
 	flag.Parse()
 
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
@@ -68,6 +71,11 @@ func main() {
 		r.SetDefaultCode(*defaultCode)
 		log.Printf("[router] default lobby for unselected clients: %q", *defaultCode)
 	}
+	if *registry != "" {
+		r.SetController(makeController(*control, os.Getenv("SF_CONTROL_TOKEN")))
+		log.Printf("[router] CREATE/RESTART proxy → %s (token %s)", *control,
+			map[bool]string{true: "set", false: "MISSING (create/restart will 403)"}[os.Getenv("SF_CONTROL_TOKEN") != ""])
+	}
 
 	if *stats != "" {
 		go serveStats(*stats, r)
@@ -87,6 +95,43 @@ func main() {
 
 	if err := r.Run(); err != nil {
 		log.Fatalf("[router] run error: %v", err)
+	}
+}
+
+// makeController returns the CREATE/RESTART handler: it POSTs to the local
+// control plane (serve-lobbies) with the shared token — so the token stays
+// server-side and clients never need it. op 0x04 = create, 0x05 = restart.
+func makeController(base, token string) func(op byte, code string) {
+	client := &http.Client{Timeout: 60 * time.Second}
+	return func(op byte, code string) {
+		var url string
+		var body io.Reader
+		switch op {
+		case 0x04: // opCreate — auto-generated code, default options
+			url = base + "/lobbies"
+		case 0x05: // opRestart — restart the named lobby
+			url = base + "/lobbies/restart"
+			b, _ := json.Marshal(map[string]string{"code": code})
+			body = bytes.NewReader(b)
+		default:
+			return
+		}
+		req, err := http.NewRequest("POST", url, body)
+		if err != nil {
+			log.Printf("[router] control request build failed: %v", err)
+			return
+		}
+		if token != "" {
+			req.Header.Set("X-SF-Token", token)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("[router] control POST %s failed: %v", url, err)
+			return
+		}
+		defer resp.Body.Close()
+		log.Printf("[router] control POST %s (code=%q) → %s", url, code, resp.Status)
 	}
 }
 

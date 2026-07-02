@@ -1,0 +1,10 @@
+# In-game RESTART: let the control plane (serve-lobbies.py, running as miles)
+# bounce a named lobby's systemd unit without a password. serve-lobbies runs
+# exactly:  sudo -n systemctl restart sf-oracle.service
+#           sudo -n systemctl restart sf-lobby@<CODE>.service
+# Scoped to `systemctl restart` of the SF units only (no shell — sudo execs
+# systemctl directly, and the code is validated [A-Z0-9] before it gets here).
+#
+# Install:  sudo install -m 0440 -o root -g root deploy/sudoers-sf-lobby-restart /etc/sudoers.d/sf-lobby-restart
+# Validate: sudo visudo -cf /etc/sudoers.d/sf-lobby-restart
+miles ALL=(root) NOPASSWD: /usr/bin/systemctl restart sf-oracle.service, /usr/bin/systemctl restart sf-lobby@*.service, /bin/systemctl restart sf-oracle.service, /bin/systemctl restart sf-lobby@*.service

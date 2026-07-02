@@ -93,6 +93,10 @@ GET_RATE_REFILL = float(os.environ.get("SF_GET_RATE_REFILL", "20"))   # tokens/s
 _last_create: dict[str, float] = {}
 _empty_since: dict[str, float] = {}
 _create_lock = threading.Lock()
+# per-code restart cooldown (in-game RESTART; via the router all POSTs share the
+# router's IP, so cool down per lobby code instead of per client IP).
+_RESTART_MIN_INTERVAL = float(os.environ.get("SF_RESTART_MIN_INTERVAL", "20"))
+_last_restart: dict[str, float] = {}
 
 # GET rate-limit buckets (ip -> (tokens, last_ts)) + short-TTL lobby-list cache.
 _get_buckets: dict[str, tuple[float, float]] = {}
@@ -311,6 +315,9 @@ class LobbyHandler(BaseHTTPRequestHandler):
         if path == "/lobbies/stop":
             self._handle_stop()
             return
+        if path == "/lobbies/restart":
+            self._handle_restart()
+            return
         self._send_json(404, {"error": "not found"})
 
     def _client_ip(self) -> str:
@@ -413,6 +420,34 @@ class LobbyHandler(BaseHTTPRequestHandler):
         ok = stop_lobby(code)
         self._send_json(200 if ok else 500, {"code": code, "stopped": ok})
 
+    def _handle_restart(self) -> None:
+        # In-game RESTART (via the router's UDP proxy). Restarts a named/static
+        # (systemd-managed) lobby by bouncing its unit — the fix for a wedged
+        # lobby without SSH. Token-gated + per-code cooldown (all router-proxied
+        # POSTs share the router's IP, so cool down per code, not per IP).
+        if not self._authed():
+            self._send_json(403, {"error": "forbidden"})
+            return
+        body = self._read_json()
+        code = str(body.get("code", "")).strip().upper()
+        if not LOBBY_CODE_RE.match(code):
+            self._send_json(400, {"error": "missing or invalid code"})
+            return
+        now = time.time()
+        with _create_lock:
+            last = _last_restart.get(code, 0.0)
+            if now - last < _RESTART_MIN_INTERVAL:
+                self._send_json(429, {"error": "slow down", "retryAfterSec": round(_RESTART_MIN_INTERVAL - (now - last), 1)})
+                return
+            _last_restart[code] = now
+        ok, err = restart_lobby(code)
+        if not ok:
+            with _create_lock:
+                if _last_restart.get(code) == now:
+                    _last_restart.pop(code, None)  # release cooldown on failure
+        print(f"[control] restart lobby {code} → {'ok' if ok else err}")
+        self._send_json(200 if ok else 500, {"code": code, "restarted": ok, "error": err})
+
     def _send_json(self, code: int, obj: dict) -> None:
         self._send(code, "application/json", json.dumps(obj).encode())
 
@@ -493,6 +528,32 @@ def create_lobby(max_players: int = 4, public: bool = True, mode: int = 0) -> tu
     except OSError:
         pass
     return code, port, None
+
+
+def restart_lobby(code: str) -> tuple[bool, str | None]:
+    """Restart a named/static (systemd-managed) lobby by bouncing its unit.
+
+    MAIN → sf-oracle.service; any other named lobby → sf-lobby@<CODE>.service.
+    Ad-hoc launch-lobby.sh lobbies aren't restartable in-game (stop + recreate
+    instead). `code` is already validated + uppercased by the caller. Requires a
+    NOPASSWD sudoers rule for `systemctl restart` of these units (deploy/
+    sudoers-sf-lobby-restart)."""
+    lob = next((l for l in load_lobbies() if l.get("code") == code), None)
+    static_codes = {s["code"] for s in _static_lobbies()}
+    is_static = code in static_codes or (lob is not None and str(lob.get("static", "")).lower() in ("1", "true", "yes"))
+    if not is_static:
+        return False, "only named (always-on) lobbies can be restarted in-game"
+    unit = "sf-oracle.service" if code == "MAIN" else f"sf-lobby@{code}.service"
+    try:
+        proc = subprocess.run(
+            ["sudo", "-n", "systemctl", "restart", unit],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return False, f"systemctl restart failed: {e}"
+    if proc.returncode != 0:
+        return False, (proc.stderr or proc.stdout or "systemctl restart failed").strip()[:200]
+    return True, None
 
 
 # --- UDP liveness probe (for /healthz reporting only) -------------------------

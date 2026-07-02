@@ -1,3 +1,46 @@
+# What's new — 2026-07-02: always-on lobbies + in-game create/restart (no website)
+
+Finishing the server-browser work — named lobbies are now always-on, and players
+can create/restart lobbies from in-game, all over the router's one UDP port.
+
+**Always-on named lobbies (systemd).** COMP (1341) + CASUAL (1342) are now managed
+by a templated unit `sf-lobby@.service` (reuses `start-oracle-server.sh` +
+`register-main-lobby.sh`, which writes `static=true` → empty-reaper exempt), so
+they survive reboot + auto-restart like MAIN's `sf-oracle`. Per-instance port from
+`~/sf-oracle/lobbies/<CODE>.env`. Deployed + verified: `enabled`, `static`,
+routable. Also refreshed `.115`'s stale `register-main-lobby.sh` (it predated
+`static=true`; MAIN.conf now carries the marker too — it was previously exempt only
+via `SF_STATIC_LOBBIES`).
+
+**In-game create/restart over UDP.** New router control ops CREATE (`0x04`) /
+RESTART (`0x05`): the router proxies them to the local control plane (it can't spawn
+Proton itself), holding `SF_CONTROL_TOKEN` server-side so clients never need it.
+- Router (`select.go`/`router.go`/`main.go`): opCreate/opRestart → POST localhost
+  serve-lobbies; acks "accepted" immediately (the ~25 s spawn/restart is async).
+- serve-lobbies: new `POST /lobbies/restart` — bounces a named lobby's systemd unit
+  (`sudo systemctl restart sf-oracle|sf-lobby@<CODE>` via a scoped NOPASSWD sudoers
+  rule, `deploy/sudoers-sf-lobby-restart`); per-code cooldown.
+- Client (`SFServerBrowser` **0.5.8**): CREATE now goes over UDP (no HTTP/8080);
+  each BROWSE row gets an `RST` button.
+Verified live: RESTART COMP bounced its unit (MainPID 133861→135314); CREATE spawned
+a lobby through the router (`200 OK`, appeared in the list). Bumped `SF_MAX_LOBBIES`
+6→8 so CREATE has free ports (1343+) past the 3 always-on lobbies. (An over-broad
+cleanup command briefly stopped MAIN mid-session — systemd auto-restarted it in
+~25 s, incidentally confirming the always-on resilience.)
+
+**#3 visual GUI check — handed to you.** A real graphical client would confirm the
+one-UI fix visually, but the automated attempt (Xvfb + software GL on a fresh Wine
+prefix) was too slow to reach the menu in a reasonable window. Everything is
+*functionally* verified (router routes; UDP LIST returns MAIN/COMP/CASUAL;
+create/restart work end-to-end), and the one-UI fix is code- + build-verified. The
+visual eyeball is a ~30 s check on your box: install the refreshed zip → launch → F2
+→ BROWSE (you should see the three lobbies + JOIN/RST, one clean overlay).
+
+Shipped browser **0.5.8** (installer + `dist/` + `1-click/`, sha-identical). Router +
+serve-lobbies redeployed to `.115`; sudoers installed + validated.
+
+---
+
 # What's new — 2026-07-01 (list over UDP): in-game lobby list with no website — browser 0.5.7 + router LIST op
 
 Per "I don't want a whole separate website for lobbies — just simple in-game

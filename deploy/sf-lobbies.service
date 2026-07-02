@@ -14,7 +14,10 @@ WorkingDirectory=%h/sf-multiplayer
 # fresh checkout without the file still starts (create just stays token-gated).
 EnvironmentFile=-%h/sf-oracle/sf-control.env
 Environment=SF_LOBBIES_DIR=/tmp/sf-lobbies
-Environment=SF_MAX_LOBBIES=6
+# Doubles as the launch-lobby.sh port-range width (BASE_PORT..BASE_PORT+N-1).
+# With 3 always-on static lobbies (MAIN/COMP/CASUAL) + reserved 1338-1340, keep
+# this high enough to leave free ports for in-game CREATE (e.g. 8 → 1343+ free).
+Environment=SF_MAX_LOBBIES=8
 Environment=SF_ROUTER_STATS=http://127.0.0.1:8081/router/stats
 # Unbuffer so reaper/create log lines reach the journal immediately.
 Environment=PYTHONUNBUFFERED=1
