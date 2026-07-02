@@ -32,17 +32,58 @@ var selectMagic = []byte{'S', 'F', 'R', 'T', 'R', 0x00, 0x00, 0x01}
 const (
 	opSelect byte = 0x01
 	opLeave  byte = 0x02
+	opList   byte = 0x03 // client → router: "send me the lobby list" (code empty)
 	opAck    byte = 0x81
+	opListResp byte = 0x83 // router → client: the lobby list (see buildListResp)
 
 	ackOK         byte = 0x00
 	ackNoSuchCode byte = 0x01
 
 	maxCodeLen = 16
 
-	// minimum SELECT/LEAVE length: magic(8) + op(1) + codeLen(1) + nonce(4),
+	// minimum SELECT/LEAVE/LIST length: magic(8) + op(1) + codeLen(1) + nonce(4),
 	// with a zero-length code.
 	minControlLen = 8 + 1 + 1 + 4
 )
+
+// LobbyInfo is one entry in a LIST response.
+type LobbyInfo struct {
+	Code     string
+	Players  byte
+	Capacity byte
+}
+
+// buildListResp builds a LIST response (router → client), letting the in-game
+// browser list lobbies over the same UDP port it connects to — no HTTP/website.
+//
+//	[8] magic
+//	[1] op = opListResp
+//	[4] nonce (echoed)
+//	[1] count
+//	count × { [1] codeLen  [N] code  [1] players  [1] capacity }
+func buildListResp(nonce uint32, lobbies []LobbyInfo) []byte {
+	out := make([]byte, 0, 14+len(lobbies)*(2+maxCodeLen))
+	out = append(out, selectMagic...)
+	out = append(out, opListResp)
+	var n [4]byte
+	binary.LittleEndian.PutUint32(n[:], nonce)
+	out = append(out, n[:]...)
+	cnt := len(lobbies)
+	if cnt > 255 {
+		cnt = 255
+	}
+	out = append(out, byte(cnt))
+	for i := 0; i < cnt; i++ {
+		code := lobbies[i].Code
+		if len(code) > maxCodeLen {
+			code = code[:maxCodeLen]
+		}
+		out = append(out, byte(len(code)))
+		out = append(out, []byte(code)...)
+		out = append(out, lobbies[i].Players, lobbies[i].Capacity)
+	}
+	return out
+}
 
 // isControl reports whether data is a router control datagram (SELECT/LEAVE).
 func isControl(data []byte) bool {

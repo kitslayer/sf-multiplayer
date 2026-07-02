@@ -52,6 +52,7 @@ func main() {
 		reg.StartRefresh(regStop) // keep the cache warm off the relay hot path
 		r, err = router.NewRouting(*listen, reg.Lookup)
 		if err == nil {
+			r.SetLister(reg.Codes) // enables the LIST control op (in-game browser)
 			log.Printf("[router] routing mode: registry=%s ttl=%s", *registry, *regTTL)
 		}
 	case *backend != "":

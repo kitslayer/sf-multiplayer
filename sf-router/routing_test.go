@@ -1,6 +1,8 @@
 package router
 
 import (
+	"bytes"
+	"encoding/binary"
 	"net"
 	"sync"
 	"testing"
@@ -401,6 +403,78 @@ func TestDefaultThenSelectSwitches(t *testing.T) {
 	}
 	if got := sendRecv(t, cli, "b"); got != "C:b" {
 		t.Errorf("after SELECT COMP got %q, want C:b (switch from default failed)", got)
+	}
+}
+
+// TestListReturnsLobbies covers the LIST control op: a client asks the router
+// for the lobby list over the same UDP port (no HTTP), and gets back each live
+// code with a player count derived from flow stats. This is what the in-game
+// browser uses instead of the HTTP endpoint.
+func TestListReturnsLobbies(t *testing.T) {
+	echoMain, stopM := startEcho(t, "M")
+	defer stopM()
+	resolve := func(code string) (*net.UDPAddr, bool) {
+		if code == "MAIN" {
+			return echoMain, true
+		}
+		return nil, false
+	}
+	r, err := NewRouting("127.0.0.1:0", resolve)
+	if err != nil {
+		t.Fatalf("NewRouting: %v", err)
+	}
+	r.SetLister(func() []string { return []string{"COMP", "MAIN"} })
+	go func() { _ = r.Run() }()
+	defer r.Close()
+	time.Sleep(50 * time.Millisecond)
+	cli, err := net.DialUDP("udp", nil, r.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer cli.Close()
+
+	// Give MAIN a flow so its player count is > 0.
+	selectAndWaitAck(t, cli, "MAIN", 1)
+	sendRecv(t, cli, "x")
+
+	// Ask for the list (LIST reuses the control framing with an empty code).
+	if _, err := cli.Write(buildSelect(opList, "", 7)); err != nil {
+		t.Fatalf("write LIST: %v", err)
+	}
+	_ = cli.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 512)
+	n, err := cli.Read(buf)
+	if err != nil {
+		t.Fatalf("read LIST resp: %v", err)
+	}
+	if n < 14 || !bytes.Equal(buf[:8], selectMagic) || buf[8] != opListResp {
+		t.Fatalf("bad LIST resp header (n=%d)", n)
+	}
+	if got := binary.LittleEndian.Uint32(buf[9:13]); got != 7 {
+		t.Fatalf("nonce=%d, want 7", got)
+	}
+	count := int(buf[13])
+	if count != 2 {
+		t.Fatalf("count=%d, want 2", count)
+	}
+	players := map[string]byte{}
+	off := 14
+	for i := 0; i < count; i++ {
+		cl := int(buf[off])
+		off++
+		code := string(buf[off : off+cl])
+		off += cl
+		players[code] = buf[off] // players
+		off += 2                 // players + capacity
+	}
+	if _, ok := players["MAIN"]; !ok {
+		t.Errorf("MAIN missing from list")
+	}
+	if _, ok := players["COMP"]; !ok {
+		t.Errorf("COMP missing from list")
+	}
+	if players["MAIN"] < 1 {
+		t.Errorf("MAIN players=%d, want >=1 (it had a flow)", players["MAIN"])
 	}
 }
 

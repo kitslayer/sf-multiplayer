@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sort"
 	"sync"
 	"time"
 )
@@ -103,6 +104,11 @@ type Router struct {
 	// lobby, overriding this default). Empty = drop unselected traffic (the
 	// original strict behavior).
 	defaultCode string
+
+	// lister, when set (routing mode), returns the current live lobby codes so a
+	// LIST control datagram can answer the in-game browser over the same UDP port
+	// — no HTTP/website needed. Set once before Run; read on the (cold) LIST path.
+	lister func() []string
 
 	// maxFlowsPerIP caps concurrent flows from one source IP (0 = unlimited).
 	// Set once before Run; read under mu on the new-flow path.
@@ -292,6 +298,29 @@ func (r *Router) handleControl(cliAddr *net.UDPAddr, data []byte) {
 		r.sendAck(cliAddr, nonce, ackOK)
 		log.Printf("[router] LEAVE from %s", cliAddr)
 		return
+	case opList:
+		// Answer the in-game browser's lobby-list request over UDP (no HTTP).
+		r.mu.Lock()
+		lister := r.lister
+		r.mu.Unlock()
+		if lister == nil {
+			return // stage-0 / no registry — nothing to list
+		}
+		codes := lister()
+		sort.Strings(codes)
+		st := r.Stats() // locks r.mu internally; we hold no lock here
+		lobbies := make([]LobbyInfo, 0, len(codes))
+		for _, c := range codes {
+			players := (st.ByCode[c] + 1) / 2 // a player ≈ 2 flows (recon + game socket)
+			if players > 255 {
+				players = 255
+			}
+			lobbies = append(lobbies, LobbyInfo{Code: c, Players: byte(players), Capacity: 4})
+		}
+		if _, err := r.pub.WriteToUDP(buildListResp(nonce, lobbies), cliAddr); err != nil {
+			log.Printf("[router] LIST reply to %s failed: %v", cliAddr, err)
+		}
+		return
 	case opSelect:
 		backend, found := r.resolve(code)
 		if !found {
@@ -392,6 +421,14 @@ func (r *Router) SetMaxFlowsPerIP(n int) {
 func (r *Router) SetDefaultCode(code string) {
 	r.mu.Lock()
 	r.defaultCode = code
+	r.mu.Unlock()
+}
+
+// SetLister sets the function that returns live lobby codes for the LIST control
+// op (typically Registry.Codes). Call before Run.
+func (r *Router) SetLister(fn func() []string) {
+	r.mu.Lock()
+	r.lister = fn
 	r.mu.Unlock()
 }
 

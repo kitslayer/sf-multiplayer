@@ -37,13 +37,20 @@ namespace SFServerBrowser
     {
         public const string PluginGuid = "com.stickfightdev.server-browser";
         public const string PluginName = "SFServerBrowser";
-        public const string PluginVersion = "0.5.6";
+        public const string PluginVersion = "0.5.7";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance;
 
         // Configurable via env var; null = fail closed with a clear message.
         private string _lobbyEndpoint;
+        // In-game browsing fetches the lobby list over the sf-router's UDP LIST op
+        // (no HTTP/website). CREATE still uses _lobbyEndpoint (HTTP) for now.
+        private bool _useUdpList;
+        private string _routerHost;
+        private int _routerPort = 1338;
+        private static readonly byte[] RouterMagic = { 0x53, 0x46, 0x52, 0x54, 0x52, 0x00, 0x00, 0x01 };
+        private const byte OpList = 0x03, OpListResp = 0x83;
 
         // ---- Overlay state machine -------------------------------------------
         internal enum Tab { Browse = 0, Create = 1, Join = 2 }
@@ -137,7 +144,15 @@ namespace SFServerBrowser
                 }
             }
 
-            Log.LogInfo($"{PluginName} v{PluginVersion} starting. Endpoint: {_lobbyEndpoint}");
+            // Browse over the router's UDP LIST op (no website) whenever we're in
+            // oracle mode and SF_LOBBY_ENDPOINT wasn't set explicitly.
+            _routerHost = ResolveOracleHost();
+            _routerPort = ResolveRouterPort();
+            _useUdpList = !string.IsNullOrEmpty(_routerHost)
+                          && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("SF_LOBBY_ENDPOINT"));
+
+            Log.LogInfo($"{PluginName} v{PluginVersion} starting. List: "
+                + (_useUdpList ? $"router UDP {_routerHost}:{_routerPort}" : ("HTTP " + _lobbyEndpoint)));
             SceneManager.sceneLoaded += OnSceneLoaded;
 
             // The in-game browser/lobby overlay is the IMGUI UI (OnGUI +
@@ -247,7 +262,7 @@ namespace SFServerBrowser
             _lastFetchAt = Time.realtimeSinceStartup;
             _isFetching = true;
             _statusText = "Fetching lobbies…";
-            StartCoroutine(FetchServersCoroutine());
+            StartCoroutine(_useUdpList ? FetchServersUdpCoroutine() : FetchServersCoroutine());
         }
 
         // WebClient with a finite timeout (stock WebClient has none → a dead host
@@ -428,6 +443,83 @@ namespace SFServerBrowser
         // Resolve the oracle host from the same sources SfOracleLobbyConnect uses:
         // the -address launch arg, then SF_ORACLE_ADDRESS, then the endpoint file
         // BepInEx writes. Lets the browser auto-configure off the game's launch.
+        // ---- UDP lobby-list fetch (router LIST op — no HTTP/website) ---------
+        private static int ResolveRouterPort()
+        {
+            try
+            {
+                var args = Environment.GetCommandLineArgs();
+                for (int i = 0; i < args.Length - 1; i++)
+                    if (args[i] == "-port" && int.TryParse(args[i + 1], out var p) && p > 0) return p;
+            }
+            catch { }
+            var env = Environment.GetEnvironmentVariable("SF_ORACLE_PORT");
+            if (!string.IsNullOrEmpty(env) && int.TryParse(env.Trim(), out var ep) && ep > 0) return ep;
+            return 1338; // sf-router default front door
+        }
+
+        private static byte[] BuildListReq(uint nonce)
+        {
+            // [8]magic [1]op=OpList [1]codeLen=0 [4]nonce (LE) — matches select.go.
+            var b = new byte[8 + 2 + 4];
+            Array.Copy(RouterMagic, b, 8);
+            b[8] = OpList; b[9] = 0;
+            b[10] = (byte)(nonce & 0xFF); b[11] = (byte)((nonce >> 8) & 0xFF);
+            b[12] = (byte)((nonce >> 16) & 0xFF); b[13] = (byte)((nonce >> 24) & 0xFF);
+            return b;
+        }
+
+        private IEnumerator FetchServersUdpCoroutine()
+        {
+            string host = _routerHost; int port = _routerPort;
+            byte[] resp = null; string err = null; int t0 = Environment.TickCount;
+            var th = new System.Threading.Thread(new System.Threading.ThreadStart(delegate
+            {
+                try
+                {
+                    using (var udp = new System.Net.Sockets.UdpClient())
+                    {
+                        udp.Client.ReceiveTimeout = 3000;
+                        IPAddress ip;
+                        if (!IPAddress.TryParse(host, out ip)) ip = Dns.GetHostAddresses(host)[0];
+                        var ep = new IPEndPoint(ip, port);
+                        var req = BuildListReq((uint)Environment.TickCount);
+                        udp.Send(req, req.Length, ep);
+                        var from = new IPEndPoint(IPAddress.Any, 0);
+                        resp = udp.Receive(ref from);
+                    }
+                }
+                catch (Exception e) { err = e.Message; }
+            }));
+            th.IsBackground = true; th.Start();
+            while (th.IsAlive) yield return null;
+
+            _isFetching = false;
+            if (err != null) { _statusText = "Router unreachable: " + err; _servers.Clear(); _pingMs = -1; yield break; }
+            _pingMs = Mathf.Max(0, Environment.TickCount - t0);
+            ParseServersUdp(resp);
+        }
+
+        private void ParseServersUdp(byte[] resp)
+        {
+            _servers.Clear();
+            if (resp == null || resp.Length < 14) { _statusText = "No reply from router."; return; }
+            for (int i = 0; i < 8; i++) if (resp[i] != RouterMagic[i]) { _statusText = "Bad LIST reply."; return; }
+            if (resp[8] != OpListResp) { _statusText = "Bad LIST reply."; return; }
+            int count = resp[13];
+            int off = 14;
+            for (int i = 0; i < count && off < resp.Length; i++)
+            {
+                int cl = resp[off]; off++;
+                if (off + cl + 2 > resp.Length) break;
+                string code = Encoding.ASCII.GetString(resp, off, cl); off += cl;
+                int players = resp[off]; off++;
+                int cap = resp[off]; off++;
+                _servers.Add(new ServerEntry { Code = code, Host = "", Port = _routerPort, Players = players, Capacity = cap, Alive = true, Started = "" });
+            }
+            _statusText = _servers.Count == 0 ? "No lobbies running." : (_servers.Count + " lobby(ies) online.");
+        }
+
         private static string ResolveOracleHost()
         {
             try

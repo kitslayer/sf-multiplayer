@@ -1,3 +1,28 @@
+# What's new — 2026-07-01 (list over UDP): in-game lobby list with no website — browser 0.5.7 + router LIST op
+
+Per "I don't want a whole separate website for lobbies — just simple in-game
+browsing": the browser now fetches the lobby list over the **sf-router's UDP port**
+(the same one it connects to), not the HTTP `:8080` endpoint. No website, no extra
+port-forward for browsing.
+
+- **Router (`sf-router`):** new `LIST` control op (`0x03`, alongside SELECT/LEAVE).
+  Client sends LIST over 1338 → router replies with each live lobby's code + player
+  count (from flow stats, ≈2 flows/player) + capacity, built from its registry.
+  Touches `select.go` (framing + `buildListResp`), `router.go` (`lister` + handler),
+  `main.go` (`SetLister(reg.Codes)`), + `TestListReturnsLobbies`. `go test -race`
+  green. **Deployed to `.115` + verified live** — a LIST datagram returns
+  `MAIN + COMP + CASUAL`.
+- **Browser (`SFServerBrowser` 0.5.7):** BROWSE fetches via UDP LIST to the router
+  (`FetchServersUdpCoroutine`/`ParseServersUdp`) when in oracle mode and
+  `SF_LOBBY_ENDPOINT` isn't set explicitly; HTTP only when an endpoint is given.
+
+The TCP-8080 dependency is gone **for browsing**. CREATE still uses the HTTP control
+plane — moving create/restart onto the same UDP control channel (spawn/restart
+lobbies in-game, no website) is the next step. Shipped browser **0.5.7** into the
+installer + `dist/` + `1-click/` (sha-identical). Client unchanged at 0.6.5.
+
+---
+
 # What's new — 2026-07-01 (later still): in-game SERVER BROWSER fixed end-to-end (router + GUI + multi-lobby)
 
 The in-game server browser now lists joinable lobbies and joins them through one
