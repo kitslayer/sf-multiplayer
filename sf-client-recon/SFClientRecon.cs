@@ -63,7 +63,7 @@ namespace SFClientRecon
     {
         public const string PluginGuid = "com.stickfightdev.client-recon";
         public const string PluginName = "SFClientRecon";
-        public const string PluginVersion = "0.6.3";
+        public const string PluginVersion = "0.6.4";
 
         internal static ManualLogSource Log;
         // Verbose per-tick diagnostics OFF by default — they spammed the log and
@@ -277,6 +277,9 @@ namespace SFClientRecon
             InstallClientTerrainPatches();
             InstallOracleLobbyConnectPatches();
             InstallNsoClientPushPatches();
+            // Defensive NetworkSyncableObject burst/NaN guard (credit: z7572/NaNFixer).
+            // Runs regardless of connect mode; SF_NANGUARD=0 disables it.
+            InstallNsoNaNGuardPatches();
             // Per-type ONLY (transpiles the 3 gimmick types' Update; never touches
             // crate NSOs). The earlier "imposibles de mover" was the 0.7 friction,
             // not this patch — friction is back to normal now, so re-enabled.

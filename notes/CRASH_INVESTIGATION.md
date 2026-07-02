@@ -17,6 +17,22 @@ Two findings from the 2026-06-10 review change the picture:
 
 These contain the symptom; the root cause (the +Inf accumulator) is still open. Fresh `crash.dmp` + `error.log` land daily in `~/sf-oracle/install/2026-*/` on `.115` — analyze one with the float-timer hypothesis.
 
+## Update 2026-07-01 — a confirmed +Inf source in this codebase, and a correction to the "accumulator" framing
+
+Prompted by the SF mod [z7572/NaNFixer](https://github.com/z7572/NaNFixer), two refinements to hypothesis (2) above:
+
+1. **There is a *verified* +Inf-manufacturing site in this exact codebase.** `NetworkSyncableObject.SyncObjectState` computes `m_PositionSpeed = distance / m_TimeBetweenPackages` (`:431`) and `m_RotationSpeed = angle / m_TimeBetweenPackages` (`:433`), where `m_TimeBetweenPackages = Time.time - m_TimeOfLastPackage` (`:427`). When the denominator → 0 (two updates for one object in the same frame), both fields become **float +Inf**. NaNFixer independently reverse-engineered this and it matches our decompile exactly. So the +Inf is no longer purely hypothetical — we have a concrete mechanism that writes +Inf into persistent per-object float fields.
+
+2. **Correction: the +Inf cannot come from *linear* accumulation.** float max ≈ 3.4e38; adding a ~16 ms frame-time per frame reaches only ~86,400 after 24 h (~5.2 M frames) — you'd need ~1e31 years to sum to +Inf. So "a float accumulator reaches +Inf after ~24 h" is not reachable by *addition*. A float +Inf must come from a **division by (near-)zero** or geometric growth — exactly the `x / Δt` shape above. This redirects the hunt: stop looking for a slowly-growing timer; look for a division whose denominator is a `Time.time` difference or a vector magnitude/normalize that can hit ~0.
+
+**Aggravating factor (not a clean 24 h explainer):** `Time.time` is float32, so its ULP grows with magnitude (≈7.8 ms at 24 h; a full 60 fps frame-gap only collapses to exactly 0 around ~3 days of uptime). Same-frame bursts are the uptime-*independent* trigger; precision decay just makes near-coincident updates round to 0 more readily as uptime climbs. It plausibly *worsens* the odds over a long-running process but does not by itself pin the ~24 h period.
+
+**Caveat — this specific method is listener-side.** `SyncObjectState` runs only when `!mHasControl`. Our host forces static `mHasControl = true` (so `LerpLocalDummy` is gated off at `:239`), which means the host likely does **not** run `SyncObjectState` for its own objects — so this exact method is probably not the host's crash site. The transferable lead is the *class* of bug: audit **host-side** float divisions whose denominator is (a) a `Time.time` delta or (b) a vector magnitude/normalize that can be ~0 — candidates: host send-side timing (`SendNewObjectStatePackage`/`TickSyncPos`), `SFBoxFix`'s server-auth Rigidbody forces, and the snapshot serializer.
+
+**Next-dump actions:** (a) enumerate those host-side divisions and add a `Finite()`/back-date guard at each (cheap; mirrors the client guard just shipped in `sf-client-recon/SfNsoNaNGuard.cs`); (b) in the next `crash.dmp`, look for float fields holding `0x7f800000` (+Inf) in live NSO/box instances, and check whether an uptime-derived counter is being used to index a structure near the faulting `[eax]`.
+
+(Client side, the fix is already in — `sf-client-recon/SfNsoNaNGuard.cs`. It does **not** touch the host; the host track stays open.)
+
 ## TL;DR
 
 The oracle is crashing **deterministically at the same x86 instruction address** during gameplay. Same bytes, same access violation, 5 separate crash dirs match perfectly. It's not a race; it's a code path. **Cause unknown without symbols.** Until we know more, do NOT speculate-patch — every revert and partial-fix this session has caused other regressions.

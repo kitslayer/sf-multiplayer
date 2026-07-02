@@ -1,3 +1,58 @@
+# What's new — 2026-07-01 (later): client NaN/+Inf "vanish" guard for network-synced objects
+
+Added a defensive guard to `SFClientRecon` against the `NetworkSyncableObject`
+NaN/+Inf cascade that makes boxes/platforms/barrels/lasers vanish (and eventually
+crashes the client) on a laggy link. **Prompted by [z7572/NaNFixer](https://github.com/z7572/NaNFixer)**
+— a SF modder's plugin that nails the exact bug. Credited in-source and
+independently reimplemented (NaNFixer ships without a license, so no code was copied).
+
+**The bug** (verified against our decompile, `NetworkSyncableObject.SyncObjectState`):
+- `:427 m_TimeBetweenPackages = Time.time - m_TimeOfLastPackage`
+- `:431 m_PositionSpeed = distance / m_TimeBetweenPackages`  ← +Inf when Δt≈0
+- `:433 m_RotationSpeed = angle / m_TimeBetweenPackages`
+
+When two object-sync packets for the same object land in one frame (packet pile-up),
+Δt≈0 → both speeds become **float +Inf**; the next `LerpLocalDummy` (`:272`) applies
+`+Inf·dt` to the transform, the object flies to infinity and
+`m_DistanceToTravel.normalized` goes NaN — self-perpetuating every frame, so it never
+recovers.
+
+**The fix** (`sf-client-recon/SfNsoNaNGuard.cs`, patches `SyncObjectState`):
+1. prefix — back-date the timestamp on a same-frame burst so the divisions see a sane
+   interval instead of ~0.
+2. postfix — replace a degenerate zero up-vector (which would make
+   `Quaternion.LookRotation` NaN) with `Vector3.up`.
+3. postfix — if the transform already went NaN, snap it back to the last legit network
+   position (`m_EndPos`), reset rotation, and zero the interpolators so the next lerp
+   stops re-poisoning. Logging is bounded (a 5 s summary) so a storm can't flood the log.
+
+Runs unconditionally; `SF_NANGUARD=0` disables it.
+
+**Scope / what it does NOT fix:** client-only. Our authoritative host forces static
+`mHasControl=true`, which gates `LerpLocalDummy` off (`:239` needs `!mHasControl`), so the
+host is untouched by this guard. But it fills a real gap our existing inbound NaN/Inf
+validators miss: those reject *bad packet data*, whereas this stops the game's own math
+manufacturing +Inf from two *valid* packets. It also sharpened the ~24h oracle-crash
+lead — see the 2026-07-01 update in [`notes/CRASH_INVESTIGATION.md`](notes/CRASH_INVESTIGATION.md).
+
+**Shipped:** bumped `SFClientRecon` 0.6.3 → **0.6.4**, rebuilt clean (net35, 0 warnings),
+and propagated the DLL into `dist/`, `1-click-install/files/`, and the installer zip's
+`StickFight-DropIn/BepInEx/plugins/` payload (updated that single entry in place; browser
+0.5.5 + patched `Assembly-CSharp` unchanged). All four copies are sha256-identical.
+**Statically verified the shipped DLL**: version `0.6.4`, the guard methods, and — the one
+compiler-invisible risk — all six reflection field-name literals (`m_TimeOfLastPackage`,
+`m_TimeBetweenPackages`, `m_TargetAngle`, `m_DistanceToTravel`, `m_PositionSpeed`,
+`m_EndPos`) are present and exactly match the decompiled `NetworkSyncableObject` field
+names, so `AccessTools.Field` will resolve them live.
+
+**Still owed** (one runtime confirmation): an in-game load-check for the `[nan-guard] active`
+line in `BepInEx/LogOutput.log` (proves the patch attaches, not just that the strings
+shipped) + a real packet-burst/NaN repro. Left un-launched here rather than spin up a full
+Proton session unprompted — the guard fails safe if a field ever fails to resolve, so
+players are never worse off than today.
+
+---
+
 # What's new — 2026-07-01 deploy: host 0.4.5 to `.115` + installer refresh (client 0.6.3 / browser 0.5.5)
 
 Shipped everything that had accumulated on `main` — the 2026-06-30 review-sweep
