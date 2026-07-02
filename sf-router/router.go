@@ -94,6 +94,16 @@ type Router struct {
 	resolve       func(code string) (*net.UDPAddr, bool)
 	requireSelect bool
 
+	// defaultCode, when non-empty (routing mode only), routes datagrams from a
+	// client that has NO SELECT binding to this lobby code instead of dropping
+	// them. This lets a client that never SELECTs still reach a lobby: an old
+	// direct-connect client repointed at the router, and — importantly — the
+	// patched-DLL game socket in the brief window before its co-located recon
+	// socket's SELECT lands (the recon SELECT then pins the IP to the chosen
+	// lobby, overriding this default). Empty = drop unselected traffic (the
+	// original strict behavior).
+	defaultCode string
+
 	// maxFlowsPerIP caps concurrent flows from one source IP (0 = unlimited).
 	// Set once before Run; read under mu on the new-flow path.
 	maxFlowsPerIP int
@@ -250,6 +260,14 @@ func (r *Router) effectiveBackend(cliAddr *net.UDPAddr) (*net.UDPAddr, string, b
 		b = r.ipBind[cliAddr.IP.String()]
 	}
 	if b == nil {
+		// No SELECT binding. Fall back to the default lobby if one is configured
+		// (re-resolved every time, so a restarted default lobby is never served
+		// from a stale address); otherwise drop and wait for a SELECT.
+		if r.defaultCode != "" {
+			if backend, ok := r.resolve(r.defaultCode); ok {
+				return backend, r.defaultCode, true
+			}
+		}
 		return nil, "", false
 	}
 	backend, ok := r.resolve(b.code)
@@ -366,6 +384,14 @@ func (r *Router) newFlow(cliAddr, backend *net.UDPAddr, code string) (*flow, err
 func (r *Router) SetMaxFlowsPerIP(n int) {
 	r.mu.Lock()
 	r.maxFlowsPerIP = n
+	r.mu.Unlock()
+}
+
+// SetDefaultCode sets the lobby code that clients with no SELECT binding are
+// routed to (routing mode only; "" = drop unselected traffic). Call before Run.
+func (r *Router) SetDefaultCode(code string) {
+	r.mu.Lock()
+	r.defaultCode = code
 	r.mu.Unlock()
 }
 

@@ -34,6 +34,7 @@ func main() {
 	stats := flag.String("stats", "", "optional HTTP addr for GET /router/stats (e.g. 127.0.0.1:8081)")
 	regTTL := flag.Duration("registry-ttl", 2*time.Second, "lobby registry cache TTL")
 	maxPerIP := flag.Int("max-flows-per-ip", 64, "max concurrent flows from one source IP (0 = unlimited)")
+	defaultCode := flag.String("default", "", "routing mode: lobby code to route clients that never SELECT (e.g. MAIN); empty = drop unselected traffic")
 	flag.Parse()
 
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
@@ -62,6 +63,10 @@ func main() {
 		log.Fatalf("[router] startup failed: %v", err)
 	}
 	r.SetMaxFlowsPerIP(*maxPerIP)
+	if *defaultCode != "" {
+		r.SetDefaultCode(*defaultCode)
+		log.Printf("[router] default lobby for unselected clients: %q", *defaultCode)
+	}
 
 	if *stats != "" {
 		go serveStats(*stats, r)

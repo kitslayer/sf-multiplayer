@@ -324,6 +324,86 @@ func TestFlowTornDownWhenLobbyGone(t *testing.T) {
 	}
 }
 
+// TestDefaultRoutesUnselectedTraffic covers the default-lobby fallback: with a
+// default code set, a client that never SELECTs still reaches that lobby (the
+// no-SELECT path that TestUnselectedTrafficDropped drops when no default is set).
+// This is what lets the router take the public port without breaking clients
+// that connect directly and never SELECT, and the patched-DLL game socket.
+func TestDefaultRoutesUnselectedTraffic(t *testing.T) {
+	echoMain, stopM := startEcho(t, "M")
+	defer stopM()
+	resolve := func(code string) (*net.UDPAddr, bool) {
+		if code == "MAIN" {
+			return echoMain, true
+		}
+		return nil, false
+	}
+	r, err := NewRouting("127.0.0.1:0", resolve)
+	if err != nil {
+		t.Fatalf("NewRouting: %v", err)
+	}
+	r.SetDefaultCode("MAIN")
+	go func() { _ = r.Run() }()
+	defer r.Close()
+	time.Sleep(50 * time.Millisecond)
+	cli, err := net.DialUDP("udp", nil, r.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer cli.Close()
+
+	// No SELECT — with a default lobby, traffic routes to MAIN instead of dropping.
+	if got := sendRecv(t, cli, "ping"); got != "M:ping" {
+		t.Errorf("unselected-with-default got %q, want M:ping", got)
+	}
+	time.Sleep(30 * time.Millisecond)
+	if got := r.Stats().ByCode["MAIN"]; got != 1 {
+		t.Errorf("ByCode[MAIN] = %d, want 1 (default-routed flow)", got)
+	}
+}
+
+// TestDefaultThenSelectSwitches proves a client that starts on the default lobby
+// (no SELECT) can then SELECT a different lobby and switch cleanly — the
+// browse-then-join path for a client that connected without picking first.
+func TestDefaultThenSelectSwitches(t *testing.T) {
+	echoMain, stopM := startEcho(t, "M")
+	defer stopM()
+	echoComp, stopC := startEcho(t, "C")
+	defer stopC()
+	resolve := func(code string) (*net.UDPAddr, bool) {
+		switch code {
+		case "MAIN":
+			return echoMain, true
+		case "COMP":
+			return echoComp, true
+		}
+		return nil, false
+	}
+	r, err := NewRouting("127.0.0.1:0", resolve)
+	if err != nil {
+		t.Fatalf("NewRouting: %v", err)
+	}
+	r.SetDefaultCode("MAIN")
+	go func() { _ = r.Run() }()
+	defer r.Close()
+	time.Sleep(50 * time.Millisecond)
+	cli, err := net.DialUDP("udp", nil, r.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer cli.Close()
+
+	if got := sendRecv(t, cli, "a"); got != "M:a" {
+		t.Fatalf("default got %q, want M:a", got)
+	}
+	if st := selectAndWaitAck(t, cli, "COMP", 1); st != ackOK {
+		t.Fatalf("SELECT COMP status = %#x, want ok", st)
+	}
+	if got := sendRecv(t, cli, "b"); got != "C:b" {
+		t.Errorf("after SELECT COMP got %q, want C:b (switch from default failed)", got)
+	}
+}
+
 // sendRecv writes payload and returns the string reply (2s deadline).
 func sendRecv(t *testing.T, cli *net.UDPConn, payload string) string {
 	t.Helper()

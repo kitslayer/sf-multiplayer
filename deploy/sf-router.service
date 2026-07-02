@@ -11,7 +11,11 @@ Group=miles
 # Public UDP front door on :1338 (firewall-open). Routes each client to the
 # backend SF.exe for the lobby code it SELECTed, per the /tmp/sf-lobbies
 # registry. Backends stay on loopback; only this port is exposed.
-ExecStart=%h/sf-router -listen 0.0.0.0:1338 -registry /tmp/sf-lobbies -stats 127.0.0.1:8081
+# -default MAIN: a client that never SELECTs (an old direct-connect client
+# repointed here, or the patched-DLL game socket before its recon socket's
+# SELECT lands) is routed to MAIN instead of dropped, so the router is safe to
+# use as the single front door.
+ExecStart=%h/sf-router -listen 0.0.0.0:1338 -registry /tmp/sf-lobbies -stats 127.0.0.1:8081 -default MAIN
 Restart=on-failure
 RestartSec=3
 StartLimitIntervalSec=300
