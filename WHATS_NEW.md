@@ -1,3 +1,56 @@
+# What's new — 2026-07-01 (later still): in-game SERVER BROWSER fixed end-to-end (router + GUI + multi-lobby)
+
+The in-game server browser now lists joinable lobbies and joins them through one
+public port. Two reported problems fixed: the router "never worked," and the GUI
+"was all fucked up."
+
+**Why the router never worked (client wiring).** The whole single-port stack was
+built + verified live on 2026-05-31 (router UDP 1338, serve-lobbies TCP 8080,
+backends on loopback), but the *shipped client connects to `-port 1337`* — MAIN
+direct, bypassing the router — so its SELECTs (to switch lobbies) hit the MAIN
+oracle, which ignores them. The client was otherwise fully wired (`SelectedLobbyCode`
+defaults to `MAIN`, resends the SELECT ~5 Hz until snapshots flow, switches via
+`RequestJoinLobby`). Fix = repoint client + installer to the router on **1338**:
+- `SfOracleLobbyConnect.cs`: default oracle port 1337 → **1338**.
+- Installer/launch scripts (`install.ps1`, `README.txt`, `launch-sf-player.sh`,
+  `dist/sflauncher.sh`, `dist/install-sf-client.*`): `-port 1337` → **1338**.
+- Router `-default MAIN` (prior commit) so a no-SELECT client / the patched-DLL game
+  socket still lands in MAIN — deployed + verified live. `-port 1337` still reaches
+  MAIN directly as a router-bypass fallback.
+
+**Why the GUI was "all fucked up" (two overlays at once).** `SFServerBrowser` shipped
+*two* full UIs — the polished IMGUI one (`OnGUI`/`ServerBrowserScreens`) AND a uGUI
+`LobbyOverlay`, both instantiated in `Awake`, both openable, with the uGUI one
+spinning up its own `EventSystem`. They drew on top of each other. Fix: stop
+instantiating the uGUI `LobbyOverlay` (parked, not deleted); keep the IMGUI browser
+(the one the code itself calls "the only runtime UI we can ship"). **F2** now opens it
+(that hotkey lived on the parked uGUI component); the on-screen PLAY ONLINE button
+still works.
+
+**Multi-lobby, live.** Stood up two more backends on `.115` — `COMP` (1341) + `CASUAL`
+(1342) — so the list isn't just MAIN. Verified from a second host: `SELECT COMP` →
+ACK OK; router `byCode {"COMP":2}` (recon + game socket both routed via the per-IP
+binding); `GET /lobbies` lists MAIN + COMP + CASUAL with live player counts.
+
+**Shipped:** client **0.6.5** + browser **0.5.6**, rebuilt clean (net35, 0 warnings),
+propagated into `dist/`, `1-click-install/files/`, and the installer zip (4 entries
+updated in place; all copies sha256-identical). Installer launch args are now
+`-address 69.53.117.43 -port 1338`.
+
+**Still owed:**
+- **Public LIST transport.** BROWSE fetches `http://<server>:8080/lobbies`, but the
+  home-router TCP-8080 forward is gone (UDP 1337–1340 + the router stay forwarded, so
+  *joining* works; the *list* resolves only on the LAN). Either re-add the 8080
+  forward, or — cleaner, no external dep — serve the list over the router's UDP port
+  (follow-up).
+- **Always-on persistence.** COMP/CASUAL are `launch-lobby.sh` backends (ephemeral —
+  survive until reboot or the 24 h empty-reaper). Making them systemd-managed +
+  reaper-exempt like MAIN is the "always-on" follow-up.
+- **In-game visual check.** The one-UI fix is verified by logic + a clean build, not a
+  Proton screenshot (headless VM) — worth an eyeball on a real client.
+
+---
+
 # What's new — 2026-07-01 (later): client NaN/+Inf "vanish" guard for network-synced objects
 
 Added a defensive guard to `SFClientRecon` against the `NetworkSyncableObject`

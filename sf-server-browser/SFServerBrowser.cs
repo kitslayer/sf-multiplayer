@@ -37,7 +37,7 @@ namespace SFServerBrowser
     {
         public const string PluginGuid = "com.stickfightdev.server-browser";
         public const string PluginName = "SFServerBrowser";
-        public const string PluginVersion = "0.5.5";
+        public const string PluginVersion = "0.5.6";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance;
@@ -140,24 +140,22 @@ namespace SFServerBrowser
             Log.LogInfo($"{PluginName} v{PluginVersion} starting. Endpoint: {_lobbyEndpoint}");
             SceneManager.sceneLoaded += OnSceneLoaded;
 
-            // The native uGUI lobby overlay (native-uGUI style) lives on its own
-            // GameObject so it survives scene loads. Toggle with F2 / Tab.
+            // The in-game browser/lobby overlay is the IMGUI UI (OnGUI +
+            // ServerBrowserScreens), opened with F2 or the on-screen PLAY ONLINE
+            // button. The older uGUI LobbyOverlay is intentionally NOT instantiated:
+            // running both drew two overlapping overlays (and the uGUI one spun up a
+            // second EventSystem), which was the "GUI all fucked up" report. One UI now.
             try
             {
-                var go = new GameObject("ALKALobbyOverlay");
-                UnityEngine.Object.DontDestroyOnLoad(go);
-                _lobbyUi = go.AddComponent<LobbyOverlay>();
-                _lobbyUi.Owner = this;
-
                 var sb = new GameObject("ALKAScoreboard");
                 UnityEngine.Object.DontDestroyOnLoad(sb);
                 _scoreUi = sb.AddComponent<Scoreboard>();
                 _scoreUi.Owner = this;
             }
-            catch (Exception e) { Log.LogWarning($"{PluginName}: lobby overlay init failed: {e.Message}"); }
+            catch (Exception e) { Log.LogWarning($"{PluginName}: scoreboard init failed: {e.Message}"); }
         }
 
-        internal LobbyOverlay _lobbyUi;
+        // LobbyOverlay (uGUI) is parked — see Awake. The IMGUI overlay is the UI.
         internal Scoreboard _scoreUi;
 
         private void OnSceneLoaded(Scene s, LoadSceneMode m)
@@ -183,6 +181,14 @@ namespace SFServerBrowser
 
             if (Input.GetKeyDown(KeyCode.F3) && _currentSceneName != "MainScene")
                 _showHud = !_showHud;
+
+            // F2 toggles the browser/lobby overlay (menu or match) — same overlay
+            // the on-screen PLAY ONLINE button opens. (Was on the parked uGUI UI.)
+            if (Input.GetKeyDown(KeyCode.F2))
+            {
+                _overlayOpen = !_overlayOpen;
+                if (_overlayOpen) { _tab = Tab.Browse; _focusJoinField = false; RefreshServers(); }
+            }
 
             // Refresh the F3 HUD roster at 2Hz (mirrors the uGUI overlay's _nextPoll).
             // GetConnectedPlayers does heavy reflection and OnGUI fires several times

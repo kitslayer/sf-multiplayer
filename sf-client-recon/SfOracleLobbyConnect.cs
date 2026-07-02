@@ -31,14 +31,18 @@ namespace SFClientRecon
 
         internal static int OracleServerPort
         {
-            get { ResolveOracleEndpoint(); return _resolvedOraclePort > 0 ? _resolvedOraclePort : 1337; }
+            get { ResolveOracleEndpoint(); return _resolvedOraclePort > 0 ? _resolvedOraclePort : 1338; }
         }
 
         internal static void ResolveOracleEndpoint()
         {
             if (_endpointResolved) return;
             _endpointResolved = true;
-            _resolvedOraclePort = 1337;
+            // Default to the sf-router front door (1338), not MAIN-direct (1337).
+            // The router SELECT-routes to the chosen lobby (and -default MAIN routes
+            // no-SELECT traffic to MAIN), so browsing/switching works. -port 1337
+            // still reaches MAIN directly as a router-bypass fallback.
+            _resolvedOraclePort = 1338;
 
             var args = Environment.GetCommandLineArgs();
             for (int i = 0; i < args.Length - 1; i++)

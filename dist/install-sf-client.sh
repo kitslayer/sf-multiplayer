@@ -85,7 +85,7 @@ md5sum "$SF_PATH/BepInEx/plugins/SFHeadlessHost.dll" "$SF_PATH/BepInEx/plugins/S
 echo
 echo "[3/3] Set Steam Launch Options for Stick Fight: The Game:"
 echo
-echo "    WINEDLLOVERRIDES=\"winhttp=n,b\" %command% -address SERVER_IP -port 1337"
+echo "    WINEDLLOVERRIDES=\"winhttp=n,b\" %command% -address SERVER_IP -port 1338"
 echo
 echo "(Replace SERVER_IP with your server's address, e.g. 69.53.117.43)"
 echo

@@ -8,7 +8,7 @@ set -u
 PROTON="${SFHEADLESS_PROTON:-$HOME/.local/share/Steam/steamapps/common/Proton - Experimental/proton}"
 PREFIX="${SF_PLAYER_PREFIX:-$HOME/sf-player-prefix}"
 HOST="${SF_HOST:-127.0.0.1}"
-PORT="${SF_PORT:-1337}"
+PORT="${SF_PORT:-1338}"
 
 mkdir -p "$PREFIX"
 export STEAM_COMPAT_CLIENT_INSTALL_PATH="$HOME/.local/share/Steam"

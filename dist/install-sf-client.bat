@@ -131,7 +131,7 @@ echo [3/3] ALMOST DONE — set Steam Launch Options:
 echo.
 echo   1. Open Steam, right-click Stick Fight: The Game
 echo   2. Properties... -^> General -^> Launch Options
-echo   3. Paste:   -address SERVER_IP -port 1337
+echo   3. Paste:   -address SERVER_IP -port 1338
 echo      (replace SERVER_IP with your server's address, e.g. 69.53.117.43)
 echo   4. Close the Properties window — Steam saves automatically
 echo   5. Click Play. You'll connect to the server.

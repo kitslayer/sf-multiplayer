@@ -71,7 +71,7 @@ Copy-Item (Join-Path $Drop '*') $Sf -Recurse -Force
 Write-Host '      OK  BepInEx + plugins + patched Assembly-CSharp installed.' -ForegroundColor Green
 
 Write-Host '[4/4] Launch options + desktop shortcut...' -ForegroundColor Cyan
-$launchArgs = '-address 69.53.117.43 -port 1337'
+$launchArgs = '-address 69.53.117.43 -port 1338'
 $bat = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Play-StickFight.bat'
 @"
 @echo off

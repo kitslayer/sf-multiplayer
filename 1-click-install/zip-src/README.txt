@@ -48,7 +48,7 @@ Contents:
         belongs (winhttp.dll, doorstop_config.ini, BepInEx\...,
         StickFight_Data\...).
   6) (Optional) In Steam -> Stick Fight -> Properties -> Launch
-     Options, paste:   -address 69.53.117.43 -port 1337
+     Options, paste:   -address 69.53.117.43 -port 1338
 
 -------------------------------------------------------------------
   HOW TO PLAY
@@ -76,7 +76,7 @@ Contents:
      and re-run the installer.
 
   Stuck on "Connecting to the server..."?
-   - Check the launch options have  -address 69.53.117.43 -port 1337
+   - Check the launch options have  -address 69.53.117.43 -port 1338
    - Make sure nothing blocks outbound UDP.
    - Back out to the menu and hit PLAY ONLINE again; first attempt
      after a fresh boot sometimes needs a second try.
@@ -115,6 +115,6 @@ Contents:
   - If you have MelonLoader: it coexists with BepInEx. If the online
     menu misbehaves, temporarily rename version.dll while playing on
     the oracle.
-  - Default server: 69.53.117.43 : 1337
+  - Default server: 69.53.117.43 : 1338  (single-port router → your chosen lobby)
   - Discord: kitslayer
 ===================================================================

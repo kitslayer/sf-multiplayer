@@ -129,7 +129,7 @@ echo "$LOBBY_URL" > "$LAST_URL_FILE"
 
 # ---- print Steam launch options ----
 SERVER_HOST=$(echo "$LOBBY_URL" | sed -E 's|^[a-z]+://([^:/]+).*|\1|')
-SERVER_PORT="${LOBBY_PORT:-1337}"
+SERVER_PORT="${LOBBY_PORT:-1338}"
 echo
 ok "Set Steam Launch Options for Stick Fight: The Game:"
 echo
