@@ -1,0 +1,58 @@
+# Templated always-on Stick Fight lobby behind the sf-router.
+#
+# One instance per named lobby, e.g. `sf-lobby@COMP` / `sf-lobby@CASUAL`. The
+# instance name (%i) is the lobby CODE. Per-instance port/bridge come from an
+# env file at ~/sf-oracle/lobbies/<CODE>.env, e.g.:
+#     SFHEADLESS_PORT=1341
+#     SFHEADLESS_BRIDGEPORT=11341
+#     SFHEADLESS_LOGFILE=/tmp/sf-oracle-plugin-11341.log
+#
+# This mirrors sf-oracle.service (MAIN) but parametrized: same launcher
+# (start-oracle-server.sh) + the same registrar (register-main-lobby.sh, which
+# writes <CODE>.conf with static=true so the empty-lobby reaper leaves it alone).
+# Backends bind loopback-reachable ports; only the router (1338) is public.
+#
+# Install:
+#   sudo cp deploy/sf-lobby@.service /etc/systemd/system/
+#   mkdir -p ~/sf-oracle/lobbies && printf 'SFHEADLESS_PORT=1341\nSFHEADLESS_BRIDGEPORT=11341\nSFHEADLESS_LOGFILE=/tmp/sf-oracle-plugin-11341.log\n' > ~/sf-oracle/lobbies/COMP.env
+#   sudo systemctl daemon-reload && sudo systemctl enable --now sf-lobby@COMP
+[Unit]
+Description=Stick Fight always-on lobby %i (headless oracle behind the router)
+Documentation=https://github.com/kitslayer/sf-multiplayer
+After=network-online.target sf-router.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=miles
+Group=miles
+WorkingDirectory=/home/miles/sf-oracle/install
+
+Environment=SF_ORACLE_ROOT=/home/miles/sf-oracle
+Environment=SF_LOBBY_CODE=%i
+Environment=SF_LOBBIES_DIR=/tmp/sf-lobbies
+Environment=SFHEADLESS_DEBUG=1
+Environment=SF_ANTICHEAT_ENFORCE=0
+Environment=SF_ROUND_END_DELAY=0.5
+Environment=SF_NEXT_MATCH_DELAY=2.0
+# Per-lobby port/bridge/log — one file per instance code.
+EnvironmentFile=/home/miles/sf-oracle/lobbies/%i.env
+
+ExecStart=/home/miles/sf-multiplayer/deploy/start-oracle-server.sh
+# Register in the lobby registry (static=true → reaper-exempt) + clean up on stop,
+# exactly like MAIN — register-main-lobby.sh reads SF_LOBBY_CODE/SFHEADLESS_PORT.
+ExecStartPost=/home/miles/sf-multiplayer/deploy/register-main-lobby.sh register
+ExecStopPost=/home/miles/sf-multiplayer/deploy/register-main-lobby.sh unregister
+
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+StandardOutput=journal
+StandardError=journal
+MemoryMax=2G
+TasksMax=512
+
+[Install]
+WantedBy=multi-user.target
